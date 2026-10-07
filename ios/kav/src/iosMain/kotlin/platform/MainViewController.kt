@@ -37,8 +37,7 @@ import platform.UIKit.UIApplication
 import platform.UIKit.UIColor
 import platform.UIKit.UIStatusBarStyleDarkContent
 import platform.UIKit.UIStatusBarStyleLightContent
-import platform.UIKit.UIUserInterfaceStyleDark
-import platform.UIKit.UIUserInterfaceStyleLight
+import platform.UIKit.UIUserInterfaceStyle
 import platform.UIKit.UIViewController
 import platform.UIKit.UIWindow
 import platform.UIKit.UIWindowScene
@@ -112,7 +111,7 @@ internal object IosChrome {
     fun apply(light: Boolean, background: Color) {
         val colour = UIColor(red = background.red.toDouble(), green = background.green.toDouble(), blue = background.blue.toDouble(), alpha = 1.0)
         // Overriding on the window reaches keyboards, sheets and pickers.
-        val style = if (light) UIUserInterfaceStyleLight else UIUserInterfaceStyleDark
+        val style = if (light) UIUserInterfaceStyle.UIUserInterfaceStyleLight else UIUserInterfaceStyle.UIUserInterfaceStyleDark
         for (scene in UIApplication.sharedApplication.connectedScenes) {
             (scene as? UIWindowScene)?.windows?.forEach { w ->
                 (w as? UIWindow)?.let {
