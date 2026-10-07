@@ -1,5 +1,8 @@
 package org.json
 
+import kotlin.experimental.ExperimentalObjCRefinement
+import kotlin.native.HiddenFromObjC
+
 class JSONObject() {
     internal val map = LinkedHashMap<String, Any?>()
 
@@ -89,6 +92,9 @@ class JSONObject() {
 
     companion object {
         /** Stands for an explicit JSON null, as `JSONObject.NULL` does on Android. */
+        // NULL is a C macro, so this name cannot appear in the framework's Objective-C header.
+        @OptIn(ExperimentalObjCRefinement::class)
+        @HiddenFromObjC
         val NULL: Any = object {
             override fun equals(other: Any?): Boolean = other == null || other === this
             override fun hashCode(): Int = 0
