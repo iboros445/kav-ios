@@ -36,15 +36,30 @@ Open the downloaded `Kav.ipa` in SideStore (Share → SideStore, or SideStore �
 My Apps → **+** → pick the file). First launch downloads the 176 MB offline map
 once.
 
-## 4. Updates (after Phase 5)
+## 4. Updating Kav without wasting App IDs
 
-Add Kav's source in SideStore → Sources → **+**:
+A free Apple ID allows **10 App IDs per 7 days** and **3 active apps**. An *update* costs nothing as long as the app
+keeps the same bundle ID, which Kav does (`io.github.iboros445.kav`, which SideStore extends with your team ID the same
+way every time).
+
+Do this to update:
+1. Download the new `Kav.ipa` (Actions → latest green **iOS** run → artifact **Kav-ipa**, or Releases once they exist).
+2. Open it in SideStore: **My Apps → +** and pick the file (or share the IPA to SideStore).
+3. SideStore installs it **over** the existing Kav. Settings, favourites and the downloaded map stay.
+
+Keep the budget safe:
+- **Never delete Kav before updating.** You'd lose its data (the 176 MB map and your places) for nothing.
+- **Don't change the bundle ID** and don't install Kav a second way (AltStore as well as SideStore, or inside
+  LiveContainer as well as directly). Each is a different App ID and counts against the 10.
+- After your first update, open **My Apps** and check there is still exactly one Kav.
+- A *refresh* (SideStore re-signing before the 7 days are up) is not an update and costs nothing either.
+- Each build's version number goes up (`CFBundleVersion` = the CI run number), so SideStore sees it as newer.
+
+Once the SideStore source exists (Phase 5) updates become one tap: SideStore → Sources → **+**:
 
 ```
 https://iboros445.github.io/kav-ios/source.json
 ```
-
-Updates then appear as one-tap updates.
 
 ## Refreshing
 
