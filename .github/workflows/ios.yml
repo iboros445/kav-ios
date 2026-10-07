@@ -60,15 +60,20 @@ jobs:
         run: |
           mkdir -p ios/app/assets
           cp -R android/app/src/main/assets/map ios/app/assets/map
+          cp .github/icon.png ios/app/assets/icon.png
+
+      # compile errors first and alone, so a failed run says why in a few lines
+      - name: Compile Kotlin
+        run: ./gradlew :kav:compileKotlinIosSimulatorArm64 --console=plain
 
       - name: Kotlin simulator tests
         env:
           # simctl hands SIMCTL_CHILD_* to the simulated process with the prefix removed
           SIMCTL_CHILD_KAV_ASSETS_DIR: ${{ github.workspace }}/ios/app/assets
-        run: ./gradlew :kav:iosSimulatorArm64Test --stacktrace
+        run: ./gradlew :kav:iosSimulatorArm64Test --console=plain
 
       - name: Link the Kotlin framework (device)
-        run: ./gradlew :kav:linkReleaseFrameworkIosArm64 --stacktrace
+        run: ./gradlew :kav:linkReleaseFrameworkIosArm64 --console=plain
 
       - name: App icon from .github/icon.png
         working-directory: .

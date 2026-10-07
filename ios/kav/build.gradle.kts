@@ -80,6 +80,10 @@ kotlin {
             implementation(compose.material3)
             implementation(compose.ui)
             implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.2")
+            // Upstream's lifecycle/ViewModel imports (androidx.lifecycle.*) and the icon set it draws from.
+            implementation("org.jetbrains.androidx.lifecycle:lifecycle-viewmodel-compose:2.9.6")
+            implementation("org.jetbrains.androidx.lifecycle:lifecycle-runtime-compose:2.9.6")
+            implementation("org.jetbrains.compose.material:material-icons-extended:1.7.3")
         }
         iosMain {
             kotlin.srcDir(files(layout.buildDirectory.dir("upstream/kotlin")).builtBy(syncUpstream))

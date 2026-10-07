@@ -20,6 +20,25 @@ import platform.Foundation.NSUserDomainMask
 abstract class Context {
     open val applicationContext: Context get() = this
     open val packageName: String get() = "io.github.iboros445.kav"
+    val packageManager: android.content.pm.PackageManager by lazy { android.content.pm.PackageManager() }
+    val display: android.view.Display get() = android.view.Display()
+    val resources: Resources by lazy { Resources() }
+    fun getString(id: Int): String = if (id == uk.noammm.kav.R.string.app_name) "Kav" else ""
+
+    fun startActivity(intent: Intent) = IntentRouter.start(intent)
+
+    /** Managers for the services Kav asks for. Anything else is null, which callers treat as "not available". */
+    fun getSystemService(name: String): Any? = when (name) {
+        LOCATION_SERVICE -> locationManager
+        SENSOR_SERVICE -> sensorManager
+        CONNECTIVITY_SERVICE -> connectivityManager
+        WINDOW_SERVICE -> android.view.WindowManager()
+        else -> null
+    }
+
+    private val locationManager by lazy { android.location.LocationManager() }
+    private val sensorManager by lazy { android.hardware.SensorManager() }
+    private val connectivityManager by lazy { android.net.ConnectivityManager() }
 
     val filesDir: File by lazy { dir(NSApplicationSupportDirectory).also { it.mkdirs() } }
     val cacheDir: File by lazy { dir(NSCachesDirectory).also { it.mkdirs() } }
@@ -36,6 +55,11 @@ abstract class Context {
 
     companion object {
         const val MODE_PRIVATE = 0
+        const val LOCATION_SERVICE = "location"
+        const val SENSOR_SERVICE = "sensor"
+        const val CONNECTIVITY_SERVICE = "connectivity"
+        const val WINDOW_SERVICE = "window"
+        const val NOTIFICATION_SERVICE = "notification"
     }
 }
 
@@ -57,7 +81,16 @@ class ContentResolver {
     fun openInputStream(uri: Uri): InputStream? = FileInputStream(fileOf(uri))
 
     /** mode "w" truncates, "wa" appends, "wt" truncates (the same as "w" here). */
-    fun openOutputStream(uri: Uri, mode: String = "w"): OutputStream? = FileOutputStream(fileOf(uri), mode.contains('a'))
+    fun openOutputStream(uri: Uri, mode: String = "w"): OutputStream? {
+        val out = FileOutputStream(fileOf(uri), mode.contains('a'))
+        // a file staged by CreateDocument is offered to the save picker once the writer is done
+        return object : OutputStream() {
+            override fun write(b: Int) = out.write(b)
+            override fun write(b: ByteArray, off: Int, len: Int) = out.write(b, off, len)
+            override fun flush() = out.flush()
+            override fun close() { out.close(); DocumentPickers.finishSave(uri) }
+        }
+    }
 
     fun query(uri: Uri, projection: Array<String>?, selection: String?, selectionArgs: Array<String>?, sortOrder: String?): Cursor? {
         val f = runCatching { fileOf(uri) }.getOrNull() ?: return null

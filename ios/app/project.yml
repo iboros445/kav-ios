@@ -48,6 +48,7 @@ targets:
         ITSAppUsesNonExemptEncryption: false
         UIBackgroundModes: [location]
         # Documents/kav.log is readable in the Files app, for debugging without a Mac
+        UIViewControllerBasedStatusBarAppearance: false
         UIFileSharingEnabled: true
         LSSupportsOpeningDocumentsInPlace: true
         NSLocationWhenInUseUsageDescription: Kav uses your location to find stops near you and to follow your trip.

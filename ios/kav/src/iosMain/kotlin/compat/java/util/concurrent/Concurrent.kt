@@ -133,4 +133,16 @@ class ConcurrentHashMap<K, V>(@Suppress("UNUSED_PARAMETER") initialCapacity: Int
     fun computeIfAbsent(key: K, f: (K) -> V): V = sync { m[key] ?: f(key).also { m[key] = it } }
     fun getOrDefault(key: Any?, default: V): V = sync { @Suppress("UNCHECKED_CAST") (m[key as K] ?: default) }
     override fun toString(): String = sync { m.toString() }
+
+    companion object {
+        fun <T> newKeySet(): MutableSet<T> = object : AbstractMutableSet<T>() {
+            private val inner = ConcurrentHashMap<T, Boolean>()
+            override val size: Int get() = inner.size
+            override fun add(element: T): Boolean = inner.put(element, true) == null
+            override fun contains(element: T): Boolean = inner.containsKey(element)
+            override fun remove(element: T): Boolean = inner.remove(element) != null
+            override fun iterator(): MutableIterator<T> = inner.keys.iterator()
+            override fun clear() = inner.clear()
+        }
+    }
 }

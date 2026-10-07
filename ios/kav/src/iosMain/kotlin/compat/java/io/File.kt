@@ -15,6 +15,7 @@ import platform.Foundation.NSFileModificationDate
 import platform.Foundation.NSFileSize
 import platform.Foundation.NSNumber
 import platform.Foundation.timeIntervalSince1970
+import platform.Foundation.dateWithTimeIntervalSince1970
 import platform.posix.mkdir
 import platform.posix.remove
 import platform.posix.rename
@@ -75,6 +76,10 @@ class File(path: String) : Comparable<File> {
     fun writeBytes(bytes: ByteArray) { FileOutputStream(this).use { it.write(bytes) } }
     fun appendBytes(bytes: ByteArray) { FileOutputStream(this, true).use { it.write(bytes) } }
     fun writeText(text: String, charset: Charset = Charset.UTF_8) = writeBytes(text.encodeToByteArray())
+    fun appendText(text: String, charset: Charset = Charset.UTF_8) = appendBytes(text.encodeToByteArray())
+    fun forEachLine(charset: Charset = Charset.UTF_8, action: (String) -> Unit) { bufferedReader(charset).use { r -> r.lineSequence().forEach(action) } }
+    fun bufferedWriter(charset: Charset = Charset.UTF_8): BufferedWriter = BufferedWriter(OutputStreamWriter(FileOutputStream(this), charset))
+    fun setLastModified(ms: Long): Boolean = fm.setAttributes(mapOf(NSFileModificationDate to NSDate.dateWithTimeIntervalSince1970(ms / 1000.0)), path, null)
     fun inputStream(): FileInputStream = FileInputStream(this)
     fun outputStream(): FileOutputStream = FileOutputStream(this)
     fun bufferedReader(charset: Charset = Charset.UTF_8): BufferedReader = inputStream().bufferedReader(charset)

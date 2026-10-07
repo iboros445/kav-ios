@@ -20,6 +20,18 @@ import kotlin.time.ExperimentalTime
 typealias Volatile = kotlin.concurrent.Volatile
 typealias Runnable = java.lang.Runnable
 
+/** kotlin.jvm.Synchronized does not exist on Native. Upstream uses it to serialise small file appends; races there are benign. */
+@Target(AnnotationTarget.FUNCTION, AnnotationTarget.PROPERTY_GETTER, AnnotationTarget.PROPERTY_SETTER)
+annotation class Synchronized
+
+object Integer {
+    const val MAX_VALUE = Int.MAX_VALUE
+    const val MIN_VALUE = Int.MIN_VALUE
+    fun toHexString(i: Int): String = i.toUInt().toString(16)
+    fun parseInt(s: String): Int = s.toInt()
+    fun valueOf(i: Int): Int = i
+}
+
 // kotlinx.coroutines keeps Dispatchers.IO as an extension on Native; on the JVM it is a member, so upstream imports nothing.
 val Dispatchers.IO: CoroutineDispatcher get() = Dispatchers.CoroutinesIO
 

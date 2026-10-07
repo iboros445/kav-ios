@@ -56,7 +56,8 @@ done
 # the real iOS sources, minus anything that needs Compose
 IOS="$ROOT/ios/kav/src/iosMain/kotlin"
 TESTS=""; [ "${KAV_TESTS:-1}" = 1 ] && TESTS=$(find "$ROOT/ios/kav/src/iosTest/kotlin" -name '*.kt' | grep -v SpikeTest || true)
-FILES=$(find "$IOS/compat" "$IOS/overrides" -name '*.kt' 2>/dev/null | grep -v '/compose/' || true)
+# files whose first line is //@cmp need Compose, Skia or AndroidX lifecycle, none of which resolve here: CI checks those
+FILES=$(find "$IOS/compat" "$IOS/overrides" "$IOS/platform" -name '*.kt' 2>/dev/null | xargs grep -L '^//@cmp' || true)
 echo ">> compiling for $TARGET (scope=$SCOPE): $(echo "$FILES" | wc -w) shim files, $(echo "$TESTS" | wc -w) test files, $(find "$UP" "$STAMP" -name '*.kt' | wc -l) upstream/stamped files"
 set +e
 OUT=$("$KN/bin/kotlinc-native" -target "$TARGET" -p library -nowarn \

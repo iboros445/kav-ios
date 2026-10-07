@@ -38,6 +38,7 @@ class Uri private constructor(private val text: String) {
     companion object {
         val EMPTY = Uri("")
         fun parse(s: String): Uri = Uri(s)
+        fun fromParts(scheme: String, ssp: String, fragment: String?): Uri = Uri("$scheme:$ssp" + (fragment?.let { "#$it" } ?: ""))
         fun fromFile(f: File): Uri = Uri("file://" + f.absolutePath)
         fun encode(s: String): String = java.net.URLEncoder.encode(s, "UTF-8").replace("+", "%20")
         fun decode(s: String): String = URLDecoder.decode(s.replace("+", "%2B"), "UTF-8")
