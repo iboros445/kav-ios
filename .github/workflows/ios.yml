@@ -34,14 +34,23 @@ jobs:
           key: konan-${{ runner.os }}-${{ hashFiles('ios/build.gradle.kts') }}
           restore-keys: konan-${{ runner.os }}-
 
-      - name: SDK paths (the linker needs PrivateFrameworks for CoreLocation)
+      # CoreLocation's module map autolinks the private framework `_LocationEssentials`, which the Xcode 16 SDKs no longer
+      # ship as a file (the simulator runtime still provides it). The linker only needs a stub to resolve the name.
+      - name: Stub for the autolinked _LocationEssentials framework
         working-directory: .
         run: |
-          echo "KAV_SDK_SIM=$(xcrun --sdk iphonesimulator --show-sdk-path)" >> "$GITHUB_ENV"
-          echo "KAV_SDK_DEV=$(xcrun --sdk iphoneos --show-sdk-path)" >> "$GITHUB_ENV"
-          for sdk in iphoneos iphonesimulator; do
-            echo "== $sdk"; find "$(xcrun --sdk $sdk --show-sdk-path)" -iname '*LocationEssentials*' -maxdepth 6 | head -5
-          done
+          d="$RUNNER_TEMP/kav-framework-stubs/_LocationEssentials.framework"
+          mkdir -p "$d"
+          cat > "$d/_LocationEssentials.tbd" <<'EOF'
+          --- !tapi-tbd
+          tbd-version:     4
+          targets:         [ arm64-ios, arm64-ios-simulator, x86_64-ios-simulator ]
+          install-name:    '/System/Library/PrivateFrameworks/_LocationEssentials.framework/_LocationEssentials'
+          current-version: 1
+          exports:         []
+          ...
+          EOF
+          echo "KAV_FRAMEWORK_STUBS=$RUNNER_TEMP/kav-framework-stubs" >> "$GITHUB_ENV"
 
       - name: Upstream version
         id: ver

@@ -66,20 +66,17 @@ kotlin {
         suppressWarnings.set(false)
     }
 
-    // CoreLocation re-exports a private framework (_LocationEssentials) that Kotlin/Native autolinks by name; the
-    // linker only finds it when the SDK's PrivateFrameworks directory is on the framework search path.
-    // ios.yml passes the SDK roots in; without them (Linux, a quick local configure) nothing is added.
-    val sdkRoots = mapOf(
-        "iosArm64" to providers.environmentVariable("KAV_SDK_DEV").orNull,
-        "iosSimulatorArm64" to providers.environmentVariable("KAV_SDK_SIM").orNull,
-    )
+    // CoreLocation's module map autolinks a private framework (_LocationEssentials) that the Xcode 16 SDKs no longer
+    // ship as a file. ios.yml makes a stub .tbd and passes its directory in; without it (Linux, a quick local
+    // configure) nothing is added.
+    val frameworkStubs = providers.environmentVariable("KAV_FRAMEWORK_STUBS").orNull
     listOf(iosArm64(), iosSimulatorArm64()).forEach { target ->
         target.binaries.framework {
             baseName = "KavKit"
             isStatic = true
         }
         target.binaries.all {
-            sdkRoots[target.name]?.let { linkerOpts("-F$it/System/Library/PrivateFrameworks") }
+            frameworkStubs?.let { linkerOpts("-F$it") }
         }
     }
 
