@@ -36,7 +36,11 @@ installed via SideStore directly, not inside LiveContainer.
 
 ## Status log (keep updated)
 
-**Phase 0** (scaffolding + spikes): files written, waiting on the first green `ios.yml` run + the user installing the IPA.
+**Phase 0** (scaffolding + spikes): DONE in CI, waiting only on the user installing the IPA on the phone (checkpoint).
+- First `ios.yml` run (commit `1f04ca6`) was green on the first try, about 9 min cold: simulator tests (spike) pass on iOS,
+  framework links, unsigned `Kav.ipa` (17 MB, includes `il.kav` + map assets) uploaded as the `Kav-ipa` artifact.
+- User to-do before Phase 1 matters: make the repo public (unlimited macOS minutes, SideStore source), enable Pages (Actions source).
+  See `ios/INSTALL.md`.
 - Pinned: Kotlin **2.4.0**, Compose Multiplatform **1.12.1**, Gradle wrapper **8.14.4**, coroutines 1.10.2
   (`ios/build.gradle.kts`, `ios/kav/build.gradle.kts`). `compose.material3` etc. use the deprecated accessors
   (still work; Gradle prints a deprecation warning).
