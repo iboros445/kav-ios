@@ -41,7 +41,12 @@ targets:
         CFBundleDisplayName: Kav
         CFBundleShortVersionString: "$(MARKETING_VERSION)"
         CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
-        UILaunchScreen: {}
+        # The app's default look is OLED black. The launch screen and the first frames are dark on every phone, and
+        # the app switches the window to its own look (light included) as soon as it has started.
+        UILaunchScreen:
+          UIColorName: LaunchBackground
+        UIUserInterfaceStyle: Dark
+        UIStatusBarStyle: UIStatusBarStyleLightContent
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
         UIRequiredDeviceCapabilities: [arm64]
         CADisableMinimumFrameDurationOnPhone: true

@@ -17,7 +17,7 @@ class Cipher private constructor(private val transformation: String) {
     private var mode = 0
     private var key: ByteArray? = null
     private var spec: javax.crypto.spec.GCMParameterSpec? = null
-    var iv: ByteArray? = null; private set
+    var iv: ByteArray = ByteArray(0); private set
 
     fun init(opmode: Int, k: Key) {
         mode = opmode
@@ -36,7 +36,7 @@ class Cipher private constructor(private val transformation: String) {
     fun doFinal(input: ByteArray, offset: Int, length: Int): ByteArray {
         val k = key ?: throw IllegalStateException("Cipher not initialized")
         val data = input.copyOfRange(offset, offset + length)
-        val nonce = iv ?: throw IllegalStateException("No IV")
+        val nonce = iv.takeIf { it.isNotEmpty() } ?: throw IllegalStateException("No IV")
         return when (mode) {
             ENCRYPT_MODE -> AesGcm.seal(k, nonce, data)
             DECRYPT_MODE -> AesGcm.open(k, nonce, data, tagBits = spec?.tLen ?: 128) ?: throw AEADBadTagException("Tag mismatch")

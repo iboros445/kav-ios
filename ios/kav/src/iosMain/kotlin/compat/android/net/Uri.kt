@@ -31,6 +31,16 @@ class Uri private constructor(private val text: String) {
     fun getQueryParameterNames(): Set<String> =
         encodedQuery?.split('&')?.map { URLDecoder.decode(it.substringBefore('='), "UTF-8") }?.toSet() ?: emptySet()
 
+    class Builder {
+        private var scheme = ""; private var authority = ""; private var path = ""
+        private val query = ArrayList<String>()
+        fun scheme(s: String): Builder { scheme = s; return this }
+        fun authority(a: String): Builder { authority = a; return this }
+        fun path(p: String): Builder { path = p; return this }
+        fun appendQueryParameter(k: String, v: String): Builder { query.add(encode(k) + "=" + encode(v)); return this }
+        fun build(): Uri = Uri(scheme + "://" + authority + path + (if (query.isEmpty()) "" else "?" + query.joinToString("&")))
+    }
+
     override fun toString(): String = text
     override fun equals(other: Any?): Boolean = other is Uri && other.text == text
     override fun hashCode(): Int = text.hashCode()

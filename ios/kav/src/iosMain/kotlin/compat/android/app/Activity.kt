@@ -6,6 +6,8 @@ import android.view.Window
 open class Activity : Context() {
     val window: Window = Window()
     open fun finish() {}
+    fun setPictureInPictureParams(p: PictureInPictureParams): Boolean = true
+    fun enterPictureInPictureMode(p: PictureInPictureParams): Boolean = false
 }
 
 class PictureInPictureParams private constructor() {

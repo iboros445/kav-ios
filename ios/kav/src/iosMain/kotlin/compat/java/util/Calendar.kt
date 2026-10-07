@@ -72,6 +72,24 @@ class Calendar private constructor(private var zone: TimeZone, private var ms: L
         ms = msOf(d) - (((msOf(d) % 1000) + 1000) % 1000) + keepMs
     }
 
+    /** Resets every field to the epoch (in this zone), like Calendar.clear(). */
+    fun clear() {
+        val c = cal()
+        ms = msOf(c.dateWithEra(1, year = 1970, month = 1, day = 1, hour = 0, minute = 0, second = 0, nanosecond = 0) ?: NSDate.dateWithTimeIntervalSince1970(0.0))
+    }
+
+    fun set(year: Int, month: Int, day: Int) {
+        val keep = cal().let { c -> longArrayOf(c.component(NSCalendarUnitHour, date()), c.component(NSCalendarUnitMinute, date()), c.component(NSCalendarUnitSecond, date())) }
+        set(year, month, day, keep[0].toInt(), keep[1].toInt(), keep[2].toInt())
+    }
+
+    fun set(year: Int, month: Int, day: Int, hour: Int, minute: Int) = set(year, month, day, hour, minute, 0)
+
+    fun set(year: Int, month: Int, day: Int, hour: Int, minute: Int, second: Int) {
+        val d = cal().dateWithEra(1, year = year.toLong(), month = (month + 1).toLong(), day = day.toLong(), hour = hour.toLong(), minute = minute.toLong(), second = second.toLong(), nanosecond = 0)
+        if (d != null) ms = msOf(d)
+    }
+
     fun add(field: Int, amount: Int) {
         val u = when (field) {
             YEAR -> NSCalendarUnitYear

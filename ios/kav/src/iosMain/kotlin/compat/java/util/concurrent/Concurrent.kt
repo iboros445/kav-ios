@@ -129,6 +129,7 @@ class ConcurrentHashMap<K, V>(@Suppress("UNUSED_PARAMETER") initialCapacity: Int
     override val values: MutableCollection<V> get() = sync { ArrayList(m.values) }
     override val entries: MutableSet<MutableMap.MutableEntry<K, V>> get() = sync { LinkedHashMap(m).entries }
 
+    fun remove(key: K, value: V): Boolean = sync { if (m[key] == value) { m.remove(key); true } else false }
     fun putIfAbsent(key: K, value: V): V? = sync { m[key] ?: run { m[key] = value; null } }
     fun computeIfAbsent(key: K, f: (K) -> V): V = sync { m[key] ?: f(key).also { m[key] = it } }
     fun getOrDefault(key: Any?, default: V): V = sync { @Suppress("UNCHECKED_CAST") (m[key as K] ?: default) }

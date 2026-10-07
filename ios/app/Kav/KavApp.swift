@@ -5,7 +5,7 @@ import KavKit
 struct KavApp: App {
     var body: some Scene {
         WindowGroup {
-            ComposeView().ignoresSafeArea(.all)
+            ComposeView().ignoresSafeArea(.all).background(Color.black.ignoresSafeArea())
         }
     }
 }

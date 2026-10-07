@@ -3,8 +3,8 @@ package org.json
 class JSONArray() {
     internal val list = ArrayList<Any?>()
 
-    constructor(json: String) : this() {
-        val v = JSONTokener(json).nextValue()
+    constructor(json: String?) : this() {
+        val v = JSONTokener(json ?: throw NullPointerException("json == null")).nextValue()
         if (v !is JSONArray) throw JSON.typeMismatch(v, v, "JSONArray")
         list.addAll(v.list)
     }

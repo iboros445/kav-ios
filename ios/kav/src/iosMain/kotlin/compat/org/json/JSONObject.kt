@@ -3,8 +3,8 @@ package org.json
 class JSONObject() {
     internal val map = LinkedHashMap<String, Any?>()
 
-    constructor(json: String) : this() {
-        val v = JSONTokener(json).nextValue()
+    constructor(json: String?) : this() {
+        val v = JSONTokener(json ?: throw NullPointerException("json == null")).nextValue()
         if (v !is JSONObject) throw JSON.typeMismatch(v, v, "JSONObject")
         map.putAll(v.map)
     }

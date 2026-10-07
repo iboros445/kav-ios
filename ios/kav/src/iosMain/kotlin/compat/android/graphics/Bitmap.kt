@@ -6,16 +6,17 @@ package android.graphics
 import java.io.File
 import java.io.OutputStream
 import org.jetbrains.skia.EncodedImageFormat
-import org.jetbrains.skia.PaintMode
-import org.jetbrains.skia.PaintStrokeJoin
+import androidx.compose.ui.graphics.asComposeImageBitmap
+import androidx.compose.ui.graphics.asSkiaBitmap
 import org.jetbrains.skia.Rect
 import org.jetbrains.skia.Bitmap as SkBitmap
 import org.jetbrains.skia.Canvas as SkCanvas
 import org.jetbrains.skia.Image as SkImage
-import org.jetbrains.skia.Paint as SkPaint
-import org.jetbrains.skia.Path as SkPath
 
-class Bitmap internal constructor(internal val skia: SkBitmap) {
+class Bitmap internal constructor(internal val image: androidx.compose.ui.graphics.ImageBitmap) {
+    internal constructor(sk: SkBitmap) : this(sk.asComposeImageBitmap())
+    internal val skia: SkBitmap get() = image.asSkiaBitmap()
+
     enum class Config { ARGB_8888, RGB_565, ALPHA_8 }
     enum class CompressFormat { JPEG, PNG, WEBP }
 
@@ -33,7 +34,7 @@ class Bitmap internal constructor(internal val skia: SkBitmap) {
     }
 
     companion object {
-        fun createBitmap(width: Int, height: Int, config: Config): Bitmap = Bitmap(SkBitmap().also { it.allocN32Pixels(width, height) })
+        fun createBitmap(width: Int, height: Int, config: Config): Bitmap = Bitmap(androidx.compose.ui.graphics.ImageBitmap(width, height))
     }
 }
 
@@ -66,31 +67,31 @@ object BitmapFactory {
 }
 
 class Path {
-    internal val skia = SkPath()
-    fun moveTo(x: Float, y: Float) { skia.moveTo(x, y) }
-    fun lineTo(x: Float, y: Float) { skia.lineTo(x, y) }
-    fun close() { skia.closePath() }
+    internal val compose = androidx.compose.ui.graphics.Path()
+    fun moveTo(x: Float, y: Float) { compose.moveTo(x, y) }
+    fun lineTo(x: Float, y: Float) { compose.lineTo(x, y) }
+    fun close() { compose.close() }
 }
 
 class Paint(flags: Int = 0) {
     enum class Style { FILL, STROKE, FILL_AND_STROKE }
     enum class Join { MITER, ROUND, BEVEL }
 
-    internal val skia = SkPaint().also { it.isAntiAlias = flags and ANTI_ALIAS_FLAG != 0 }
+    internal val compose = androidx.compose.ui.graphics.Paint().also { it.isAntiAlias = flags and ANTI_ALIAS_FLAG != 0 }
 
     var style: Style = Style.FILL
-        set(v) { field = v; skia.mode = if (v == Style.STROKE) PaintMode.STROKE else PaintMode.FILL }
+        set(v) { field = v; compose.style = if (v == Style.STROKE) androidx.compose.ui.graphics.PaintingStyle.Stroke else androidx.compose.ui.graphics.PaintingStyle.Fill }
     var strokeWidth: Float = 0f
-        set(v) { field = v; skia.strokeWidth = v }
+        set(v) { field = v; compose.strokeWidth = v }
     var strokeJoin: Join = Join.MITER
-        set(v) { field = v; skia.strokeJoin = when (v) { Join.ROUND -> PaintStrokeJoin.ROUND; Join.BEVEL -> PaintStrokeJoin.BEVEL; Join.MITER -> PaintStrokeJoin.MITER } }
+        set(v) { field = v; compose.strokeJoin = when (v) { Join.ROUND -> androidx.compose.ui.graphics.StrokeJoin.Round; Join.BEVEL -> androidx.compose.ui.graphics.StrokeJoin.Bevel; Join.MITER -> androidx.compose.ui.graphics.StrokeJoin.Miter } }
     var color: Int = 0
-        set(v) { field = v; skia.color = v }
+        set(v) { field = v; compose.color = androidx.compose.ui.graphics.Color(v) }
 
     companion object { const val ANTI_ALIAS_FLAG = 1 }
 }
 
 class Canvas(bitmap: Bitmap) {
-    private val skia = SkCanvas(bitmap.skia)
-    fun drawPath(path: Path, paint: Paint) { skia.drawPath(path.skia, paint.skia) }
+    private val compose = androidx.compose.ui.graphics.Canvas(bitmap.image)
+    fun drawPath(path: Path, paint: Paint) { compose.drawPath(path.compose, paint.compose) }
 }

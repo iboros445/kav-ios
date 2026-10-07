@@ -13,6 +13,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -31,7 +32,17 @@ import androidx.compose.ui.window.ComposeUIViewController
 import androidx.lifecycle.viewmodel.compose.LocalViewModelStoreOwner
 import android.widget.ToastQueue
 import kotlinx.coroutines.delay
+import androidx.compose.ui.graphics.Color
+import platform.UIKit.UIApplication
+import platform.UIKit.UIColor
+import platform.UIKit.UIStatusBarStyleDarkContent
+import platform.UIKit.UIStatusBarStyleLightContent
+import platform.UIKit.UIUserInterfaceStyleDark
+import platform.UIKit.UIUserInterfaceStyleLight
 import platform.UIKit.UIViewController
+import platform.UIKit.UIWindow
+import platform.UIKit.UIWindowScene
+import platform.UIKit.setStatusBarStyle
 import uk.noammm.kav.MainActivity
 import uk.noammm.kav.ui.K
 import uk.noammm.kav.ui.T
@@ -43,6 +54,9 @@ fun MainViewController(): UIViewController {
     activity.onCreate(null)
     return ComposeUIViewController {
         CompositionLocalProvider(LocalContext provides activity, LocalViewModelStoreOwner provides activity) {
+            // The app has its own look (OLED, dark, light) and ignores the system's. Everything iOS draws itself
+            // (window background, keyboard, share sheet, pickers, status bar) is told to follow it.
+            SideEffect { IosChrome.apply(light = K.light, background = K.bg) }
             Box(Modifier.fillMaxSize()) {
                 activity.content?.invoke()
                 BackEdge()
@@ -91,5 +105,23 @@ private fun ToastHost() {
                 modifier = Modifier.clip(RoundedCornerShape(999.dp)).background(K.surface4).padding(horizontal = 16.dp, vertical = 10.dp),
             )
         }
+    }
+}
+
+internal object IosChrome {
+    fun apply(light: Boolean, background: Color) {
+        val colour = UIColor(red = background.red.toDouble(), green = background.green.toDouble(), blue = background.blue.toDouble(), alpha = 1.0)
+        // Overriding on the window reaches keyboards, sheets and pickers.
+        val style = if (light) UIUserInterfaceStyleLight else UIUserInterfaceStyleDark
+        for (scene in UIApplication.sharedApplication.connectedScenes) {
+            (scene as? UIWindowScene)?.windows?.forEach { w ->
+                (w as? UIWindow)?.let {
+                    it.overrideUserInterfaceStyle = style
+                    it.backgroundColor = colour
+                    it.rootViewController?.view?.backgroundColor = colour
+                }
+            }
+        }
+        UIApplication.sharedApplication.setStatusBarStyle(if (light) UIStatusBarStyleDarkContent else UIStatusBarStyleLightContent, false)
     }
 }

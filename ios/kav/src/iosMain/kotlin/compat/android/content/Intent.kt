@@ -12,6 +12,7 @@ class Intent() {
     var `package`: String? = null; private set
     var flags: Int = 0; private set
     val extras = HashMap<String, Any?>()
+    val dataString: String? get() = data?.toString()
     var chooserTitle: String? = null; private set
     var target: Intent? = null; private set
 
