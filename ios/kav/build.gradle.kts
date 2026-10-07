@@ -77,6 +77,8 @@ kotlin {
         }
         target.binaries.all {
             frameworkStubs?.let { linkerOpts("-F$it") }
+            // TEMPORARY (profiling branch only): per-phase compiler timings for the link.
+            freeCompilerArgs += listOf("-Xprofile-phases")
         }
     }
 
