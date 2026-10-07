@@ -70,11 +70,8 @@ kotlin {
     // ship as a file. ios.yml makes a stub .tbd and passes its directory in; without it (Linux, a quick local
     // configure) nothing is added.
     val frameworkStubs = providers.environmentVariable("KAV_FRAMEWORK_STUBS").orNull
+    // The framework Swift links is built by :kavkit, which depends on this module without exporting it.
     listOf(iosArm64(), iosSimulatorArm64()).forEach { target ->
-        target.binaries.framework {
-            baseName = "KavKit"
-            isStatic = true
-        }
         target.binaries.all {
             frameworkStubs?.let { linkerOpts("-F$it") }
         }

@@ -22,7 +22,8 @@ open class ComponentActivity : Activity(), LifecycleOwner, ViewModelStoreOwner {
     override val lifecycle: Lifecycle get() = registry
     override val viewModelStore: ViewModelStore = ViewModelStore()
 
-    internal var content: (@Composable () -> Unit)? = null
+    var content: (@Composable () -> Unit)? = null
+        internal set
 
     private var current: Intent = Intent()
     val intent: Intent get() = current

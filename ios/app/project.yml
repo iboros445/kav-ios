@@ -26,10 +26,10 @@ targets:
         PRODUCT_NAME: Kav
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         GENERATE_INFOPLIST_FILE: NO
-        # The Kotlin framework is built by Gradle (:kav:link{Debug,Release}FrameworkIosArm64) before xcodebuild runs.
+        # The Kotlin framework is built by Gradle (:kavkit:link{Debug,Release}FrameworkIosArm64) before xcodebuild runs.
         # ios.yml passes KAV_FRAMEWORK_VARIANT=debugFramework for branch builds (the release link takes ~14 minutes).
         KAV_FRAMEWORK_VARIANT: releaseFramework
-        FRAMEWORK_SEARCH_PATHS: "$(SRCROOT)/../kav/build/bin/iosArm64/$(KAV_FRAMEWORK_VARIANT) $(SDKROOT)/System/Library/PrivateFrameworks"
+        FRAMEWORK_SEARCH_PATHS: "$(SRCROOT)/../kavkit/build/bin/iosArm64/$(KAV_FRAMEWORK_VARIANT) $(SDKROOT)/System/Library/PrivateFrameworks"
         # KavKit is static, so the system frameworks it uses must be linked here.
         OTHER_LDFLAGS: >-
           -framework KavKit -lc++

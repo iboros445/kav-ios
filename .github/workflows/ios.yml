@@ -86,7 +86,7 @@ jobs:
       # compile errors first and alone, so a failed run says why in a few lines
       # Device target first: the link below reuses this compile (the simulator one waits for the tests at the end).
       - name: Compile Kotlin
-        run: ./gradlew :kav:compileKotlinIosArm64 --console=plain
+        run: ./gradlew :kavkit:compileKotlinIosArm64 --console=plain
 
       # The release link (LLVM whole-program optimisation) takes ~14 minutes; debug takes a fraction of that, so branch
       # builds ship a debug framework (readable Kotlin stack traces too). Tagged ios-v* releases stay optimised.
@@ -95,7 +95,7 @@ jobs:
         run: |
           if [[ "$GITHUB_REF" == refs/tags/ios-v* ]]; then v=Release; else v=Debug; fi
           echo "variant=$(echo $v | tr '[:upper:]' '[:lower:]')Framework" >> "$GITHUB_OUTPUT"
-          ./gradlew ":kav:link${v}FrameworkIosArm64" --console=plain
+          ./gradlew ":kavkit:link${v}FrameworkIosArm64" --console=plain
 
       - name: App icon from .github/icon.png
         working-directory: .

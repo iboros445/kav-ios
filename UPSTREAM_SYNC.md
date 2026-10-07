@@ -164,7 +164,7 @@ git diff $BASE..$NEW -- android/app/src/main/java/<path>
 
 - Apply the **same behavioural change** to the `.ios.kt` file. Compose code
   usually transfers line for line. Platform calls need their iOS counterpart
-  (bridges live in `ios/kav/src/iosMain/kotlin/platform/` and Swift in
+  (the entry point lives in `ios/kavkit/src/iosMain/kotlin/`, other bridges in `ios/kav/src/iosMain/kotlin/platform/` and Swift in
   `ios/app/Kav/`).
 - If the upstream change needs new native capability, add it to the Kotlin
   bridge interface and implement it in Swift. For the map, prefer passing
