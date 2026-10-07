@@ -84,11 +84,18 @@ jobs:
           cp .github/icon.png ios/app/assets/icon.png
 
       # compile errors first and alone, so a failed run says why in a few lines
+      # Device target first: the link below reuses this compile (the simulator one waits for the tests at the end).
       - name: Compile Kotlin
-        run: ./gradlew :kav:compileKotlinIosSimulatorArm64 --console=plain
+        run: ./gradlew :kav:compileKotlinIosArm64 --console=plain
 
+      # The release link (LLVM whole-program optimisation) takes ~14 minutes; debug takes a fraction of that, so branch
+      # builds ship a debug framework (readable Kotlin stack traces too). Tagged ios-v* releases stay optimised.
       - name: Link the Kotlin framework (device)
-        run: ./gradlew :kav:linkReleaseFrameworkIosArm64 --console=plain
+        id: fw
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/ios-v* ]]; then v=Release; else v=Debug; fi
+          echo "variant=$(echo $v | tr '[:upper:]' '[:lower:]')Framework" >> "$GITHUB_OUTPUT"
+          ./gradlew ":kav:link${v}FrameworkIosArm64" --console=plain
 
       - name: App icon from .github/icon.png
         working-directory: .
@@ -111,6 +118,7 @@ jobs:
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
             MARKETING_VERSION='${{ steps.ver.outputs.version }}' \
             CURRENT_PROJECT_VERSION='${{ github.run_number }}' \
+            KAV_FRAMEWORK_VARIANT='${{ steps.fw.outputs.variant }}' \
             build
 
       - name: Package Kav.ipa
