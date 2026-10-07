@@ -4,8 +4,12 @@
 // same package beats default imports. Edit this template, never a stamped copy.
 package __PACKAGE__
 
+import java.io.ByteArrayInputStream
 import java.nio.charset.Charset
 import java.util.Locale
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.IO as CoroutinesIO
 import kotlin.math.abs
 import kotlin.math.floor
 import kotlin.time.Clock
@@ -14,6 +18,44 @@ import kotlin.time.ExperimentalTime
 
 // ---- annotations that exist in kotlin.jvm on Android and elsewhere on Native ----
 typealias Volatile = kotlin.concurrent.Volatile
+typealias Runnable = java.lang.Runnable
+
+// kotlinx.coroutines keeps Dispatchers.IO as an extension on Native; on the JVM it is a member, so upstream imports nothing.
+val Dispatchers.IO: CoroutineDispatcher get() = Dispatchers.CoroutinesIO
+
+// ---- java.lang.Character (only what upstream calls) ----
+object Character {
+    class UnicodeBlock internal constructor(private val range: IntRange) {
+        companion object {
+            val COMBINING_DIACRITICAL_MARKS = UnicodeBlock(0x0300..0x036F)
+            private val OTHER = UnicodeBlock(-1..-1)
+            fun of(c: Char): UnicodeBlock = if (c.code in COMBINING_DIACRITICAL_MARKS.range) COMBINING_DIACRITICAL_MARKS else OTHER
+        }
+    }
+    fun isLetter(c: Char): Boolean = c.isLetter()
+    fun isDigit(c: Char): Boolean = c.isDigit()
+    fun isWhitespace(c: Char): Boolean = c.isWhitespace()
+    fun isUpperCase(c: Char): Boolean = c.isUpperCase()
+    fun isLowerCase(c: Char): Boolean = c.isLowerCase()
+    fun toUpperCase(c: Char): Char = c.uppercaseChar()
+    fun toLowerCase(c: Char): Char = c.lowercaseChar()
+}
+
+// ---- java.lang.Class stand-in for `x.javaClass.simpleName` ----
+class JavaClass(private val k: kotlin.reflect.KClass<*>) {
+    val simpleName: String get() = k.simpleName ?: ""
+    val name: String get() = k.qualifiedName ?: simpleName
+}
+val <T : Any> T.javaClass: JavaClass get() = JavaClass(this::class)
+
+// ---- String.lowercase(Locale) / uppercase(Locale) ----
+fun String.lowercase(locale: Locale): String = lowercase()
+fun String.uppercase(locale: Locale): String = uppercase()
+
+// ---- kotlin.io helpers that exist only on the JVM ----
+fun ByteArray.inputStream(): ByteArrayInputStream = ByteArrayInputStream(this)
+fun ByteArray.toString(charset: Charset): String = String(this, charset)
+fun StringBuilder.append(chars: CharArray, offset: Int, len: Int): StringBuilder = appendRange(chars, offset, offset + len)
 
 // ---- kotlin.synchronized: Compose state and the Kav singletons only need mutual exclusion
 // within one process; the app does its blocking IO on Dispatchers.IO, so a spin-free
@@ -58,6 +100,10 @@ fun String(bytes: ByteArray, charset: Charset): String =
     else buildString(bytes.size) { bytes.forEach { append((it.toInt() and 0xFF).toChar()) } }
 
 fun String(bytes: ByteArray): String = bytes.decodeToString()
+fun String(bytes: ByteArray, offset: Int, length: Int): String = bytes.decodeToString(offset, offset + length)
+fun String(bytes: ByteArray, offset: Int, length: Int, charset: Charset): String =
+    if (charset == Charset.UTF_8) bytes.decodeToString(offset, offset + length)
+    else buildString(length) { for (i in offset until offset + length) append((bytes[i].toInt() and 0xFF).toChar()) }
 
 fun String.toByteArray(charset: Charset = Charset.UTF_8): ByteArray =
     if (charset == Charset.UTF_8) encodeToByteArray() else ByteArray(length) { this[it].code.toByte() }

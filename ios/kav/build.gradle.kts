@@ -53,6 +53,19 @@ val stampJvmStd by tasks.registering {
 }
 
 kotlin {
+    compilerOptions {
+        // The shims call Foundation/posix through cinterop and use Native-only APIs on purpose.
+        optIn.addAll(
+            "kotlinx.cinterop.ExperimentalForeignApi",
+            "kotlin.experimental.ExperimentalNativeApi",
+            "kotlin.time.ExperimentalTime",
+            "kotlin.concurrent.atomics.ExperimentalAtomicApi",
+            "kotlin.native.concurrent.ObsoleteWorkersApi",
+        )
+        // Upstream code is compiled as-is; its warnings are not ours to fix.
+        suppressWarnings.set(false)
+    }
+
     listOf(iosArm64(), iosSimulatorArm64()).forEach { target ->
         target.binaries.framework {
             baseName = "KavKit"

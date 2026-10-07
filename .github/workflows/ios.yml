@@ -62,6 +62,9 @@ jobs:
           cp -R android/app/src/main/assets/map ios/app/assets/map
 
       - name: Kotlin simulator tests
+        env:
+          # simctl hands SIMCTL_CHILD_* to the simulated process with the prefix removed
+          SIMCTL_CHILD_KAV_ASSETS_DIR: ${{ github.workspace }}/ios/app/assets
         run: ./gradlew :kav:iosSimulatorArm64Test --stacktrace
 
       - name: Link the Kotlin framework (device)

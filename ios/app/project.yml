@@ -47,6 +47,9 @@ targets:
         CADisableMinimumFrameDurationOnPhone: true
         ITSAppUsesNonExemptEncryption: false
         UIBackgroundModes: [location]
+        # Documents/kav.log is readable in the Files app, for debugging without a Mac
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
         NSLocationWhenInUseUsageDescription: Kav uses your location to find stops near you and to follow your trip.
         NSLocationAlwaysAndWhenInUseUsageDescription: Kav follows your location while a trip is under way so the steps move on by themselves.
         NSCameraUsageDescription: Kav reads the QR code on a bus when you pay for a ride.

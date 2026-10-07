@@ -1,3 +1,4 @@
 # Upstream files NOT compiled for iOS, because an iOS replacement exists.
 # Format: <path under android/app/src/main/java>  <upstream base sha>  <reason>
 # Replacement: ios/kav/src/iosMain/kotlin/overrides/<same path with .kt -> .ios.kt>. See UPSTREAM_SYNC.md.
+uk/noammm/kav/data/Updates.kt  e945f0b  no APK installer on iOS; updates come from the SideStore source
