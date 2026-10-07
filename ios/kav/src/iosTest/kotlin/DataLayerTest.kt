@@ -15,6 +15,17 @@ import java.util.Date
 import java.util.Locale
 import java.util.TimeZone
 import java.util.UUID
+import java.util.Calendar
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import java.time.temporal.ChronoUnit
+import javax.crypto.Cipher
+import javax.crypto.SecretKeySpec
+import javax.crypto.spec.GCMParameterSpec
+import android.util.Base64
+import android.graphics.Color
+import androidx.core.text.HtmlCompat
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.zip.GZIPInputStream
@@ -191,5 +202,42 @@ class DataLayerTest {
         c.outputStream.use { it.write(byteArrayOf(1, 2, 3, 4)) }
         assertEquals(200, c.responseCode)
         assertTrue(c.inputStream.use { it.readBytes() }.decodeToString().contains("\"data\""))
+    }
+
+    @Test fun calendarAndJavaTime() {
+        val tz = TimeZone.getTimeZone("Asia/Jerusalem")
+        val c = Calendar.getInstance(tz).apply { timeInMillis = 1_735_725_600_000L }   // 2025-01-01 10:00Z = 12:00 in Israel
+        assertEquals(2025, c.get(Calendar.YEAR))
+        assertEquals(0, c.get(Calendar.MONTH))
+        assertEquals(1, c.get(Calendar.DAY_OF_MONTH))
+        assertEquals(12, c.get(Calendar.HOUR_OF_DAY))
+        assertEquals(4, c.get(Calendar.DAY_OF_WEEK))      // a Wednesday
+        assertEquals(1, c.get(Calendar.DAY_OF_YEAR))
+        c.add(Calendar.DAY_OF_YEAR, 31)
+        assertEquals(1, c.get(Calendar.MONTH)); assertEquals(1, c.get(Calendar.DAY_OF_MONTH))
+        c.set(Calendar.HOUR_OF_DAY, 0); c.set(Calendar.MINUTE, 0); c.set(Calendar.SECOND, 0); c.set(Calendar.MILLISECOND, 0)
+        assertEquals(0, c.get(Calendar.HOUR_OF_DAY)); assertEquals(1, c.get(Calendar.DAY_OF_MONTH))
+        assertEquals(0L, c.timeInMillis % 1000)
+        val zone = ZoneId.of("Asia/Jerusalem")
+        val a = Instant.ofEpochSecond(1_735_725_600L).atZone(zone)
+        val b = Instant.ofEpochSecond(1_735_725_600L + 3 * 86_400).atZone(zone)
+        assertEquals(3L, ChronoUnit.DAYS.between(a.toLocalDate(), b.toLocalDate()))
+        assertEquals("Wednesday", DateTimeFormatter.ofPattern("EEEE", Locale.forLanguageTag("en-GB")).format(a))
+        assertEquals(12 * 3600, Calendar.getInstance(tz).apply { timeInMillis = 1_735_725_600_000L }.let { it.get(Calendar.HOUR_OF_DAY) * 3600 + it.get(Calendar.MINUTE) * 60 + it.get(Calendar.SECOND) })
+    }
+
+    @Test fun cipherBase64ColorHtml() {
+        val key = SecretKeySpec(ByteArray(32) { it.toByte() }, "AES")
+        val enc = Cipher.getInstance("AES/GCM/NoPadding").apply { init(Cipher.ENCRYPT_MODE, key) }
+        val packed = enc.iv!! + enc.doFinal("sealed ✓".encodeToByteArray())
+        val text = Base64.encodeToString(packed, Base64.NO_WRAP)
+        val back = Base64.decode(text, Base64.NO_WRAP)
+        val dec = Cipher.getInstance("AES/GCM/NoPadding").apply { init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(128, back, 0, 12)) }
+        assertEquals("sealed ✓", dec.doFinal(back, 12, back.size - 12).decodeToString())
+        assertEquals(0xFF9ABEFF.toInt(), Color.rgb(0x9A, 0xBE, 0xFF))
+        val hsv = FloatArray(3); Color.colorToHSV(Color.rgb(255, 0, 0), hsv)
+        assertEquals(0f, hsv[0]); assertEquals(1f, hsv[1]); assertEquals(1f, hsv[2])
+        assertEquals(Color.rgb(0, 255, 0), Color.HSVToColor(floatArrayOf(120f, 1f, 1f)))
+        assertEquals("Line one\nSecond & more", HtmlCompat.fromHtml("<p>Line one</p><b>Second</b> &amp; more", HtmlCompat.FROM_HTML_MODE_COMPACT).toString().trim())
     }
 }

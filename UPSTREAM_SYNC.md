@@ -116,8 +116,17 @@ It reports:
 Keep going until report 1 and report 2 are empty. Report 3 lists the porting
 work left to do.
 
-Kotlin/Native can't compile iOS targets on Linux. `sync_check.py` is the only
-local check. Real compile errors come from CI (§8).
+Then type-check the iOS Kotlin on Linux, in seconds:
+
+```sh
+ios/tools/klib_check.sh        # shims, JvmStd template, the data layer and iosTest, against the real iOS platform klibs
+```
+
+It downloads the Kotlin/Native toolchain once (from the JetBrains/kotlin GitHub release) and compiles for
+`ios_simulator_arm64` without Xcode. It cannot see Compose, Skia, or AndroidX lifecycle (Google Maven is not
+reachable from the cloud sandbox), so any shim file whose first line is `//@cmp` is skipped and only CI
+checks it. Everything else, including every Foundation, UIKit, CoreLocation and Security call, is checked here.
+Real compile errors for the rest come from CI (§8).
 
 ## 6. Shim or override: the decision rule
 
@@ -175,9 +184,10 @@ git push -u origin <branch>
 - `.github/workflows/ios.yml` runs on every push. It links the Kotlin framework,
   runs `iosSimulatorArm64Test`, builds the unsigned `Kav.ipa`, and attaches it as
   a workflow artifact.
-- Read failures with the GitHub MCP tools (`actions_list` → `get_job_logs`).
-  Fix all the errors from one log in one commit before pushing again. Every
-  round trip costs about 10–15 minutes.
+- Read failures with the GitHub MCP tools (`actions_list` → `get_job_logs` with `return_content=true`,
+  `tail_lines=3000`). The result is saved to a file: run `python3 ios/tools/ci_errors.py <that file>` for the
+  compiler errors alone. Fix all the errors from one log in one commit before pushing again. Every round
+  trip costs about 10 minutes; the `Compile Kotlin` step fails first and fast, before tests and linking.
 - "Flaky" is not a diagnosis. Find the real cause.
 - Done means a green run on the merge commit and an empty §0 invariant check.
 

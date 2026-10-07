@@ -56,6 +56,19 @@ installed via SideStore directly, not inside LiveContainer.
 - `ios/tools/sync_check.py` is implemented (baseline: 144 uncovered platform APIs, which is the Phase 1-2 shim to-do list).
 - Repo-root `.gitignore` is upstream-owned, so iOS ignores live in `ios/.gitignore`.
 
+**Phases 1 + 2** (data layer + whole UI) were done together: the data layer is not compilable alone (it references
+`ActiveJourney`/`Prefs` in MainActivity.kt, `metres` in Common.kt, `DefaultAccent` in Accent.kt), so the Gradle scope is
+`all`. What was built, and the decisions that differ from the plan above:
+- **More shim, less override than planned.** Only `Updates.kt`, `Liquid.kt`, `Qr.kt` and `TripService.kt` are overridden.
+  `TileMap.kt`, `StopPhotos.kt`, `TripNotice.kt`, `Pay.kt`, `PayHistory.kt` and `MainActivity.kt` compile unchanged:
+  the MapLibre *Android* API is shimmed (`compat/org/maplibre`, serialised to style-spec JSON and forwarded to a Swift
+  `NativeMap`, see `NativeMap.kt`), Skia backs `android.graphics.Bitmap/BitmapFactory/Canvas`, and Pay's `Seal` runs on a
+  pure-Kotlin AES-GCM (verified against `javax.crypto`) with the key in the Keychain (file fallback).
+- `ios/tools/klib_check.sh` type-checks all non-Compose Kotlin on Linux in seconds; `ios/tools/ci_errors.py` reads CI logs.
+- `//@cmp` on the first line of a shim marks files that need Compose/Skia/lifecycle (only CI compiles them).
+- Payments are therefore *compiled* in v1 but have no QR scanner or QR encoder (`Qr.ios.kt` shows a notice).
+- Not yet done: the Swift `MapBridge` (Phase 3). Until it exists the map is an empty view and its style never loads.
+
 ---
 
 ## Core architecture: "upstream-pristine + compat layer + overrides"

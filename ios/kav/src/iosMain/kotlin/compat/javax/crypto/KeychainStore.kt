@@ -48,7 +48,17 @@ internal object KeychainStore {
         CFDictionaryAddValue(it, kSecAttrAccount, str(alias))
     }
 
-    fun get(alias: String): ByteArray? = memScoped {
+    // A sideloaded or containerised app may be refused Keychain access (no entitlement); the key then lives in a file
+    // that iOS keeps out of backups and encrypts at rest while the device is locked.
+    private fun fallback(alias: String) = java.io.File(android.content.KavApplicationContext.filesDir, ".kav-key-" + alias)
+
+    fun get(alias: String): ByteArray? = fromKeychain(alias) ?: fallback(alias).takeIf { it.exists() }?.readBytes()
+
+    fun put(alias: String, value: ByteArray) {
+        if (!toKeychain(alias, value)) fallback(alias).writeBytes(value) else fallback(alias).delete()
+    }
+
+    private fun fromKeychain(alias: String): ByteArray? = memScoped {
         val q = base(alias)
         CFDictionaryAddValue(q, kSecReturnData, kCFBooleanTrue)
         CFDictionaryAddValue(q, kSecMatchLimit, kSecMatchLimitOne)
@@ -61,13 +71,14 @@ internal object KeychainStore {
         ByteArray(n) { ptr!![it].toByte() }.also { CFRelease(data) }
     }
 
-    fun put(alias: String, value: ByteArray) {
+    private fun toKeychain(alias: String, value: ByteArray): Boolean {
         SecItemDelete(base(alias))
         val q = base(alias)
         val data = value.usePinned { CFDataCreate(kCFAllocatorDefault, it.addressOf(0).reinterpret(), value.size.convert()) }
         CFDictionaryAddValue(q, kSecValueData, data)
         CFDictionaryAddValue(q, kSecAttrAccessible, kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly)
-        SecItemAdd(q, null)
+        val status = SecItemAdd(q, null)
         CFRelease(data)
+        return status == errSecSuccess
     }
 }
