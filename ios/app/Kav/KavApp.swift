@@ -9,6 +9,10 @@ struct KavApp: SwiftUI.App {
     var body: some SwiftUI.Scene {
         WindowGroup {
             ComposeView().ignoresSafeArea(.all).background(SwiftUI.Color.black.ignoresSafeArea())
+                // TEMPORARY black-screen bisect: drawn by SwiftUI above Compose.
+                .overlay(alignment: .bottom) {
+                    SwiftUI.Text("SwiftUI layer").font(.headline).foregroundColor(.red).padding(.bottom, 60)
+                }
         }
     }
 }

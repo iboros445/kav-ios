@@ -30,12 +30,18 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v4
 
-      - name: Cache Kotlin/Native toolchain
-        uses: actions/cache@v4
+      # ~/.konan holds the toolchain and, after a debug link, the per-library caches (Compose, Material, icons...).
+      # Building those caches takes ~6 minutes, so the key follows every Gradle file and the cache is saved right
+      # after the link (below) instead of at the end of the job. An exact hit skips the save.
+      - name: Restore the Kotlin/Native toolchain and library caches
+        id: konan
+        uses: actions/cache/restore@v4
         with:
           path: ~/.konan
-          key: konan-${{ runner.os }}-${{ hashFiles('ios/build.gradle.kts') }}
-          restore-keys: konan-${{ runner.os }}-
+          key: konan-v2-${{ runner.os }}-${{ hashFiles('ios/**/*.gradle.kts', 'ios/gradle.properties', 'ios/gradle/wrapper/*.properties') }}
+          restore-keys: |
+            konan-v2-${{ runner.os }}-
+            konan-${{ runner.os }}-
 
       # CoreLocation's module map autolinks the private framework `_LocationEssentials`, which the Xcode 16 SDKs no longer
       # ship as a file (the simulator runtime still provides it). The linker only needs a stub to resolve the name.
@@ -96,6 +102,14 @@ jobs:
           if [[ "$GITHUB_REF" == refs/tags/ios-v* ]]; then v=Release; else v=Debug; fi
           echo "variant=$(echo $v | tr '[:upper:]' '[:lower:]')Framework" >> "$GITHUB_OUTPUT"
           ./gradlew ":kavkit:link${v}FrameworkIosArm64" --console=plain
+
+      - name: Save the Kotlin/Native toolchain and library caches
+        if: steps.konan.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.konan
+          key: ${{ steps.konan.outputs.cache-primary-key }}
 
       - name: App icon from .github/icon.png
         working-directory: .

@@ -72,20 +72,34 @@ fun MainViewController(): UIViewController {
         CompositionLocalProvider(LocalContext provides activity, LocalViewModelStoreOwner provides activity) {
             // The app has its own look (OLED, dark, light) and ignores the system's. Everything iOS draws itself
             // (window background, keyboard, share sheet, pickers, status bar) is told to follow it.
-            SideEffect { IosChrome.apply(light = K.light, background = K.bg) }
+            // TEMPORARY black-screen bisect: one launch walks through three stages, 4 s each, and says which is on
+            // screen. 1 = plain Compose only. 2 = plus IosChrome (window recolouring). 3 = upstream's UI.
+            var stage by remember { mutableStateOf(1) }
             var size by remember { mutableStateOf(IntSize.Zero) }
             var frames by remember { mutableStateOf(0) }
             LaunchedEffect(Unit) {
-                Log.i("Kav", "compose: first composition")
-                while (frames < 120) { withFrameNanos { }; frames++; if (frames == 1) Log.i("Kav", "compose: first frame") }
+                Log.i("Kav", "bisect: stage 1 (plain compose)")
+                delay(4000); stage = 2; Log.i("Kav", "bisect: stage 2 (IosChrome) frames=$frames")
+                delay(4000); stage = 3; Log.i("Kav", "bisect: stage 3 (upstream) frames=$frames")
+                delay(4000); Log.i("Kav", "bisect: stage 3 after 4 s frames=$frames")
             }
+            LaunchedEffect(Unit) {
+                while (true) { withFrameNanos { }; frames++; if (frames == 1) Log.i("Kav", "compose: first frame") }
+            }
+            if (stage >= 2) SideEffect { IosChrome.apply(light = K.light, background = K.bg) }
             Box(Modifier.fillMaxSize().onSizeChanged { size = it; Log.i("Kav", "compose: size ${it.width}x${it.height}") }) {
-                activity.content?.invoke()
-                BackEdge()
-                ToastHost()
+                if (stage < 3) {
+                    Box(Modifier.fillMaxSize().background(Color(0xFF0B3D91)))
+                } else {
+                    activity.content?.invoke()
+                    BackEdge()
+                    ToastHost()
+                }
                 Text(
-                    "ui ${size.width}x${size.height} frames=$frames", fontSize = 9.sp, color = Color(0xFF8A8A8A),
-                    modifier = Modifier.align(Alignment.TopStart).padding(start = 6.dp, top = 52.dp),
+                    "STAGE $stage  ${if (stage == 1) "plain compose" else if (stage == 2) "+ IosChrome" else "upstream UI"}\n" +
+                        "ui ${size.width}x${size.height} frames=$frames",
+                    fontSize = 22.sp, color = Color(0xFFFFD60A),
+                    modifier = Modifier.align(Alignment.Center).background(Color(0xCC000000)).padding(12.dp),
                 )
             }
         }
