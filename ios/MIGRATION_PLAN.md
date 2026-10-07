@@ -34,6 +34,26 @@ installed via SideStore directly, not inside LiveContainer.
 
 ---
 
+## Status log (keep updated)
+
+**Phase 0** (scaffolding + spikes): files written, waiting on the first green `ios.yml` run + the user installing the IPA.
+- Pinned: Kotlin **2.4.0**, Compose Multiplatform **1.12.1**, Gradle wrapper **8.14.4**, coroutines 1.10.2
+  (`ios/build.gradle.kts`, `ios/kav/build.gradle.kts`). `compose.material3` etc. use the deprecated accessors
+  (still work; Gradle prints a deprecation warning).
+- **Spike result: Kotlin/Native accepts `package java.*` and `package org.json` declarations**, so the
+  "rewrite imports to `kavcompat.*`" fallback is NOT needed. (Verified by compiling the shims with
+  `kotlinc-native 2.4.0 -p library` for linuxX64.)
+- Local compile check that works on Linux: download `kotlin-native-prebuilt-linux-x86_64-2.4.0.tar.gz` from the
+  JetBrains/kotlin GitHub release (download.jetbrains.com is blocked) and run
+  `kotlinc-native <pure-Kotlin files> -p library -o x`. It type-checks pure-Kotlin shims in seconds; it cannot link
+  (needs blocked downloads) and cannot see `platform.*` (iOS-only) APIs. Use it before spending a CI round trip.
+- `String.format` shim (`jvmstd/JvmStd.kt.template`) was checked against `java.util.Formatter` on the JVM for 136 cases.
+- `kav.upstreamScope` in `ios/gradle.properties` is `none` in Phase 0; Phase 1 sets `data`, Phase 2 sets `all`.
+- `ios/tools/sync_check.py` is implemented (baseline: 144 uncovered platform APIs, which is the Phase 1-2 shim to-do list).
+- Repo-root `.gitignore` is upstream-owned, so iOS ignores live in `ios/.gitignore`.
+
+---
+
 ## Core architecture: "upstream-pristine + compat layer + overrides"
 
 **Golden rule: nothing under `android/` (or any other upstream file) is ever edited.** All iOS work

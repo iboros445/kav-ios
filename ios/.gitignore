@@ -1,0 +1,10 @@
+# The repo-root .gitignore belongs to upstream, so iOS ignores live here.
+build/
+.gradle/
+.kotlin/
+local.properties
+app/Kav.xcodeproj/
+# Filled in by CI from the upstream release / android assets / .github/icon.png
+app/assets/
+app/Kav/Assets.xcassets/AppIcon.appiconset/icon-1024.png
+ios/app/Kav/Info.plist

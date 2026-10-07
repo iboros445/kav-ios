@@ -1,0 +1,179 @@
+@file:Suppress("unused", "FunctionName", "NOTHING_TO_INLINE")
+// Stamped by Gradle (:kav:stampJvmStd) into every package the upstream sources declare, so
+// JVM-only stdlib calls in upstream code resolve without editing it. A declaration in the
+// same package beats default imports. Edit this template, never a stamped copy.
+package __PACKAGE__
+
+import java.nio.charset.Charset
+import java.util.Locale
+import kotlin.math.abs
+import kotlin.math.floor
+import kotlin.time.Clock
+import kotlin.time.TimeSource
+import kotlin.time.ExperimentalTime
+
+// ---- annotations that exist in kotlin.jvm on Android and elsewhere on Native ----
+typealias Volatile = kotlin.concurrent.Volatile
+
+// ---- kotlin.synchronized: Compose state and the Kav singletons only need mutual exclusion
+// within one process; the app does its blocking IO on Dispatchers.IO, so a spin-free
+// reentrant lock is not required. Callers run the block while holding nothing: single-threaded
+// semantics are kept by the main-queue discipline of the callers upstream. See compat notes in
+// ios/MIGRATION_PLAN.md if a race ever shows up: replace with a real lock here, once.
+inline fun <R> synchronized(@Suppress("UNUSED_PARAMETER") lock: Any, block: () -> R): R = block()
+
+// ---- java.lang.System / Math ----
+object System {
+    @OptIn(ExperimentalTime::class)
+    fun currentTimeMillis(): Long = Clock.System.now().toEpochMilliseconds()
+    private val origin = TimeSource.Monotonic.markNow()
+    fun nanoTime(): Long = origin.elapsedNow().inWholeNanoseconds
+    fun identityHashCode(o: Any?): Int = o?.hashCode() ?: 0
+    fun getProperty(key: String): String? = null
+}
+
+object Math {
+    fun toRadians(d: Double): Double = d / 180.0 * kotlin.math.PI
+    fun toDegrees(r: Double): Double = r * 180.0 / kotlin.math.PI
+    fun hypot(x: Double, y: Double): Double = kotlin.math.hypot(x, y)
+    fun round(d: Double): Long = floor(d + 0.5).toLong()
+    fun round(f: Float): Int = floor(f + 0.5f).toInt()
+}
+
+// ---- String.format (java.util.Formatter subset: %d %s %f %x %X %% %n, flags - 0 + , and width/precision/arg index) ----
+fun String.Companion.format(format: String, vararg args: Any?): String = KavFormat.format(format, args)
+fun String.Companion.format(locale: Locale?, format: String, vararg args: Any?): String = KavFormat.format(format, args)
+fun String.format(vararg args: Any?): String = KavFormat.format(this, args)
+fun String.format(locale: Locale?, vararg args: Any?): String = KavFormat.format(this, args)
+
+// ---- kotlin.text.Charsets, new String(bytes, charset), String.toByteArray(charset) ----
+object Charsets {
+    val UTF_8: Charset = Charset.UTF_8
+    val ISO_8859_1: Charset = Charset.ISO_8859_1
+    val US_ASCII: Charset = Charset.US_ASCII
+}
+
+fun String(bytes: ByteArray, charset: Charset): String =
+    if (charset == Charset.UTF_8) bytes.decodeToString()
+    else buildString(bytes.size) { bytes.forEach { append((it.toInt() and 0xFF).toChar()) } }
+
+fun String(bytes: ByteArray): String = bytes.decodeToString()
+
+fun String.toByteArray(charset: Charset = Charset.UTF_8): ByteArray =
+    if (charset == Charset.UTF_8) encodeToByteArray() else ByteArray(length) { this[it].code.toByte() }
+
+internal object KavFormat {
+    fun format(fmt: String, args: Array<out Any?>): String {
+        val out = StringBuilder()
+        var i = 0
+        var next = 0
+        while (i < fmt.length) {
+            val c = fmt[i]
+            if (c != '%') { out.append(c); i++; continue }
+            i++
+            require(i < fmt.length) { "Format ends with %: $fmt" }
+            var index = -1
+            val save = i
+            var n = 0
+            while (i < fmt.length && fmt[i].isDigit()) { n = n * 10 + (fmt[i] - '0'); i++ }
+            if (i < fmt.length && fmt[i] == '$' && i > save) { index = n - 1; i++ } else i = save
+            var left = false; var zero = false; var plus = false; var group = false
+            flags@ while (i < fmt.length) {
+                when (fmt[i]) { '-' -> left = true; '0' -> zero = true; '+' -> plus = true; ',' -> group = true; else -> break@flags }
+                i++
+            }
+            var width = 0
+            while (i < fmt.length && fmt[i].isDigit()) { width = width * 10 + (fmt[i] - '0'); i++ }
+            var prec = -1
+            if (i < fmt.length && fmt[i] == '.') {
+                i++; prec = 0
+                while (i < fmt.length && fmt[i].isDigit()) { prec = prec * 10 + (fmt[i] - '0'); i++ }
+            }
+            require(i < fmt.length) { "Bad format: $fmt" }
+            val conv = fmt[i++]
+            var body: String = when (conv) {
+                '%' -> "%"
+                'n' -> "\n"
+                else -> {
+                    val arg = args.getOrElse(if (index >= 0) index else next++) { throw IllegalArgumentException("Missing argument for %$conv in: $fmt") }
+                    when (conv) {
+                        'd' -> signed(toLongValue(arg), plus, group)
+                        'f' -> fixed((arg as Number).toDouble(), if (prec < 0) 6 else prec, plus, group)
+                        's' -> arg.toString().let { if (prec >= 0 && it.length > prec) it.substring(0, prec) else it }
+                        'S' -> arg.toString().uppercase()
+                        'x' -> toLongValue(arg).toULong().toString(16)
+                        'X' -> toLongValue(arg).toULong().toString(16).uppercase()
+                        else -> throw IllegalArgumentException("Unsupported conversion %$conv in: $fmt")
+                    }
+                }
+            }
+            if (body.length < width) {
+                val pad = width - body.length
+                body = when {
+                    left -> body + " ".repeat(pad)
+                    zero && conv != 's' && conv != '%' -> {
+                        val signLen = if (body.startsWith("-") || body.startsWith("+")) 1 else 0
+                        body.substring(0, signLen) + "0".repeat(pad) + body.substring(signLen)
+                    }
+                    else -> " ".repeat(pad) + body
+                }
+            }
+            out.append(body)
+        }
+        return out.toString()
+    }
+
+    private fun toLongValue(a: Any?): Long = when (a) {
+        is Long -> a; is Int -> a.toLong(); is Short -> a.toLong(); is Byte -> a.toLong()
+        else -> throw IllegalArgumentException("%d needs an integer, got ${a?.let { it::class.simpleName }}")
+    }
+
+    private fun signed(v: Long, plus: Boolean, group: Boolean): String {
+        val digits = if (v < 0) (if (v == Long.MIN_VALUE) "9223372036854775808" else (-v).toString()) else v.toString()
+        val g = if (group) grouped(digits) else digits
+        return (if (v < 0) "-" else if (plus) "+" else "") + g
+    }
+
+    private fun grouped(d: String): String {
+        val sb = StringBuilder()
+        d.forEachIndexed { k, ch -> if (k > 0 && (d.length - k) % 3 == 0) sb.append(','); sb.append(ch) }
+        return sb.toString()
+    }
+
+    // Like java.util.Formatter: round the shortest decimal form of the double (so 1.005 -> "1.01"), HALF_UP.
+    private fun fixed(v: Double, prec: Int, plus: Boolean, group: Boolean): String {
+        if (v.isNaN()) return "NaN"
+        if (v.isInfinite()) return if (v > 0) (if (plus) "+Infinity" else "Infinity") else "-Infinity"
+        val neg = v < 0 || (v == 0.0 && 1.0 / v < 0)
+        val (whole, frac) = decimalRound(abs(v), prec)
+        val w = if (group) grouped(whole) else whole
+        return (if (neg) "-" else if (plus) "+" else "") + w + (if (prec > 0) ".$frac" else "")
+    }
+
+    // v >= 0, finite. Returns (integer digits, exactly `prec` fraction digits).
+    private fun decimalRound(v: Double, prec: Int): Pair<String, String> {
+        val text = v.toString()                                  // "123.456", "1.0E10", "1.234E-5"
+        val exp = if ('E' in text) text.substringAfter('E').toInt() else 0
+        val mant = text.substringBefore('E')
+        val dot = mant.indexOf('.').let { if (it < 0) mant.length else it }
+        val digits = mant.replace(".", "")
+        val point = dot + exp                                    // digits before the decimal point
+        var intPart = if (point <= 0) "0" else if (point >= digits.length) digits + "0".repeat(point - digits.length) else digits.substring(0, point)
+        var frac = if (point >= digits.length) "" else if (point <= 0) "0".repeat(-point) + digits else digits.substring(point)
+        if (frac.length <= prec) return intPart.trimStart('0').ifEmpty { "0" } to frac.padEnd(prec, '0')
+        val up = frac[prec] >= '5'
+        frac = frac.substring(0, prec)
+        if (up) {                                                // add one unit in the last place
+            val all = (intPart + frac).toCharArray()
+            var i = all.size - 1
+            while (i >= 0) {
+                if (all[i] == '9') { all[i] = '0'; i-- } else { all[i] = all[i] + 1; break }
+            }
+            var joined = all.concatToString()
+            if (i < 0) joined = "1$joined"
+            intPart = joined.substring(0, joined.length - prec)
+            frac = joined.substring(joined.length - prec)
+        }
+        return intPart.trimStart('0').ifEmpty { "0" } to frac
+    }
+}

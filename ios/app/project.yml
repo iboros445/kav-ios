@@ -1,0 +1,55 @@
+# XcodeGen spec. The .xcodeproj is generated in CI and never committed.
+name: Kav
+options:
+  deploymentTarget:
+    iOS: "16.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    TARGETED_DEVICE_FAMILY: "1"
+    MARKETING_VERSION: "0.0.0"      # overridden by CI with upstream's versionName
+    CURRENT_PROJECT_VERSION: "1"    # overridden by CI with the run number
+    ENABLE_BITCODE: NO
+targets:
+  Kav:
+    type: application
+    platform: iOS
+    sources:
+      - path: Kav
+      - path: assets            # map style/fonts/sprites + il.kav, copied in by CI
+        type: folder
+        optional: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.github.iboros445.kav
+        PRODUCT_NAME: Kav
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        GENERATE_INFOPLIST_FILE: NO
+        # The Kotlin framework is built by Gradle (:kav:linkReleaseFrameworkIosArm64) before xcodebuild runs.
+        FRAMEWORK_SEARCH_PATHS: "$(SRCROOT)/../kav/build/bin/iosArm64/releaseFramework"
+        # KavKit is static, so the system frameworks it uses must be linked here.
+        OTHER_LDFLAGS: >-
+          -framework KavKit -lc++
+          -framework Metal -framework MetalKit -framework QuartzCore -framework CoreGraphics
+          -framework CoreText -framework CoreFoundation -framework Foundation -framework UIKit
+          -framework AVFoundation -framework CoreLocation -framework CoreMotion
+          -framework UserNotifications -framework Security
+    info:
+      path: Kav/Info.plist
+      properties:
+        CFBundleDisplayName: Kav
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        UIRequiredDeviceCapabilities: [arm64]
+        CADisableMinimumFrameDurationOnPhone: true
+        ITSAppUsesNonExemptEncryption: false
+        UIBackgroundModes: [location]
+        NSLocationWhenInUseUsageDescription: Kav uses your location to find stops near you and to follow your trip.
+        NSLocationAlwaysAndWhenInUseUsageDescription: Kav follows your location while a trip is under way so the steps move on by themselves.
+        NSCameraUsageDescription: Kav reads the QR code on a bus when you pay for a ride.
+        CFBundleURLTypes:
+          - CFBundleURLName: io.github.iboros445.kav.moovit
+            CFBundleURLSchemes: [moovit]

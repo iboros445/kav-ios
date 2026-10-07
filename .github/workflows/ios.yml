@@ -1,0 +1,106 @@
+name: iOS
+
+on:
+  push:
+    branches: ['**']
+    tags: ['ios-v*']
+  workflow_dispatch:
+
+concurrency:
+  group: ios-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: ios
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Cache Kotlin/Native toolchain
+        uses: actions/cache@v4
+        with:
+          path: ~/.konan
+          key: konan-${{ runner.os }}-${{ hashFiles('ios/build.gradle.kts') }}
+          restore-keys: konan-${{ runner.os }}-
+
+      - name: Upstream version
+        id: ver
+        working-directory: .
+        run: |
+          v=$(sed -n 's/.*versionName = "\(.*\)".*/\1/p' android/app/build.gradle.kts)
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "Upstream versionName: $v"
+
+      # The MOT timetable has no licence, so it is never committed: take il.kav out of upstream's release APK.
+      - name: Fetch il.kav from the upstream release APK
+        continue-on-error: true
+        working-directory: .
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p ios/app/assets
+          tmp=$(mktemp -d)
+          gh release download --repo ImNoammm/kav --pattern '*.apk' --dir "$tmp"
+          unzip -p "$tmp"/*.apk assets/il.kav > ios/app/assets/il.kav
+          ls -l ios/app/assets/il.kav
+
+      - name: Bundle the map style, fonts and sprites
+        working-directory: .
+        run: |
+          mkdir -p ios/app/assets
+          cp -R android/app/src/main/assets/map ios/app/assets/map
+
+      - name: Kotlin simulator tests
+        run: ./gradlew :kav:iosSimulatorArm64Test --stacktrace
+
+      - name: Link the Kotlin framework (device)
+        run: ./gradlew :kav:linkReleaseFrameworkIosArm64 --stacktrace
+
+      - name: App icon from .github/icon.png
+        working-directory: .
+        run: |
+          out=ios/app/Kav/Assets.xcassets/AppIcon.appiconset/icon-1024.png
+          # iOS rejects icons with an alpha channel: a JPEG round trip drops it.
+          sips -s format jpeg -z 1024 1024 .github/icon.png --out "$RUNNER_TEMP/icon.jpg"
+          sips -s format png "$RUNNER_TEMP/icon.jpg" --out "$out"
+
+      - name: Generate the Xcode project
+        run: |
+          brew install xcodegen
+          xcodegen generate --spec app/project.yml --project app
+
+      - name: Build the unsigned app
+        working-directory: ios/app
+        run: |
+          xcodebuild -project Kav.xcodeproj -scheme Kav -sdk iphoneos -configuration Release \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            MARKETING_VERSION='${{ steps.ver.outputs.version }}' \
+            CURRENT_PROJECT_VERSION='${{ github.run_number }}' \
+            build
+
+      - name: Package Kav.ipa
+        working-directory: ios/app
+        run: |
+          rm -rf Payload Kav.ipa
+          mkdir Payload
+          cp -R build/Build/Products/Release-iphoneos/Kav.app Payload/
+          zip -qry Kav.ipa Payload
+          ls -l Kav.ipa
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Kav-ipa
+          path: ios/app/Kav.ipa
+          if-no-files-found: error

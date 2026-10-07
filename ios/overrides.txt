@@ -1,0 +1,3 @@
+# Upstream files NOT compiled for iOS, because an iOS replacement exists.
+# Format: <path under android/app/src/main/java>  <upstream base sha>  <reason>
+# Replacement: ios/kav/src/iosMain/kotlin/overrides/<same path with .kt -> .ios.kt>. See UPSTREAM_SYNC.md.
