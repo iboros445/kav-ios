@@ -34,6 +34,15 @@ jobs:
           key: konan-${{ runner.os }}-${{ hashFiles('ios/build.gradle.kts') }}
           restore-keys: konan-${{ runner.os }}-
 
+      - name: SDK paths (the linker needs PrivateFrameworks for CoreLocation)
+        working-directory: .
+        run: |
+          echo "KAV_SDK_SIM=$(xcrun --sdk iphonesimulator --show-sdk-path)" >> "$GITHUB_ENV"
+          echo "KAV_SDK_DEV=$(xcrun --sdk iphoneos --show-sdk-path)" >> "$GITHUB_ENV"
+          for sdk in iphoneos iphonesimulator; do
+            echo "== $sdk"; find "$(xcrun --sdk $sdk --show-sdk-path)" -iname '*LocationEssentials*' -maxdepth 6 | head -5
+          done
+
       - name: Upstream version
         id: ver
         working-directory: .
@@ -65,12 +74,6 @@ jobs:
       # compile errors first and alone, so a failed run says why in a few lines
       - name: Compile Kotlin
         run: ./gradlew :kav:compileKotlinIosSimulatorArm64 --console=plain
-
-      - name: Kotlin simulator tests
-        env:
-          # simctl hands SIMCTL_CHILD_* to the simulated process with the prefix removed
-          SIMCTL_CHILD_KAV_ASSETS_DIR: ${{ github.workspace }}/ios/app/assets
-        run: ./gradlew :kav:iosSimulatorArm64Test --console=plain
 
       - name: Link the Kotlin framework (device)
         run: ./gradlew :kav:linkReleaseFrameworkIosArm64 --console=plain
@@ -112,3 +115,11 @@ jobs:
           name: Kav-ipa
           path: ios/app/Kav.ipa
           if-no-files-found: error
+
+      # Last on purpose: linking the test binary takes ~9 minutes, and the IPA above must not wait for it.
+      - name: Kotlin simulator tests
+        timeout-minutes: 25
+        env:
+          # simctl hands SIMCTL_CHILD_* to the simulated process with the prefix removed
+          SIMCTL_CHILD_KAV_ASSETS_DIR: ${{ github.workspace }}/ios/app/assets
+        run: ./gradlew :kav:iosSimulatorArm64Test --console=plain

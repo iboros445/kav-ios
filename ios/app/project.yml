@@ -27,7 +27,7 @@ targets:
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         GENERATE_INFOPLIST_FILE: NO
         # The Kotlin framework is built by Gradle (:kav:linkReleaseFrameworkIosArm64) before xcodebuild runs.
-        FRAMEWORK_SEARCH_PATHS: "$(SRCROOT)/../kav/build/bin/iosArm64/releaseFramework"
+        FRAMEWORK_SEARCH_PATHS: "$(SRCROOT)/../kav/build/bin/iosArm64/releaseFramework $(SDKROOT)/System/Library/PrivateFrameworks"
         # KavKit is static, so the system frameworks it uses must be linked here.
         OTHER_LDFLAGS: >-
           -framework KavKit -lc++
