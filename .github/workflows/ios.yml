@@ -6,6 +6,9 @@ on:
     tags: ['ios-v*']
   workflow_dispatch:
 
+permissions:
+  contents: write   # the SideStore source release
+
 concurrency:
   group: ios-${{ github.ref }}
   cancel-in-progress: true
@@ -124,6 +127,31 @@ jobs:
           name: Kav-ipa
           path: ios/app/Kav.ipa
           if-no-files-found: error
+
+      # SideStore source: every build of the iOS branch replaces the IPA on the rolling `ios-nightly` release and
+      # rewrites source.json next to it, so SideStore → Sources can install and update Kav without a computer.
+      # Source URL: https://github.com/iboros445/kav-ios/releases/download/ios-nightly/source.json
+      - name: Publish to the SideStore source
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/claude/ios-migration-plan-4ojstt'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ios-nightly
+        run: |
+          ipa="Kav-${{ steps.ver.outputs.version }}-${{ github.run_number }}.ipa"
+          cp app/Kav.ipa "$RUNNER_TEMP/$ipa"
+          notes="Build ${{ github.run_number }}: $(git log -1 --format=%s)"
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --prerelease --target "$GITHUB_SHA" --title "Kav for iPhone (latest build)" \
+              --notes "Rolling development build. Add the source in SideStore: https://github.com/${{ github.repository }}/releases/download/$TAG/source.json"
+          fi
+          # IPA first, then the source that points at it, then drop older IPAs
+          gh release upload "$TAG" "$RUNNER_TEMP/$ipa" --clobber
+          python3 tools/make_source_json.py --ipa app/Kav.ipa \
+            --url "https://github.com/${{ github.repository }}/releases/download/$TAG/$ipa" \
+            --notes "$notes" > "$RUNNER_TEMP/source.json"
+          gh release upload "$TAG" "$RUNNER_TEMP/source.json" --clobber
+          gh release view "$TAG" --json assets --jq '.assets[].name' | grep -E '^Kav-.*\.ipa$' | grep -vxF "$ipa" \
+            | xargs -r -n1 gh release delete-asset "$TAG" -y
 
       # Last on purpose: linking the test binary takes ~9 minutes, and the IPA above must not wait for it.
       - name: Kotlin simulator tests

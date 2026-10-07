@@ -10,7 +10,8 @@ Free Apple ID limits: 3 active sideloaded apps (SideStore itself counts as one),
 
 ## 1. Get the IPA
 
-Every push builds one. Until a release exists, take it from the build:
+Simplest is not to download it at all: add the SideStore source (section 4) and install Kav from SideStore.
+To take the file by hand instead, every push builds one:
 
 1. GitHub → this repo → **Actions** → the latest green **iOS** run.
 2. Download the **Kav-ipa** artifact (a zip containing `Kav.ipa`). On a computer
@@ -55,11 +56,18 @@ Keep the budget safe:
 - A *refresh* (SideStore re-signing before the 7 days are up) is not an update and costs nothing either.
 - Each build's version number goes up (`CFBundleVersion` = the CI run number), so SideStore sees it as newer.
 
-Once the SideStore source exists (Phase 5) updates become one tap: SideStore → Sources → **+**:
+### Easiest: the SideStore source
+
+Every build of the iOS branch is published to the rolling **ios-nightly** release together with a SideStore source.
+Add it once: SideStore → **Sources** → **+** →
 
 ```
-https://iboros445.github.io/kav-ios/source.json
+https://github.com/iboros445/kav-ios/releases/download/ios-nightly/source.json
 ```
+
+Kav then shows up in SideStore's **Browse** tab; new builds appear as updates in **My Apps** (pull down to check).
+No computer is needed, for the first install or for updates. (Phase 5 moves the source to GitHub Pages for tagged
+releases.)
 
 ## Refreshing
 
