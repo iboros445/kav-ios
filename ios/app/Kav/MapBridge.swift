@@ -10,13 +10,13 @@ import KavKit
 // Layers arrive as style-spec JSON. Each property is set through KVC on the matching MLN*StyleLayer from
 // NSExpression(mglJSONObject:), so a property upstream starts using needs at most one entry in `propertyNames`.
 
-final class MapLibreFactory: NSObject, NativeMapFactory {
-    func create() -> NativeMap { MapLibreNativeMap() }
+final class MapLibreFactory: NSObject, KavNativeMapFactory {
+    func create() -> KavNativeMap { MapLibreNativeMap() }
 }
 
-final class MapLibreNativeMap: NSObject, NativeMap, MLNMapViewDelegate {
+final class MapLibreNativeMap: NSObject, KavNativeMap, MLNMapViewDelegate {
     private let mapView: MLNMapView
-    private var pendingLoaded: StyleLoaded?
+    private var pendingLoaded: KavStyleLoaded?
 
     var view: UIView { mapView }
 
@@ -36,7 +36,7 @@ final class MapLibreNativeMap: NSObject, NativeMap, MLNMapViewDelegate {
 
     // MARK: style
 
-    func setStyle(styleJson: String, onLoaded: StyleLoaded) {
+    func setStyle(styleJson: String, onLoaded: KavStyleLoaded) {
         // Android's asset:// has no iOS equivalent: point glyphs and sprites at the copies in the app bundle.
         let assets = "file://" + Bundle.main.bundlePath + "/assets/"
         let json = styleJson.replacingOccurrences(of: "asset://", with: assets)
@@ -100,7 +100,7 @@ final class MapLibreNativeMap: NSObject, NativeMap, MLNMapViewDelegate {
     /// A style-spec value: an expression array starts with an operator name; anything else is a literal.
     private static func expression(_ value: Any) -> NSExpression {
         if let a = value as? [Any], let op = a.first as? String, !op.isEmpty {
-            return NSExpression(mlnJSONObject: a)
+            return NSExpression(mglJSONObject: a)
         }
         return NSExpression(forConstantValue: value)
     }
@@ -137,7 +137,7 @@ final class MapLibreNativeMap: NSObject, NativeMap, MLNMapViewDelegate {
             NSLog("Kav map: unsupported layer type \(type)")
             return
         }
-        if let filter = obj["filter"] { layer.predicate = NSPredicate(mlnJSONObject: filter) }
+        if let filter = obj["filter"] { layer.predicate = NSPredicate(mglJSONObject: filter) }
         Self.apply(obj["layout"] as? [String: Any] ?? [:], to: layer)
         Self.apply(obj["paint"] as? [String: Any] ?? [:], to: layer)
         style.addLayer(layer)
