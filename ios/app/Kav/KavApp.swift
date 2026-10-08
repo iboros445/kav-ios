@@ -11,7 +11,10 @@ struct KavApp: SwiftUI.App {
             ComposeView().ignoresSafeArea(.all).background(SwiftUI.Color.black.ignoresSafeArea())
                 // TEMPORARY black-screen bisect: drawn by SwiftUI above Compose.
                 .overlay(alignment: .bottom) {
-                    SwiftUI.Text("SwiftUI layer").font(.headline).foregroundColor(.red).padding(.bottom, 60)
+                    SwiftUI.TimelineView(.periodic(from: .now, by: 1)) { t in
+                        SwiftUI.Text("SwiftUI layer \(Int(t.date.timeIntervalSince1970) % 100)")
+                            .font(.headline).foregroundColor(.red).padding(.bottom, 60)
+                    }
                 }
         }
     }

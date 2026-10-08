@@ -22,6 +22,11 @@ import androidx.compose.runtime.withFrameNanos
 import androidx.compose.foundation.background
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.onSizeChanged
@@ -77,14 +82,22 @@ fun MainViewController(): UIViewController {
             var stage by remember { mutableStateOf(1) }
             var size by remember { mutableStateOf(IntSize.Zero) }
             var frames by remember { mutableStateOf(0) }
+            // recompositions: counts real recompositions of this scope (it reads `stage` and `frames`). tick: written
+            // every frame and read only in the draw phase below, so the bar moves without any recomposition.
+            val recompositions = remember { intArrayOf(0) }
+            SideEffect { recompositions[0]++ }
+            val tick = remember { mutableStateOf(0L) }
             LaunchedEffect(Unit) {
                 Log.i("Kav", "bisect: stage 1 (plain compose)")
-                delay(4000); stage = 2; Log.i("Kav", "bisect: stage 2 (IosChrome) frames=$frames")
-                delay(4000); stage = 3; Log.i("Kav", "bisect: stage 3 (upstream) frames=$frames")
-                delay(4000); Log.i("Kav", "bisect: stage 3 after 4 s frames=$frames")
+                delay(4000); stage = 2; Log.i("Kav", "bisect: stage 2 (IosChrome) frames=$frames recompositions=${recompositions[0]}")
+                delay(4000); stage = 3; Log.i("Kav", "bisect: stage 3 (upstream) frames=$frames recompositions=${recompositions[0]}")
+                delay(4000); Log.i("Kav", "bisect: stage 3 after 4 s frames=$frames recompositions=${recompositions[0]}")
             }
             LaunchedEffect(Unit) {
-                while (true) { withFrameNanos { }; frames++; if (frames == 1) Log.i("Kav", "compose: first frame") }
+                while (true) {
+                    withFrameNanos { tick.value = it }
+                    frames++; if (frames == 1) Log.i("Kav", "compose: first frame")
+                }
             }
             if (stage >= 2) SideEffect { IosChrome.apply(light = K.light, background = K.bg) }
             Box(Modifier.fillMaxSize().onSizeChanged { size = it; Log.i("Kav", "compose: size ${it.width}x${it.height}") }) {
@@ -95,6 +108,12 @@ fun MainViewController(): UIViewController {
                     BackEdge()
                     ToastHost()
                 }
+                // Moves left to right once a second if frames reach the screen, even with recomposition stuck.
+                Box(Modifier.align(Alignment.BottomStart).padding(bottom = 140.dp).fillMaxWidth().height(24.dp).drawBehind {
+                    val f = ((tick.value / 1_000_000L) % 1000L) / 1000f
+                    val w = this.size.width; val h = this.size.height
+                    drawRect(Color(0xFF30D158), topLeft = Offset(w * f, 0f), size = Size(w / 8, h))
+                })
                 Text(
                     "STAGE $stage  ${if (stage == 1) "plain compose" else if (stage == 2) "+ IosChrome" else "upstream UI"}\n" +
                         "ui ${size.width}x${size.height} frames=$frames",
