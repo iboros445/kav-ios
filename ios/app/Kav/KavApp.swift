@@ -1,26 +1,19 @@
 import SwiftUI
 import KavKit
 
-// KavKit exports every public Kotlin type under its bare name (`Context`, `Color`, `View`, ...), so any SwiftUI name
-// that the Kotlin side also uses has to be written out in full here.
+// KavKit (ios/kavkit) exports only the entry point now, but SwiftUI names stay qualified so a Kotlin type exported
+// later can never shadow them.
 
 @main
 struct KavApp: SwiftUI.App {
     var body: some SwiftUI.Scene {
         WindowGroup {
             ComposeView().ignoresSafeArea(.all).background(SwiftUI.Color.black.ignoresSafeArea())
-                // TEMPORARY black-screen bisect: drawn by SwiftUI above Compose.
-                .overlay(alignment: .bottom) {
-                    SwiftUI.TimelineView(.periodic(from: .now, by: 1)) { t in
-                        SwiftUI.Text("SwiftUI layer \(Int(t.date.timeIntervalSince1970) % 100)")
-                            .font(.headline).foregroundColor(.red).padding(.bottom, 60)
-                    }
-                }
         }
     }
 }
 
-// Hosts the Compose Multiplatform UI built in ios/kav (see MainViewController.kt).
+// Hosts the Compose Multiplatform UI (ios/kavkit/src/iosMain/kotlin/MainViewController.kt).
 struct ComposeView: UIViewControllerRepresentable {
     func makeUIViewController(context: Self.Context) -> UIViewController {
         MainViewControllerKt.MainViewController()

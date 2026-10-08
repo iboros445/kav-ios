@@ -14,26 +14,19 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.foundation.background
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.Alignment
-import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.draw.drawBehind
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.ComposeUIViewController
@@ -55,7 +48,6 @@ import platform.UIKit.UIStatusBarStyleLightContent
 import platform.UIKit.UIUserInterfaceStyle
 import platform.UIKit.UIViewController
 import platform.UIKit.UIWindow
-import platform.UIKit.UIWindowScene
 import platform.UIKit.setStatusBarStyle
 import uk.noammm.kav.MainActivity
 import uk.noammm.kav.ui.K
@@ -64,8 +56,8 @@ import uk.noammm.kav.ui.T
 // The entry point Swift calls (KavApp.swift). It runs upstream's MainActivity as-is: onCreate sets up preferences,
 // map and payments, and its setContent lambda is what the Compose host renders.
 //
-// Breadcrumbs go to Documents/kav.log (Files app -> Kav) because a phone without a Mac has no other way to see why a
-// screen is empty. The little line at the top left reports whether Compose has a size and is producing frames.
+// Startup breadcrumbs go to Documents/kav.log (Files app -> Kav): a phone without a Mac has no other way to see
+// how far a launch got.
 fun MainViewController(): UIViewController {
     Log.i("Kav", "MainViewController: start")
     setUnhandledExceptionHook { e -> Log.e("Kav", "unhandled exception", e) }
@@ -73,61 +65,28 @@ fun MainViewController(): UIViewController {
     activity.onCreate(null)
     Log.i("Kav", "MainViewController: onCreate done, content=${activity.content != null}")
     followAppState(activity)
-    return ComposeUIViewController {
+    lateinit var controller: UIViewController
+    controller = ComposeUIViewController {
         CompositionLocalProvider(LocalContext provides activity, LocalViewModelStoreOwner provides activity) {
-            // The app has its own look (OLED, dark, light) and ignores the system's. Everything iOS draws itself
-            // (window background, keyboard, share sheet, pickers, status bar) is told to follow it.
-            // TEMPORARY black-screen bisect: one launch walks through three stages, 4 s each, and says which is on
-            // screen. 1 = plain Compose only. 2 = plus IosChrome (window recolouring). 3 = upstream's UI.
-            var stage by remember { mutableStateOf(1) }
-            var size by remember { mutableStateOf(IntSize.Zero) }
-            var frames by remember { mutableStateOf(0) }
-            // recompositions: counts real recompositions of this scope (it reads `stage` and `frames`). tick: written
-            // every frame and read only in the draw phase below, so the bar moves without any recomposition.
-            val recompositions = remember { intArrayOf(0) }
-            SideEffect { recompositions[0]++ }
-            val tick = remember { mutableStateOf(0L) }
+            // The app has its own look (OLED, dark, light) and ignores the system's. Kav's own window (its
+            // background, keyboard, share sheet, pickers) and the status bar are told to follow it. The window is
+            // only known once the view is on screen, so the first frame applies it again.
+            val light = K.light
+            val bg = K.bg
+            SideEffect { IosChrome.apply(controller.view.window, light, bg) }
             LaunchedEffect(Unit) {
-                for (st in 1..6) {
-                    stage = st
-                    Log.i("Kav", "bisect: stage $st (${STAGES[st]}) frames=$frames recompositions=${recompositions[0]}")
-                    delay(3000)
-                }
-                Log.i("Kav", "bisect: done frames=$frames recompositions=${recompositions[0]}")
+                withFrameNanos { }
+                IosChrome.apply(controller.view.window, light, bg)
+                Log.i("Kav", "compose: first frame, window=${controller.view.window != null}")
             }
-            LaunchedEffect(Unit) {
-                while (true) {
-                    withFrameNanos { tick.value = it }
-                    frames++; if (frames == 1) Log.i("Kav", "compose: first frame")
-                }
-            }
-            // Build 15's recording: plain Compose rendered and updated until IosChrome ran, then the screen went black.
-            // Each part of IosChrome is now applied on its own; the root view background (the suspect) comes last,
-            // after upstream's UI has had its turn.
-            SideEffect { IosChrome.apply(light = K.light, background = K.bg, parts = stage - 1) }
-            Box(Modifier.fillMaxSize().onSizeChanged { size = it; Log.i("Kav", "compose: size ${it.width}x${it.height}") }) {
-                if (stage < 5) {
-                    Box(Modifier.fillMaxSize().background(Color(0xFF0B3D91)))
-                } else {
-                    activity.content?.invoke()
-                    BackEdge()
-                    ToastHost()
-                }
-                // Moves left to right once a second if frames reach the screen, even with recomposition stuck.
-                Box(Modifier.align(Alignment.BottomStart).padding(bottom = 140.dp).fillMaxWidth().height(24.dp).drawBehind {
-                    val f = ((tick.value / 1_000_000L) % 1000L) / 1000f
-                    val w = this.size.width; val h = this.size.height
-                    drawRect(Color(0xFF30D158), topLeft = Offset(w * f, 0f), size = Size(w / 8, h))
-                })
-                Text(
-                    "STAGE $stage  ${STAGES[stage]}\n" +
-                        "ui ${size.width}x${size.height} frames=$frames",
-                    fontSize = 22.sp, color = Color(0xFFFFD60A),
-                    modifier = Modifier.align(Alignment.Center).background(Color(0xCC000000)).padding(12.dp),
-                )
+            Box(Modifier.fillMaxSize()) {
+                activity.content?.invoke()
+                BackEdge()
+                ToastHost()
             }
         }
     }
+    return controller
 }
 
 /** The activity's lifecycle follows the app: upstream collects live data only while it is STARTED or RESUMED. */
@@ -183,26 +142,17 @@ private fun ToastHost() {
     }
 }
 
-private val STAGES = listOf(
-    "", "plain compose", "+ dark/light style", "+ window colour", "+ status bar", "upstream UI", "+ root view colour",
-)
-
 internal object IosChrome {
-    /** parts (TEMPORARY bisect): 1 style, 2 + window background, 3 + status bar, 5 + root view background. */
-    fun apply(light: Boolean, background: Color, parts: Int = 5) {
-        if (parts < 1) return
+    /**
+     * Only Kav's own window. The scene also holds transparent system windows above it (text effects and others);
+     * giving those a background covers the whole app with an opaque colour, which is what made Kav a black screen.
+     */
+    fun apply(window: UIWindow?, light: Boolean, background: Color) {
+        val w = window ?: return
+        w.overrideUserInterfaceStyle = if (light) UIUserInterfaceStyle.UIUserInterfaceStyleLight else UIUserInterfaceStyle.UIUserInterfaceStyleDark
         val colour = UIColor(red = background.red.toDouble(), green = background.green.toDouble(), blue = background.blue.toDouble(), alpha = 1.0)
-        // Overriding on the window reaches keyboards, sheets and pickers.
-        val style = if (light) UIUserInterfaceStyle.UIUserInterfaceStyleLight else UIUserInterfaceStyle.UIUserInterfaceStyleDark
-        for (scene in UIApplication.sharedApplication.connectedScenes) {
-            (scene as? UIWindowScene)?.windows?.forEach { w ->
-                (w as? UIWindow)?.let {
-                    it.overrideUserInterfaceStyle = style
-                    if (parts >= 2) it.backgroundColor = colour
-                    if (parts >= 5) it.rootViewController?.view?.backgroundColor = colour
-                }
-            }
-        }
-        if (parts >= 3) UIApplication.sharedApplication.setStatusBarStyle(if (light) UIStatusBarStyleDarkContent else UIStatusBarStyleLightContent, false)
+        w.backgroundColor = colour
+        w.rootViewController?.view?.backgroundColor = colour
+        UIApplication.sharedApplication.setStatusBarStyle(if (light) UIStatusBarStyleDarkContent else UIStatusBarStyleLightContent, false)
     }
 }
