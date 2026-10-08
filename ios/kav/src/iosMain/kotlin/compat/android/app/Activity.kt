@@ -6,6 +6,9 @@ import android.view.Window
 open class Activity : Context() {
     val window: Window = Window()
     open fun finish() {}
+    /** iOS asks for a permission once; after a refusal only the Settings app can grant it, Android's "don't ask again". */
+    @Suppress("UNUSED_PARAMETER")
+    fun shouldShowRequestPermissionRationale(permission: String): Boolean = false
     fun setPictureInPictureParams(p: PictureInPictureParams): Boolean = true
     fun enterPictureInPictureMode(p: PictureInPictureParams): Boolean = false
 }
