@@ -44,6 +44,8 @@ object Updates {
             setRequestProperty("User-Agent", "Kav")
         }
         val code = c.responseCode
+        // No tagged ios-v* release yet (development builds come through the SideStore source): nothing to offer.
+        if (code == 404) return Release(version = "0", name = "", notes = "", apkUrl = null, apkBytes = -1L, pageUrl = IOS_PAGE)
         if (code != 200) throw RuntimeException("GitHub HTTP $code")
         val o = JSONObject(c.inputStream.use { String(it.readBytes(), Charsets.UTF_8) })
         val assets = o.optJSONArray("assets")

@@ -196,14 +196,22 @@ open class HttpURLConnection(url: URL) : URLConnection(url) {
         fun onResponse(r: NSHTTPURLResponse) {
             val map = HashMap<String, String>()
             r.allHeaderFields.forEach { (k, v) -> if (k != null && v != null) map[k.toString().lowercase()] = v.toString() }
-            lock.lock(); response = Response(r.statusCode.toInt(), map); lock.broadcast(); lock.unlock()
+            val status = r.statusCode.toInt()
+            if (status >= 400) android.util.Log.w("KavHttp", "$method ${where()} -> HTTP $status")
+            lock.lock(); response = Response(status, map); lock.broadcast(); lock.unlock()
         }
+
+        /** Host and path only: query strings can carry the user's location. */
+        private fun where(): String = url.substringBefore('?')
 
         fun onData(bytes: ByteArray) { lock.lock(); chunks.addLast(bytes); lock.broadcast(); lock.unlock() }
 
         fun onComplete(error: NSError?) {
             lock.lock()
-            if (error != null && failure == null && !finished) failure = error.localizedDescription
+            if (error != null && failure == null && !finished) {
+                failure = error.localizedDescription
+                android.util.Log.w("KavHttp", "$method ${where()} failed: ${error.domain} ${error.code} ${error.localizedDescription}")
+            }
             finished = true
             lock.broadcast(); lock.unlock()
         }
