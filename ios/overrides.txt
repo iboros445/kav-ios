@@ -3,5 +3,5 @@
 # Replacement: ios/kav/src/iosMain/kotlin/overrides/<same path with .kt -> .ios.kt>. See UPSTREAM_SYNC.md.
 uk/noammm/kav/data/Updates.kt  e945f0b  no APK installer on iOS; updates come from the SideStore source
 uk/noammm/kav/ui/Liquid.kt  e945f0b  AGSL RuntimeShader -> Skia RuntimeEffect
-uk/noammm/kav/ui/Qr.kt  e945f0b  CameraX + zxing; AVFoundation + a QR encoder come in Phase 6
-uk/noammm/kav/TripService.kt  e945f0b  Android foreground service; Phase 4 adds background location + local notifications
+uk/noammm/kav/ui/Qr.kt  dcd6ab5  CameraX + zxing; AVFoundation + a QR encoder come in Phase 6
+uk/noammm/kav/TripService.kt  dcd6ab5  Android foreground service; Phase 4 adds background location + local notifications

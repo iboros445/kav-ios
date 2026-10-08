@@ -234,3 +234,4 @@ Keep this list current. It is the user-facing truth about the iOS build.
 | Date | upstream= | iOS tag | Notes |
 |---|---|---|---|
 | 2026-10-07 | e945f0b | — | Fork baseline (Kav 2.2). iOS migration planned |
+| 2026-10-08 | dcd6ab5 | — | Kav 2.3 + 2.3.1. Moovit CLIENT_VERSION 5.201.5.1810. Ported `QrScanner(onFail)`; `TripService` API unchanged (base bumped) |
