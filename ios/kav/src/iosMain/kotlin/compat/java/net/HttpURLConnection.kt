@@ -197,8 +197,18 @@ open class HttpURLConnection(url: URL) : URLConnection(url) {
             val map = HashMap<String, String>()
             r.allHeaderFields.forEach { (k, v) -> if (k != null && v != null) map[k.toString().lowercase()] = v.toString() }
             val status = r.statusCode.toInt()
-            if (status >= 400) android.util.Log.w("KavHttp", "$method ${where()} -> HTTP $status")
+            if (status >= 400) android.util.Log.w("KavHttp", "$method ${where()} -> HTTP $status${revisions(map)}")
+            // TEMPORARY (Live vehicles investigation): Moovit's entity lookups also when they succeed.
+            else if ("Entities/Entity" in url) android.util.Log.i("KavHttp", "$method ${where()} -> HTTP $status${revisions(map)}")
             lock.lock(); response = Response(status, map); lock.broadcast(); lock.unlock()
+        }
+
+        /** Moovit's data revision as sent (header, query) and as answered: a 412 means the sent one is stale. */
+        private fun revisions(response: Map<String, String>): String {
+            val answered = response["metro-revision-number"] ?: return ""
+            val header = requestHeaders.entries.firstOrNull { it.key.equals("Metro-Revision-Number", ignoreCase = true) }?.value
+            val query = Regex("(?:metro_revision|metroRevisionNumber)=(\\d+)").find(url)?.groupValues?.get(1)
+            return " (revision sent header=$header query=$query, answered $answered)"
         }
 
         /** Host and path only: query strings can carry the user's location. */
