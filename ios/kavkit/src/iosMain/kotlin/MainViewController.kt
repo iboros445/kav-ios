@@ -88,10 +88,12 @@ fun MainViewController(): UIViewController {
             SideEffect { recompositions[0]++ }
             val tick = remember { mutableStateOf(0L) }
             LaunchedEffect(Unit) {
-                Log.i("Kav", "bisect: stage 1 (plain compose)")
-                delay(4000); stage = 2; Log.i("Kav", "bisect: stage 2 (IosChrome) frames=$frames recompositions=${recompositions[0]}")
-                delay(4000); stage = 3; Log.i("Kav", "bisect: stage 3 (upstream) frames=$frames recompositions=${recompositions[0]}")
-                delay(4000); Log.i("Kav", "bisect: stage 3 after 4 s frames=$frames recompositions=${recompositions[0]}")
+                for (st in 1..6) {
+                    stage = st
+                    Log.i("Kav", "bisect: stage $st (${STAGES[st]}) frames=$frames recompositions=${recompositions[0]}")
+                    delay(3000)
+                }
+                Log.i("Kav", "bisect: done frames=$frames recompositions=${recompositions[0]}")
             }
             LaunchedEffect(Unit) {
                 while (true) {
@@ -99,9 +101,12 @@ fun MainViewController(): UIViewController {
                     frames++; if (frames == 1) Log.i("Kav", "compose: first frame")
                 }
             }
-            if (stage >= 2) SideEffect { IosChrome.apply(light = K.light, background = K.bg) }
+            // Build 15's recording: plain Compose rendered and updated until IosChrome ran, then the screen went black.
+            // Each part of IosChrome is now applied on its own; the root view background (the suspect) comes last,
+            // after upstream's UI has had its turn.
+            SideEffect { IosChrome.apply(light = K.light, background = K.bg, parts = stage - 1) }
             Box(Modifier.fillMaxSize().onSizeChanged { size = it; Log.i("Kav", "compose: size ${it.width}x${it.height}") }) {
-                if (stage < 3) {
+                if (stage < 5) {
                     Box(Modifier.fillMaxSize().background(Color(0xFF0B3D91)))
                 } else {
                     activity.content?.invoke()
@@ -115,7 +120,7 @@ fun MainViewController(): UIViewController {
                     drawRect(Color(0xFF30D158), topLeft = Offset(w * f, 0f), size = Size(w / 8, h))
                 })
                 Text(
-                    "STAGE $stage  ${if (stage == 1) "plain compose" else if (stage == 2) "+ IosChrome" else "upstream UI"}\n" +
+                    "STAGE $stage  ${STAGES[stage]}\n" +
                         "ui ${size.width}x${size.height} frames=$frames",
                     fontSize = 22.sp, color = Color(0xFFFFD60A),
                     modifier = Modifier.align(Alignment.Center).background(Color(0xCC000000)).padding(12.dp),
@@ -178,8 +183,14 @@ private fun ToastHost() {
     }
 }
 
+private val STAGES = listOf(
+    "", "plain compose", "+ dark/light style", "+ window colour", "+ status bar", "upstream UI", "+ root view colour",
+)
+
 internal object IosChrome {
-    fun apply(light: Boolean, background: Color) {
+    /** parts (TEMPORARY bisect): 1 style, 2 + window background, 3 + status bar, 5 + root view background. */
+    fun apply(light: Boolean, background: Color, parts: Int = 5) {
+        if (parts < 1) return
         val colour = UIColor(red = background.red.toDouble(), green = background.green.toDouble(), blue = background.blue.toDouble(), alpha = 1.0)
         // Overriding on the window reaches keyboards, sheets and pickers.
         val style = if (light) UIUserInterfaceStyle.UIUserInterfaceStyleLight else UIUserInterfaceStyle.UIUserInterfaceStyleDark
@@ -187,11 +198,11 @@ internal object IosChrome {
             (scene as? UIWindowScene)?.windows?.forEach { w ->
                 (w as? UIWindow)?.let {
                     it.overrideUserInterfaceStyle = style
-                    it.backgroundColor = colour
-                    it.rootViewController?.view?.backgroundColor = colour
+                    if (parts >= 2) it.backgroundColor = colour
+                    if (parts >= 5) it.rootViewController?.view?.backgroundColor = colour
                 }
             }
         }
-        UIApplication.sharedApplication.setStatusBarStyle(if (light) UIStatusBarStyleDarkContent else UIStatusBarStyleLightContent, false)
+        if (parts >= 3) UIApplication.sharedApplication.setStatusBarStyle(if (light) UIStatusBarStyleDarkContent else UIStatusBarStyleLightContent, false)
     }
 }
