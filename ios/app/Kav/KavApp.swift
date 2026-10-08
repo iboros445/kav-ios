@@ -6,6 +6,11 @@ import KavKit
 
 @main
 struct KavApp: SwiftUI.App {
+    init() {
+        // The map shim draws through MapLibre Native for iOS (MapBridge.swift); register it before any map exists.
+        MapHostKt.registerMapFactory(factory: MapLibreFactory())
+    }
+
     var body: some SwiftUI.Scene {
         WindowGroup {
             ComposeView().ignoresSafeArea(.all).background(SwiftUI.Color.black.ignoresSafeArea())

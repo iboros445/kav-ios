@@ -38,7 +38,7 @@ class UiSettings { fun setAllGesturesEnabled(enabled: Boolean) {} }
 /** No native map registered: an empty view, and the style never loads. */
 private class StubMap : NativeMap {
     override val view: UIView = UIView()
-    override fun setStyle(styleJson: String, onLoaded: () -> Unit) {}
+    override fun setStyle(styleJson: String, onLoaded: StyleLoaded) {}
     override fun addSource(id: String, geoJson: String) {}
     override fun setSourceData(id: String, geoJson: String) {}
     override fun addLayer(layerJson: String) {}

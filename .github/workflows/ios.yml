@@ -103,6 +103,11 @@ jobs:
           echo "variant=$(echo $v | tr '[:upper:]' '[:lower:]')Framework" >> "$GITHUB_OUTPUT"
           ./gradlew ":kavkit:link${v}FrameworkIosArm64" --console=plain
 
+      # What Swift sees of KavKit (only the entry point and the map seam), for reading Swift compile errors.
+      - name: KavKit header
+        continue-on-error: true
+        run: grep -vE '^\s*$' kavkit/build/bin/iosArm64/${{ steps.fw.outputs.variant }}/KavKit.framework/Headers/KavKit.h
+
       - name: Save the Kotlin/Native toolchain and library caches
         if: steps.konan.outputs.cache-hit != 'true'
         continue-on-error: true

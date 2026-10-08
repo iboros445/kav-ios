@@ -11,6 +11,11 @@ settings:
     MARKETING_VERSION: "0.0.0"      # overridden by CI with upstream's versionName
     CURRENT_PROJECT_VERSION: "1"    # overridden by CI with the run number
     ENABLE_BITCODE: NO
+packages:
+  # MapLibre Native for iOS (renders the offline .pmtiles map). Pinned; bump deliberately.
+  MapLibre:
+    url: https://github.com/maplibre/maplibre-gl-native-distribution
+    exactVersion: 6.31.0
 targets:
   Kav:
     type: application
@@ -20,6 +25,8 @@ targets:
       - path: assets            # map style/fonts/sprites + il.kav, copied in by CI
         type: folder
         optional: true
+    dependencies:
+      - package: MapLibre
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: io.github.iboros445.kav
