@@ -17,7 +17,7 @@ class MoovitSession(
 
 object Moovit {
     const val APP_ID = "moovit_2751703405"
-    const val CLIENT_VERSION = "5.199.1.1804"
+    const val CLIENT_VERSION = "5.201.5.1810"
     internal const val APP4 = "https://app4.moovitapp.com/services-app/services/"
     private const val APP5 = "https://app5.moovitapp.com/services-app/services/"
 
@@ -88,6 +88,8 @@ object Moovit {
         strField(19, UUID.randomUUID().toString())
         strField(20, UUID.randomUUID().toString().replace("-", ""))
         strField(21, "com.tranzmate")
+        // useNewBrazeWorkspace: Moovit's app sets it, and the payment SMS codes of a user made without it are refused.
+        boolField(22, true)
         stop()
     }.bytes()
 
@@ -574,7 +576,17 @@ object Moovit {
                 type = (jInt(item, "1") ?: 5L).toInt(),
             ))
         }
-        return out.take(5)
+        // Moovit ranks by text alone, so the same street in the user's own town can lose to Tel Aviv's.
+        // Only names holding every typed word move up: Moovit also returns stray near hits, like Shenkar's library
+        // for "מכללת ספיר". House numbers are left out, Moovit's street names don't carry them.
+        val words = searchWords(query).filter { w -> !w.all { it.isDigit() } }
+        val near = where?.let { (la, lo) ->
+            out.filter { p ->
+                uk.noammm.kav.ui.metres(la, lo, p.lat, p.lon) < 15_000 &&
+                    searchWords(p.name).let { name -> words.isNotEmpty() && words.all { w -> name.any { it.startsWith(w) } } }
+            }
+        }.orEmpty()
+        return (near + (out - near.toSet())).take(5)
     }
 
     // The timetable keys stops by GTFS code, so Moovit's own id comes from a search.
@@ -954,7 +966,14 @@ object Moovit {
     ) {
         private val byId = sections.associateBy { it.id }
 
+        // NO_GROUPING sections hold a station-to-station timetable, not a way there: Moovit's app shows them as a
+        // "View schedules" card, never among the routes.
+        private fun isSchedule(it: Itinerary) = byId[it.sectionId]?.type == SECTION_NO_GROUPING
+
+        fun schedule(): Itinerary? = itineraries.firstOrNull(::isSchedule)
+
         fun laidOut(): List<Itinerary> {
+            val itineraries = itineraries.filterNot(::isSchedule)
             if (sections.isEmpty()) return itineraries
             val seen = HashMap<Int, Int>()
             return itineraries
@@ -970,6 +989,7 @@ object Moovit {
         fun heading(it: Itinerary): String = byId[it.sectionId]?.name.orEmpty()
     }
 
+    const val SECTION_NO_GROUPING = 15
     const val TIME_ARRIVAL = 1
     const val TIME_DEPARTURE = 2
     const val TIME_LAST = 3
@@ -994,6 +1014,8 @@ object Moovit {
         routeTypes: List<Int> = ALL_ROUTE_TYPES,
         skipTaxi: Boolean = false,
         via: List<RideStops> = emptyList(),
+        stopovers: List<Place> = emptyList(),
+        toName: String? = null,
     ): Plan {
         val stops = via.flatMap { listOf(it.from, it.to) }.fold(ArrayList<Int>()) { out, id ->
             if (out.lastOrNull() != id) out.add(id)
@@ -1003,7 +1025,7 @@ object Moovit {
             stopInfo(s, id)?.takeIf { it.point != null }
                 ?: throw IllegalStateException("A saved stop is no longer available.")
         }
-        val body = tripPlanRequest(from, to, whenMs, timeType, routeTypes, skipTaxi, stops)
+        val body = tripPlanRequest(from, to, whenMs, timeType, routeTypes, skipTaxi, stops, stopovers, toName)
         val h = authHeaders(s) + mapOf("Accept" to "application/json")
         val (code, raw) = post(APP5, "V4/TripPlanner2/Search", body, h)
         if (code == 424) throw refusal(raw)
@@ -1271,6 +1293,8 @@ object Moovit {
         routeTypes: List<Int> = ALL_ROUTE_TYPES,
         skipTaxi: Boolean = false,
         via: List<StopInfo> = emptyList(),
+        stopovers: List<Place> = emptyList(),
+        toName: String? = null,
     ): ByteArray {
         fun locTarget(lat: Double, lon: Double, caption: String?, locType: Int, source: Int): TWriter {
             val inner = TWriter()
@@ -1285,11 +1309,11 @@ object Moovit {
             boolField(4, whenMs <= 0L && timeType == TIME_DEPARTURE)
             i32ListField(5, routeTypes.ifEmpty { ALL_ROUTE_TYPES })
             structField(6, locTarget(from.first, from.second, null, 9, 5))
-            structField(7, locTarget(to.first, to.second, "Destination", 1, 4))
+            structField(7, locTarget(to.first, to.second, toName?.takeIf { it.isNotBlank() } ?: "Destination", 1, 4))
             boolField(10, skipTaxi)
             i32ListField(13, listOf(5, 1, 2, 4))
             boolField(15, true)
-            structField(16, TWriter().boolField(1, false).boolField(3, false))
+            structField(16, TWriter().boolField(1, false).boolField(2, false).boolField(3, false))
             i32Field(17, if (via.isEmpty()) 1 else 0)
             strField(18, "suggested_routes")
             if (via.isNotEmpty()) {
@@ -1298,6 +1322,12 @@ object Moovit {
                     writer.structField(2, TWriter().structField(1,
                         TWriter().strField(1, stop.name).i32Field(2, stop.id)
                             .structField(3, latlon(stop.lat, stop.lon)).i32Field(4, 5)).i32Field(2, 0)).stop()
+                })
+            } else if (stopovers.isNotEmpty()) {
+                // Stops the rider added on the way: EXPLICIT locations, which Moovit routes through in order.
+                structField(19, TWriter().listField(1, TType.STRUCT, stopovers) { writer, p ->
+                    writer.structField(2, TWriter().structField(1,
+                        TWriter().strField(1, p.name).structField(3, latlon(p.lat, p.lon)).i32Field(4, 1)).i32Field(2, 1)).stop()
                 })
             }
             stop()
