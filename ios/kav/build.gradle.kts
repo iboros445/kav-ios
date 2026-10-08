@@ -74,6 +74,9 @@ kotlin {
     listOf(iosArm64(), iosSimulatorArm64()).forEach { target ->
         target.binaries.all {
             frameworkStubs?.let { linkerOpts("-F$it") }
+            // The stub exports nothing, so drop the unused load command: the iOS 26 simulator runtime has no
+            // _LocationEssentials either, and the test binary otherwise dies in dyld before any test runs.
+            linkerOpts("-dead_strip_dylibs")
         }
     }
 
