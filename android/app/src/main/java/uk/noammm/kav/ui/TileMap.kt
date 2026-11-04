@@ -5,15 +5,14 @@ import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.MotionDurationScale
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
@@ -26,7 +25,6 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLayoutDirection
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -35,9 +33,12 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.Dispatchers
 import org.maplibre.android.MapLibre
 import org.maplibre.android.camera.CameraPosition
 import org.maplibre.android.camera.CameraUpdateFactory
@@ -65,11 +66,15 @@ import kotlin.math.atan
 import kotlin.math.cos
 import kotlin.math.ln
 import kotlin.math.pow
+import kotlin.math.roundToInt
 import kotlin.math.sin
 import kotlin.math.sinh
 import kotlin.math.tan
-
-const val MAP_ATTRIBUTION = "Protomaps · © OpenStreetMap"
+import androidx.compose.animation.core.Animatable
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.CenterFocusStrong
+import androidx.compose.material.icons.rounded.MyLocation
+import androidx.compose.material.icons.rounded.Navigation
 
 data class MapLine(
     val points: List<Pair<Double, Double>>,
@@ -79,6 +84,8 @@ data class MapLine(
     val dashed: Boolean = false,
 )
 
+// id: the same dot wherever it is, for one that moves, like the rider's own location: it's drawn in its new place at
+// once rather than fading out of the old one and into the new.
 data class MapDot(
     val lat: Double,
     val lon: Double,
@@ -86,8 +93,10 @@ data class MapDot(
     val radius: Float,
     val stroke: Color = Color.Transparent,
     val strokeWidth: Float = 0f,
+    val id: String? = null,
 )
 
+// id: the vehicle a mark is of, so it glides to the vehicle's next place (TileMap).
 data class MapMarker(
     val lat: Double,
     val lon: Double,
@@ -96,15 +105,18 @@ data class MapMarker(
     val alpha: Float = 1f,
     val bottom: Boolean = false,
     val turns: Boolean = false,
+    val id: String? = null,
 )
 
-// Drawn by the map itself, so it moves with the map. Markers stay upright unless they turn.
+// Drawn by the map itself, so it moves with the map. Markers stay upright unless they turn. tracks: a vehicle's route
+// road by its id, which it glides along (TileMap).
 data class MapGeometry(
     val lines: List<MapLine> = emptyList(),
     val dots: List<MapDot> = emptyList(),
     val markers: List<MapMarker> = emptyList(),
     val halos: List<MapDot> = emptyList(),
     val images: Map<String, ImageBitmap> = emptyMap(),
+    val tracks: Map<String, List<Pair<Double, Double>>> = emptyMap(),
 )
 
 private const val SRC_LINES = "kav-lines"
@@ -157,7 +169,10 @@ private fun Style.ensureKavLayers() {
         PropertyFactory.circleStrokeWidth(Expression.toNumber(Expression.get("strokeWidth"))),
         PropertyFactory.circleSortKey(sort),
     ))
-    addLayer(markLayer("kav-mark", SRC_MARKS, turns = false))
+    // A route's own marks overlap at stations, so they keep the order they were listed in, later ones in front.
+    addLayer(markLayer("kav-mark", SRC_MARKS, turns = false).withProperties(
+        PropertyFactory.symbolSortKey(Expression.toNumber(Expression.get("order"))),
+    ))
     addLayer(CircleLayer(HALO_LAYER, SRC_LIVE_HALOS).withProperties(
         PropertyFactory.circleColor(colour),
         PropertyFactory.circleRadius(Expression.toNumber(Expression.get("r"))),
@@ -171,6 +186,17 @@ private fun Style.ensureKavLayers() {
     ))
     addLayer(markLayer("kav-live-mark", SRC_LIVE_MARKS, turns = false))
     addLayer(markLayer("kav-live-turn", SRC_LIVE_MARKS, turns = true))
+}
+
+// A layer's opacity times a; a mark keeps its own alpha under it.
+private fun Style.fadeLayers(a: Float, vararg ids: String) {
+    for (id in ids) when (val layer = getLayer(id)) {
+        is CircleLayer -> layer.setProperties(PropertyFactory.circleOpacity(a), PropertyFactory.circleStrokeOpacity(a))
+        is SymbolLayer -> layer.setProperties(
+            PropertyFactory.iconOpacity(Expression.product(Expression.toNumber(Expression.get("alpha")), Expression.literal(a))),
+        )
+        else -> {}
+    }
 }
 
 private fun markLayer(id: String, source: String, turns: Boolean) = SymbolLayer(id, source).withProperties(
@@ -189,8 +215,9 @@ private fun Style.addKavImages(images: Map<String, ImageBitmap>) {
     for ((name, image) in images) if (getImage(name) == null) addImage(name, image.asAndroidBitmap())
 }
 
-private fun markFeatures(marks: List<MapMarker>): List<Feature> = marks.map { m ->
+private fun markFeatures(marks: List<MapMarker>): List<Feature> = marks.mapIndexed { i, m ->
     Feature.fromGeometry(Point.fromLngLat(m.lon, m.lat)).apply {
+        addNumberProperty("order", i)
         addStringProperty("icon", m.icon)
         addNumberProperty("rot", m.rotation)
         addNumberProperty("alpha", m.alpha)
@@ -199,9 +226,8 @@ private fun markFeatures(marks: List<MapMarker>): List<Feature> = marks.map { m 
     }
 }
 
-private fun Style.setKavGeometry(g: MapGeometry) {
-    addKavImages(g.images)
-    val lines = g.lines.filter { it.points.size >= 2 }.mapIndexed { i, l ->
+private fun lineFeatures(lines: List<MapLine>): FeatureCollection = FeatureCollection.fromFeatures(
+    lines.filter { it.points.size >= 2 }.mapIndexed { i, l ->
         Feature.fromGeometry(LineString.fromLngLats(l.points.map { Point.fromLngLat(it.second, it.first) })).apply {
             addStringProperty("colour", rgba(l.colour))
             addStringProperty("casingColour", rgba(K.bg.copy(alpha = l.colour.alpha)))
@@ -210,10 +236,109 @@ private fun Style.setKavGeometry(g: MapGeometry) {
             addBooleanProperty("dashed", l.dashed)
             addNumberProperty("sort", i)
         }
+    },
+)
+
+// null: as it was sent.
+private fun Style.setKavGeometry(lines: FeatureCollection?, marks: FeatureCollection?) {
+    lines?.let { getSourceAs<GeoJsonSource>(SRC_LINES)?.setGeoJson(it) }
+    marks?.let { getSourceAs<GeoJsonSource>(SRC_MARKS)?.setGeoJson(it) }
+}
+
+private fun Style.setKavDots(dots: FeatureCollection) {
+    getSourceAs<GeoJsonSource>(SRC_DOTS)?.setGeoJson(dots)
+}
+
+private val MapDot.place: Any get() = id ?: Triple(lat, lon, radius)
+
+private const val GLIDE_MS = 800f
+// Past this a vehicle is put in its new place rather than glided there.
+private const val GLIDE_MAX_M = 1500.0
+
+// A vehicle's way from where it's drawn to its new place: along its route's road when both places are on it (roadBetween),
+// so a U-turn is drawn as one, else straight. Null for one that stays, or went too far to glide, put there at once.
+internal class Glide private constructor(private val way: List<Pair<Double, Double>>) {
+    private val at = DoubleArray(way.size).also { a ->
+        for (i in 1 until way.size) a[i] = a[i - 1] + metres(way[i - 1].first, way[i - 1].second, way[i].first, way[i].second)
     }
-    getSourceAs<GeoJsonSource>(SRC_LINES)?.setGeoJson(FeatureCollection.fromFeatures(lines))
-    getSourceAs<GeoJsonSource>(SRC_DOTS)?.setGeoJson(FeatureCollection.fromFeatures(dotFeatures(g.dots)))
-    getSourceAs<GeoJsonSource>(SRC_MARKS)?.setGeoJson(FeatureCollection.fromFeatures(markFeatures(g.markers)))
+
+    // Where it is a fraction t of the way, by distance along it.
+    fun place(t: Float): Pair<Double, Double> {
+        val goal = at.last() * t
+        var i = 1
+        while (i < way.lastIndex && at[i] < goal) i++
+        val seg = at[i] - at[i - 1]
+        val f = if (seg <= 0.0) 1.0 else ((goal - at[i - 1]) / seg).coerceIn(0.0, 1.0)
+        val (a, b) = way[i - 1] to way[i]
+        return (a.first + (b.first - a.first) * f) to (a.second + (b.second - a.second) * f)
+    }
+
+    companion object {
+        fun of(from: Pair<Double, Double>, to: Pair<Double, Double>, track: List<Pair<Double, Double>>?): Glide? {
+            val gap = metres(from.first, from.second, to.first, to.second)
+            if (gap < 0.5 || gap > GLIDE_MAX_M) return null
+            return Glide(track?.let { roadBetween(from, to, it) } ?: listOf(from, to))
+        }
+    }
+}
+
+// The live layer as features, each one's look made once an update: as vehicles glide only their places change. A mark's
+// id is its vehicle's, with the halo and heading after a colon.
+private class LiveFeatures(g: MapGeometry) {
+    private val halos = dotFeatures(g.halos)
+    private val marks = markFeatures(g.markers)
+    private val haloIds = g.halos.map { it.id?.substringBefore(':') }
+    private val markIds = g.markers.map { it.id?.substringBefore(':') }
+    val dots: FeatureCollection = FeatureCollection.fromFeatures(dotFeatures(g.dots))
+    val count = halos.size + marks.size
+
+    // The halos and marks with the vehicles that glide where they are t of the way.
+    fun at(t: Float, glides: Map<String, Glide>): Pair<FeatureCollection, FeatureCollection> {
+        fun placed(features: List<Feature>, ids: List<String?>) = FeatureCollection.fromFeatures(features.mapIndexed { i, f ->
+            val glide = ids[i]?.let(glides::get) ?: return@mapIndexed f
+            val (lat, lon) = glide.place(t)
+            Feature.fromGeometry(Point.fromLngLat(lon, lat), f.properties())
+        })
+        return placed(halos, haloIds) to placed(marks, markIds)
+    }
+}
+
+// How the live layer keeps up, for measuring it on a phone: on with `adb shell setprop log.tag.KavMap DEBUG`, read with
+// `adb logcat -s KavMap`. Each update logs its vehicles, how many glided, what making its features cost, the main
+// thread's time per send and the map's frames meanwhile.
+private class LiveTimes(private val map: MapView) {
+    val on = android.util.Log.isLoggable("KavMap", android.util.Log.DEBUG)
+    private val frames = ArrayList<Long>()
+    private val listener = MapView.OnDidFinishRenderingFrameListener { _, _, _ -> frames += System.nanoTime() }
+    private var began = 0L; private var sends = 0; private var mainNs = 0L; private var worstNs = 0L; var madeNs = 0L
+
+    init { if (on) map.addOnDidFinishRenderingFrameListener(listener) }
+    fun close() { if (on) map.removeOnDidFinishRenderingFrameListener(listener) }
+    fun begin() { began = System.nanoTime(); sends = 0; mainNs = 0; worstNs = 0; madeNs = 0; frames.clear() }
+
+    fun send(block: () -> Unit) {
+        val t0 = System.nanoTime()
+        block()
+        val d = System.nanoTime() - t0
+        sends++; mainNs += d; worstNs = maxOf(worstNs, d)
+    }
+
+    fun end(features: Int, moving: Int) {
+        if (!on) return
+        val f = frames.filter { it >= began }
+        val gap = f.zipWithNext { a, b -> b - a }.maxOrNull() ?: 0L
+        android.util.Log.d("KavMap", String.format(java.util.Locale.US,
+            "update: %d features, %d glided; made in %.1f ms off the main thread; %d sends, main %.2f ms avg, %.2f max; " +
+                "map %d frames in %d ms, longest gap %d ms",
+            features, moving, madeNs / 1e6, sends, if (sends > 0) mainNs / 1e6 / sends else 0.0, worstNs / 1e6,
+            f.size, (System.nanoTime() - began) / 1_000_000, gap / 1_000_000))
+    }
+}
+
+// The dot at a of its own opacity, in tenths, so a fade is about ten updates of the map whatever the screen's rate.
+private fun MapDot.faded(a: Float): MapDot {
+    val q = (a * 10).roundToInt() / 10f
+    return if (q >= 1f) this else copy(fill = fill.copy(alpha = fill.alpha * q), stroke = stroke.copy(alpha = stroke.alpha * q))
 }
 
 private fun dotFeatures(dots: List<MapDot>): List<Feature> = dots.mapIndexed { i, d ->
@@ -226,11 +351,11 @@ private fun dotFeatures(dots: List<MapDot>): List<Feature> = dots.mapIndexed { i
     }
 }
 
-private fun Style.setKavLive(g: MapGeometry) {
-    addKavImages(g.images)
-    getSourceAs<GeoJsonSource>(SRC_LIVE_HALOS)?.setGeoJson(FeatureCollection.fromFeatures(dotFeatures(g.halos)))
-    getSourceAs<GeoJsonSource>(SRC_LIVE_DOTS)?.setGeoJson(FeatureCollection.fromFeatures(dotFeatures(g.dots)))
-    getSourceAs<GeoJsonSource>(SRC_LIVE_MARKS)?.setGeoJson(FeatureCollection.fromFeatures(markFeatures(g.markers)))
+// dots: null where they stay as they were sent.
+private fun Style.setKavLive(halos: FeatureCollection, dots: FeatureCollection?, marks: FeatureCollection) {
+    getSourceAs<GeoJsonSource>(SRC_LIVE_HALOS)?.setGeoJson(halos)
+    dots?.let { getSourceAs<GeoJsonSource>(SRC_LIVE_DOTS)?.setGeoJson(it) }
+    getSourceAs<GeoJsonSource>(SRC_LIVE_MARKS)?.setGeoJson(marks)
 }
 
 private fun arrowBitmap(dp: Float): android.graphics.Bitmap {
@@ -258,6 +383,9 @@ private fun arrowBitmap(dp: Float): android.graphics.Bitmap {
     canvas.drawPath(path, fill)
     return bmp
 }
+
+// The same arrow for the stop rail (Navigate.kt), which turns it to point down the ride.
+internal fun getArrowBitmap(dp: Float): android.graphics.Bitmap = arrowBitmap(dp)
 
 internal object Geo {
     const val SIZE = 256
@@ -362,6 +490,8 @@ private class MapCamera {
     private var previousFocus: Any? = null
     private var previousPadding = 0f
     private var previousMaxZoom = Geo.MAX_Z.toFloat()
+    // The zoom the map last framed itself at, which Recentre comes back to from further out.
+    private var framedZoom: Float? = null
 
     fun update(
         points: List<WorldPoint>, viewport: Viewport, focus: Any?, padding: Float, maxZoom: Float, keepZoom: Boolean, scope: CoroutineScope,
@@ -394,13 +524,18 @@ private class MapCamera {
     fun reset(points: List<WorldPoint>, viewport: Viewport, padding: Float, maxZoom: Float, scope: CoroutineScope) {
         if (points.isEmpty()) return
         manual = false
-        moveTo(fitCamera(points, viewport, padding, maxZoom), scope)
+        val frame = fitCamera(points, viewport, padding, maxZoom)
+        framedZoom = frame.zoom
+        moveTo(frame, scope)
     }
 
+    // Zoomed out past the map's own frame (to the whole country, say), it comes back to that frame's zoom; zoomed in
+    // closer, it keeps the zoom.
     fun centre(point: WorldPoint, scope: CoroutineScope) {
         val current = destination ?: value ?: return
         manual = false
-        moveTo(current.copy(worldX = point.x, worldY = point.y, rotation = 0f), scope)
+        val zoom = maxOf(current.zoom, framedZoom ?: current.zoom)
+        moveTo(current.copy(worldX = point.x, worldY = point.y, zoom = zoom, rotation = 0f), scope)
     }
 
     fun follow(target: Follow, viewport: Viewport, scope: CoroutineScope) {
@@ -526,6 +661,9 @@ fun TileMap(
     keepZoom: Boolean = false,
     status: (@Composable () -> Unit)? = null,
     controls: (@Composable () -> Unit)? = null,
+    attribution: Boolean = true,
+    // The map read from GitHub while it isn't on the phone yet: a preview, as setup shows before the download.
+    remote: Boolean = false,
 ) {
     val ctx = LocalContext.current
     val density = LocalDensity.current
@@ -547,6 +685,10 @@ fun TileMap(
             .textureMode(true)
             .compassEnabled(false).logoEnabled(false).attributionEnabled(false)
             .foregroundLoadColor(K.surface1.toArgb()))
+            // At most one redraw a frame: drawing again at each change to the map (the halos' pulse, a glide's step,
+            // the camera) would run about 240 times a second on the Live tab, keeping the GPU busy enough to drop the
+            // whole screen's frames.
+            .apply { setMaximumFps(60) }
     }
     var map by remember { mutableStateOf<MapLibreMap?>(null) }
     var style by remember { mutableStateOf<Style?>(null) }
@@ -579,41 +721,153 @@ fun TileMap(
             mapView.onDestroy()
         }
     }
-    val mapReady = MapFile.state is MapFile.State.Ready
-    LaunchedEffect(map, mapReady, K.look) {
-        if (mapReady) map?.setStyle(Style.Builder().fromJson(MapFile.styleJson(ctx, K.light, K.look == Look.OLED))) { style = it }
+    val onPhone = MapFile.state is MapFile.State.Ready
+    val mapReady = onPhone || remote
+    val type = MapFile.type
+    LaunchedEffect(map, mapReady, onPhone, K.look, type) {
+        if (mapReady) map?.setStyle(Style.Builder().fromJson(MapFile.styleJson(ctx, K.light, K.look == Look.OLED, type, remote = !onPhone))) { style = it }
     }
     fun Style.ensureKavIcons() {
         val px = with(density) { 1.dp.toPx() }
         if (getImage(MAP_ARROW_ICON) == null) addImage(MAP_ARROW_ICON, arrowBitmap(px))
-        val span = (12f * px).toInt().coerceAtLeast(8)
-        for (m in Mode.entries) {
-            val name = modeIconName(m)
-            if (getImage(name) == null) addImage(name, modeMark(m, span).asAndroidBitmap())
-        }
     }
+    // Lines and marks made off the main thread, and sent only when they change: on the Live tab a pan changes the stops,
+    // seldom the lines.
+    val sentGeometry = remember(style) { arrayOfNulls<Any>(2) }
     LaunchedEffect(style, geometry) {
         val s = style?.takeIf { it.isFullyLoaded } ?: return@LaunchedEffect
         if (geometry != null) {
             s.ensureKavLayers()
             s.ensureKavIcons()
-            s.setKavGeometry(geometry)
+            s.addKavImages(geometry.images)
+            val lines = geometry.lines.takeIf { it != sentGeometry[0] }
+            val marks = geometry.markers.takeIf { it != sentGeometry[1] }
+            if (lines == null && marks == null) return@LaunchedEffect
+            val (lineSet, markSet) = withContext(Dispatchers.Default) {
+                lines?.let(::lineFeatures) to marks?.let { FeatureCollection.fromFeatures(markFeatures(it)) }
+            }
+            if (s.isFullyLoaded) {
+                s.setKavGeometry(lineSet, markSet)
+                sentGeometry[0] = geometry.lines; sentGeometry[1] = geometry.markers
+            }
         }
     }
-    LaunchedEffect(style, live) {
+    // Stops fade in as they come (a new area loaded, or Stops picked) and out as they go, each from where it was when
+    // the next change came, while the ones that stay keep still. A dot is the same one while it keeps its place and
+    // size, so new colours show at once. Its fade is drawn into it, in its place in the list, the ones going under the
+    // rest, so every update of the map is whole and keeps the order.
+    val dots by rememberUpdatedState(geometry?.dots)
+    LaunchedEffect(style) {
         val s = style?.takeIf { it.isFullyLoaded } ?: return@LaunchedEffect
-        if (live != null) {
-            s.ensureKavLayers()
-            s.ensureKavIcons()
-            s.setKavLive(live)
+        val shown = LinkedHashMap<Any, Float>()
+        val last = HashMap<Any, MapDot>()
+        snapshotFlow { dots }.filterNotNull().collectLatest { now ->
+            val listed = now.mapTo(HashSet()) { it.place }
+            now.associateByTo(last) { it.place }
+            val scale = currentCoroutineContext()[MotionDurationScale]?.scaleFactor ?: 1f
+            var before = 0L
+            var sent: List<MapDot>? = null
+            do {
+                val at = withFrameMillis { it }
+                // A slow frame, like the one a switch's own work makes, moves a fade on by two frames at most, so the
+                // fade still shows after it instead of being over.
+                val step = if (scale <= 0f) 1f else if (before == 0L) 0f else (at - before).coerceAtMost(32L) / (240f * scale)
+                before = at
+                for (p in listed) shown[p] = ((shown[p] ?: 0f) + step).coerceAtMost(1f)
+                val going = shown.keys.filter { it !in listed }
+                for (p in going) {
+                    val a = shown.getValue(p) - step
+                    if (a > 0f) shown[p] = a else { shown.remove(p); last.remove(p) }
+                }
+                val drawn = going.mapNotNull { p -> shown[p]?.let { last.getValue(p).faded(it) } } +
+                    now.map { it.faded(shown.getValue(it.place)) }
+                // Made off the main thread: on the Live tab a pan brings a hundred stops in and others out at once.
+                if (drawn != sent && s.isFullyLoaded) {
+                    val features = withContext(Dispatchers.Default) { FeatureCollection.fromFeatures(dotFeatures(drawn)) }
+                    if (s.isFullyLoaded) { s.ensureKavLayers(); s.setKavDots(features) }
+                    sent = drawn
+                }
+            } while (shown.any { (p, a) -> p !in listed || a < 1f })
+        }
+    }
+    // A moving vehicle glides along its route's road where it has one (Glide); a new one, or one too far to glide, is
+    // put there at once. Features are made off the main thread once an update and only moving vehicles are placed
+    // again, about twenty times a second, as making them all on the main thread drops frames.
+    val liveNow by rememberUpdatedState(live)
+    LaunchedEffect(style) {
+        val s = style?.takeIf { it.isFullyLoaded } ?: return@LaunchedEffect
+        val drawn = HashMap<String, Pair<Double, Double>>()
+        val times = LiveTimes(mapView)
+        try {
+            snapshotFlow { liveNow }.filterNotNull().collectLatest { g ->
+                s.ensureKavLayers()
+                s.ensureKavIcons()
+                s.addKavImages(g.images)
+                times.begin()
+                val scale = currentCoroutineContext()[MotionDurationScale]?.scaleFactor ?: 1f
+                val (features, glides) = withContext(Dispatchers.Default) {
+                    val made = System.nanoTime()
+                    val places = HashMap<String, Pair<Double, Double>>()
+                    for (m in g.markers) m.id?.let { places[it.substringBefore(':')] = m.lat to m.lon }
+                    for (d in g.halos) d.id?.let { places[it.substringBefore(':')] = d.lat to d.lon }
+                    val glides = HashMap<String, Glide>()
+                    if (scale > 0f) for ((id, to) in places) {
+                        drawn[id]?.let { was -> Glide.of(was, to, g.tracks[id]) }?.let { glides[id] = it }
+                    }
+                    drawn.keys.retainAll(places.keys)
+                    for ((id, to) in places) if (id !in glides) drawn[id] = to
+                    val features = LiveFeatures(g)
+                    times.madeNs = System.nanoTime() - made
+                    features to glides
+                }
+                var dots: FeatureCollection? = features.dots
+                val start = withFrameMillis { it }
+                var sent = 0L
+                while (true) {
+                    val at = withFrameMillis { it }
+                    val t = if (glides.isEmpty()) 1f else ((at - start) / (GLIDE_MS * scale)).coerceIn(0f, 1f)
+                    if (t < 1f && at - sent < 50) continue
+                    sent = at
+                    val eased = FastOutSlowInEasing.transform(t)
+                    val (halos, marks) = withContext(Dispatchers.Default) {
+                        for ((id, glide) in glides) drawn[id] = glide.place(eased)
+                        features.at(eased, glides)
+                    }
+                    if (s.isFullyLoaded) times.send { s.setKavLive(halos, dots, marks) }
+                    dots = null
+                    if (t >= 1f) break
+                }
+                times.end(features.count, glides.size)
+            }
+        } finally {
+            times.close()
+        }
+    }
+    // Marks and vehicles fade in when they first come, not pop up; switching what's shown doesn't fade them again.
+    val marksShown = geometry != null && geometry.markers.isNotEmpty()
+    val liveShown = live != null && (live.dots.isNotEmpty() || live.markers.isNotEmpty())
+    val marksFade = remember { Animatable(0f) }
+    val liveFade = remember { Animatable(0f) }
+    LaunchedEffect(marksShown) { if (marksShown) { marksFade.snapTo(0f); marksFade.animateTo(1f, tween(360)) } }
+    LaunchedEffect(liveShown) { if (liveShown) { liveFade.snapTo(0f); liveFade.animateTo(1f, tween(360)) } }
+    LaunchedEffect(style) {
+        val s = style?.takeIf { it.isFullyLoaded } ?: return@LaunchedEffect
+        snapshotFlow { marksFade.value to liveFade.value }.collect { (marksA, liveA) ->
+            if (!s.isFullyLoaded) return@collect
+            s.fadeLayers(marksA, "kav-mark")
+            s.fadeLayers(liveA, "kav-live-dot", "kav-live-mark", "kav-live-turn")
         }
     }
     if (live?.halos?.isNotEmpty() == true) {
         val pulse = rememberLivePulse()
         LaunchedEffect(style) {
             val s = style?.takeIf { it.isFullyLoaded } ?: return@LaunchedEffect
+            // Thirty steps a second are enough for a slow, soft pulse, and each one draws the whole map again.
+            var sent = 0L
             snapshotFlow { pulse.value }.collect { p ->
-                if (!s.isFullyLoaded) return@collect
+                val now = android.os.SystemClock.uptimeMillis()
+                if (!s.isFullyLoaded || now - sent < 33) return@collect
+                sent = now
                 s.getLayer(HALO_LAYER)?.setProperties(
                     PropertyFactory.circleRadius(Expression.product(Expression.toNumber(Expression.get("r")), Expression.literal(p))),
                 )
@@ -642,12 +896,15 @@ fun TileMap(
         }
         val anchor = viewport.anchor
         val look by rememberUpdatedState(onLook)
-        if (onLook != null) LaunchedEffect(w, h) {
+        val mapSize by rememberUpdatedState(w to h)
+        // Only a hand on the map changes where it looks: the map growing or shrinking isn't a new place.
+        if (onLook != null) LaunchedEffect(Unit) {
             snapshotFlow { camera.value?.takeIf { camera.manual } }.collectLatest { c ->
                 if (c == null) return@collectLatest
                 kotlinx.coroutines.delay(600)
-                val proj = MapProjection(c.worldX, c.worldY, c.pxPerWorld, w, h)
-                val mid = proj.latLon(Offset(w / 2, h / 2))
+                val (sw, sh) = mapSize
+                val proj = MapProjection(c.worldX, c.worldY, c.pxPerWorld, sw, sh)
+                val mid = proj.latLon(Offset(sw / 2, sh / 2))
                 val corner = proj.latLon(Offset(0f, 0f))
                 look?.invoke(mid, metres(mid.first, mid.second, corner.first, corner.second) / 1000.0)
             }
@@ -693,37 +950,65 @@ fun TileMap(
             Modifier.align(Alignment.TopStart).fillMaxWidth()
                 .padding(start = contentPadding.calculateStartPadding(layoutDirection) + K.gap2,
                     top = contentPadding.calculateTopPadding() + K.gap2,
-                    end = contentPadding.calculateEndPadding(layoutDirection) + K.gap2),
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    end = contentPadding.calculateEndPadding(layoutDirection) + K.gap3),
+            horizontalArrangement = Arrangement.spacedBy(K.gap2),
             verticalAlignment = Alignment.Top,
         ) {
             Box(Modifier.weight(1f)) { status?.invoke() }
             controls?.invoke()
-            if (camera.manual || moved) Text(
-                if (follow != null) T("Follow", "עקבו") else T("Reset", "איפוס"),
-                fontSize = 11.sp, color = K.text,
-                modifier = Modifier.panel(999.dp)
-                    .clickable {
-                        look?.invoke(null, 0.0)
-                        val me = recenterOn?.takeIf { it.first.isFinite() && it.second.isFinite() }
+            // Moved away: one round button brings the map back, following again or centred as it was.
+            androidx.compose.animation.AnimatedVisibility(
+                camera.manual || moved,
+                enter = androidx.compose.animation.fadeIn(tween(160)) + androidx.compose.animation.scaleIn(initialScale = .8f),
+                exit = androidx.compose.animation.fadeOut(tween(120)) + androidx.compose.animation.scaleOut(targetScale = .8f),
+            ) {
+                // Frosted, not liquid: the map is part of the backdrop a liquid pane draws, so a liquid button on it
+                // would draw itself without end and crash the render thread.
+                CompositionLocalProvider(LocalLiquidBackdrop provides null) {
+                    val me = recenterOn?.takeIf { it.first.isFinite() && it.second.isFinite() }
+                    // Its glyph says where it goes: the way followed, the rider, or back to what the map frames.
+                    KavIconButton(
                         when {
-                            follow != null -> camera.resume()
-                            me != null -> camera.centre(WorldPoint(Geo.x(me.second), Geo.y(me.first)), scope)
-                            else -> camera.reset(worldPoints, viewport, padFraction, fitMaxZoom, scope)
-                        }
-                    }
-                    .padding(horizontal = 10.dp, vertical = 5.dp),
-            )
+                            follow != null -> Icons.Rounded.Navigation
+                            me != null -> Icons.Rounded.MyLocation
+                            else -> Icons.Rounded.CenterFocusStrong
+                        },
+                        if (follow != null) T("Follow", "עקבו") else T("Recentre", "מירכוז"),
+                        {
+                            look?.invoke(null, 0.0)
+                            when {
+                                follow != null -> camera.resume()
+                                me != null -> camera.centre(WorldPoint(Geo.x(me.second), Geo.y(me.first)), scope)
+                                else -> camera.reset(worldPoints, viewport, padFraction, fitMaxZoom, scope)
+                            }
+                        },
+                        floating = true, tint = K.text, size = 44.dp,
+                    )
+                }
+            }
         }
 
-        Text(
-            MAP_ATTRIBUTION,
-            fontSize = 8.sp, color = K.dim,
-            modifier = Modifier.align(Alignment.BottomEnd).alpha(0.8f)
-                .padding(end = contentPadding.calculateEndPadding(layoutDirection) + 6.dp,
-                    bottom = contentPadding.calculateBottomPadding() + 3.dp),
-        )
+        if (attribution) MapAttribution(Modifier.align(Alignment.BottomEnd)
+            .padding(end = contentPadding.calculateEndPadding(layoutDirection) + 6.dp,
+                bottom = contentPadding.calculateBottomPadding() + 3.dp))
     }
+}
+
+// The map's credit line, drawn by a screen whose own cards cover the map's corner (Navigate) where they end.
+// OpenStreetMap's guidelines let it fade 5 s after the map shows, as About Kav keeps the full credits. Esri's
+// satellite credit has to stay on the map.
+@Composable
+internal fun MapAttribution(modifier: Modifier = Modifier) {
+    val type = MapFile.type
+    val ready = MapFile.state is MapFile.State.Ready
+    var faded by remember(type, ready) { mutableStateOf(false) }
+    if (type == MapFile.Type.STANDARD && ready) LaunchedEffect(type, ready) {
+        kotlinx.coroutines.delay(5_000)
+        faded = true
+    }
+    val alpha by animateFloatAsState(if (faded) 0f else 0.8f, tween(400), label = "mapCredit")
+    Text(MapFile.attribution(type), fontSize = 8.sp, color = if (type == MapFile.Type.SATELLITE) Color.White else K.dim,
+        modifier = modifier.alpha(alpha))
 }
 
 @Composable
@@ -731,32 +1016,28 @@ private fun MapDownloadCard(modifier: Modifier) {
     val ctx = LocalContext.current
     Box(modifier, contentAlignment = Alignment.Center) {
         Column(
-            Modifier.padding(K.gap4).panel(14.dp).padding(K.gap4),
+            Modifier.padding(K.gap4).panel(K.rCard).padding(K.gap4),
             verticalArrangement = Arrangement.spacedBy(K.gap2),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             when (val s = MapFile.state) {
                 is MapFile.State.Downloading -> {
-                    Box(Modifier.width(160.dp).height(6.dp).clip(RoundedCornerShape(999.dp)).background(K.surface4)) {
+                    Box(Modifier.width(160.dp).height(6.dp).clip(K.capsule).background(K.surface4)) {
                         Box(Modifier.fillMaxWidth(s.progress.coerceIn(0.02f, 1f)).fillMaxHeight().background(K.accent))
                     }
                     Text(T("Downloading… ${(s.progress * 100).toInt()}%", "מורידים… ${(s.progress * 100).toInt()}%"), fontSize = 12.sp, color = K.dim)
                 }
                 else -> {
-                    Text(T("Download the map", "הורדת המפה"), fontSize = 14.sp, color = K.text, fontWeight = FontWeight.Medium)
+                    Text(T("Download the map", "הורדת המפה"), style = K.type.bodyStrong)
                     Text(
                         T(
                             "About ${MapFile.BYTES shr 20} MB for all of Israel, once. Then it works with no signal.",
                             "כ-${MapFile.BYTES shr 20} מגה-בייט לכל ישראל, פעם אחת. אחר כך היא עובדת גם בלי קליטה.",
                         ),
-                        fontSize = 12.sp, color = K.dim,
+                        style = K.type.subhead,
                     )
-                    if (s is MapFile.State.Failed) Text(T("Couldn't download it. ${s.why}", "ההורדה נכשלה. ${s.why}"), fontSize = 12.sp, color = K.critical)
-                    Box(
-                        Modifier.clip(RoundedCornerShape(K.rPill)).background(K.accent)
-                            .clickable { MapFile.startDownload(ctx) }
-                            .padding(horizontal = 18.dp, vertical = 8.dp),
-                    ) { Text(if (s is MapFile.State.Failed) T("Try again", "נסו שוב") else T("Download", "הורדה"), fontSize = 13.sp, color = K.onAccent, fontWeight = FontWeight.Medium) }
+                    if (s is MapFile.State.Failed) Text(T("Couldn't download it. ${s.why}", "ההורדה נכשלה. ${s.why}"), style = K.type.subhead, color = K.critical)
+                    KavButton(if (s is MapFile.State.Failed) T("Try again", "נסו שוב") else T("Download", "הורדה"), { MapFile.startDownload(ctx) })
                 }
             }
         }

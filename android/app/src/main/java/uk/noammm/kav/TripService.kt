@@ -18,17 +18,23 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.app.ServiceCompat
 import uk.noammm.kav.data.JourneyFile
+import uk.noammm.kav.data.RavPass
 import uk.noammm.kav.ui.Fix
 import uk.noammm.kav.ui.Payer
 import uk.noammm.kav.ui.T
 import uk.noammm.kav.ui.buildSteps
 import uk.noammm.kav.ui.journeyProgress
+import androidx.core.location.LocationRequestCompat
+import uk.noammm.kav.ui.Step
+import uk.noammm.kav.ui.boardingChoice
 
 class TripService : Service() {
 
     private var foreground = false
     private var tracking: (() -> Unit)? = null
     private var fix: Fix? = null
+    // Too rough for the notice, but the trip's steps allow for how rough a fix is.
+    private var rough: Fix? = null
     private var shown: TripNotice? = null
     private var postedAt = 0L
 
@@ -40,6 +46,7 @@ class TripService : Service() {
         override fun run() {
             alertIfDue()
             advance()
+            retune()
             post()
             handler.postDelayed(this, TICK_MS)
         }
@@ -81,6 +88,7 @@ class TripService : Service() {
     }
 
     override fun onDestroy() {
+        Speaker.shutdown()
         handler.removeCallbacksAndMessages(null)
         tracking?.invoke()
         tracking = null
@@ -99,7 +107,7 @@ class TripService : Service() {
             start(first, special or ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION)
         if (!located && !start(first, special)) return false
         foreground = true
-        if (located) tracking = trackLocation(this, ::onFix)
+        if (located) tracking = trackLocation(this, ::onFix, ::onRough, every = need.every, quality = need.quality)
         return true
     }
 
@@ -108,7 +116,9 @@ class TripService : Service() {
         if (tracking != null || !foreground || !hasLocationPermission(this)) return
         val n = notice()?.let { build(this, it) } ?: return
         val special = if (Build.VERSION.SDK_INT >= 34) ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE else 0
-        if (start(n, special or ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION)) tracking = trackLocation(this, ::onFix)
+        if (start(n, special or ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION)) {
+            tracking = trackLocation(this, ::onFix, ::onRough, every = need.every, quality = need.quality)
+        }
     }
 
     private fun start(n: Notification, types: Int) = try {
@@ -119,7 +129,7 @@ class TripService : Service() {
     }
 
     private fun onFix(location: Location) {
-        val f = Fix(location.latitude, location.longitude, location.fixTime(), location.speed)
+        val f = Fix(location.latitude, location.longitude, location.fixTime(), location.speed, location.fixAccuracy())
         fix = f
         // The watch timer stops while the screen sleeps, and the fix can carry the trip past the last stop's
         // window before it runs again: every fix checks first, so "get off" isn't skipped.
@@ -127,6 +137,52 @@ class TripService : Service() {
         val shell = TripBridge.fix
         if (shell != null) shell(f) else advance()
         post()
+    }
+
+    private fun onRough(location: Location) {
+        val f = Fix(location.latitude, location.longitude, location.fixTime(), location.speed, location.fixAccuracy())
+        rough = f
+        alertIfDue()
+        val shell = TripBridge.fix
+        if (shell != null) shell(f) else advance()
+        post()
+    }
+
+    // How closely the trip needs the rider's position: every second while walking and in the minutes before boarding
+    // and getting off; once a minute while the ride is still a few minutes off; every two minutes on board far from
+    // the stop, where the bus's own position tells the trip where it is.
+    private enum class Need(val every: Long, val quality: Int) {
+        CLOSE(1_000L, LocationRequestCompat.QUALITY_HIGH_ACCURACY),
+        WAITING(60_000L, LocationRequestCompat.QUALITY_BALANCED_POWER_ACCURACY),
+        RIDING(120_000L, LocationRequestCompat.QUALITY_LOW_POWER),
+    }
+    private var need = Need.CLOSE
+
+    private fun needNow(): Need {
+        val (journey, step) = journey() ?: return Need.CLOSE
+        val now = System.currentTimeMillis() / 1000
+        return when (val s = buildSteps(journey.trip, journey.fromLabel, journey.toLabel).getOrNull(step)) {
+            is Step.Wait -> {
+                val (ride, wait) = boardingChoice(s.ride, s.wait, journey.chosen[s.legIndex] ?: 0)
+                val due = journey.resolved.departures(ride, wait, now).map { it.timeUtc }.filter { it >= now - 60 }.minOrNull() ?: ride.dep
+                if (due - now > 180) Need.WAITING else Need.CLOSE
+            }
+            is Step.Ride -> {
+                val ride = boardingChoice(s.ride, s.wait, journey.chosen[s.legIndex] ?: 0).first
+                if (ride.arr - now > 480) Need.RIDING else Need.CLOSE
+            }
+            else -> Need.CLOSE
+        }
+    }
+
+    // Asks for the position as often as the step needs, whenever that changes.
+    private fun retune() {
+        val wanted = needNow()
+        if (wanted == need) return
+        need = wanted
+        val stop = tracking ?: return
+        stop()
+        tracking = trackLocation(this, ::onFix, ::onRough, every = need.every, quality = need.quality)
     }
 
     private fun journey(): Pair<ActiveJourney, Int>? {
@@ -154,10 +210,24 @@ class TripService : Service() {
             sent.getString(trip, null)?.let { fired.addAll(it.split(',')) }
         }
         val latest = listOfNotNull(fix, TripBridge.fixNow?.invoke()).maxByOrNull { it.at }
-        val due = tripAlert(journey, step, latest, System.currentTimeMillis() / 1000) ?: return
-        if (!fired.add(due.key)) return
+        val now = System.currentTimeMillis() / 1000
+        val due = listOfNotNull(
+            tripAlert(journey, step, latest, now),
+            busTicket(journey, now * 1000).let { (ticket, leg) -> transferAlert(journey, step, ticket?.transferUntilUtc?.div(1000), now, leg) },
+        ).firstOrNull { it.key !in fired } ?: return
+        fired.add(due.key)
         sent.edit().clear().putString(trip, fired.joinToString(",")).apply()
         alert(this, due.title, due.text)
+        if (Prefs.spokenAlerts(this) && Speaker.mayTalk(this)) Speaker.say(this, due.spoken)
+    }
+
+    // This trip's ticket whose free transfer lasts longest, with the leg it paid for: one bought from the trip's own cards,
+    // else one bought since the trip set out (from the home screen, say). Not a train's, and not an earlier trip's.
+    private fun busTicket(journey: ActiveJourney, nowMs: Long): Pair<RavPass.Ticket?, Int?> {
+        val bus = Payer.tickets.filter { it.agencyCode != RavPass.RAILWAYS && it.transferUntilUtc > nowMs }
+        val legOf = journey.paid.entries.associate { (leg, key) -> key to leg }
+        bus.filter { it.id.toString() in legOf }.maxByOrNull { it.transferUntilUtc }?.let { return it to legOf[it.id.toString()] }
+        return bus.filter { it.boughtUtc >= (journey.trip.dep - 1_800) * 1000 }.maxByOrNull { it.transferUntilUtc } to null
     }
 
     private fun advance() {
@@ -165,7 +235,9 @@ class TripService : Service() {
         val (journey, step) = journey() ?: return
         val steps = buildSteps(journey.trip, journey.fromLabel, journey.toLabel)
         val moved = journeyProgress(
-            steps, step, journey.resolved, journey.chosen, System.currentTimeMillis() / 1000, fix, canLocate(this),
+            steps, step, journey.resolved, journey.chosen, System.currentTimeMillis() / 1000,
+            listOfNotNull(fix, rough).maxByOrNull { it.at }, canLocate(this), Prefs.beginTripsImmediately(this),
+            journey.fromHere,
         )
         if (moved == step) return
         JourneyFile.save(this, journey, moved)
@@ -178,16 +250,16 @@ class TripService : Service() {
         val latest = listOfNotNull(fix, TripBridge.fixNow?.invoke()).maxByOrNull { it.at }
         return tripNotice(journey, step, latest, System.currentTimeMillis() / 1000, Prefs.accent(this))?.copy(pay = when {
             Payer.payingLater -> T("Paying…", "משלמים…")
-            Payer.pending != null -> T("PAY QUICK", "תשלום מהיר!")
+            Payer.pending != null -> T("QUICK PAY", "תשלום מהיר!")
             Payer.paidLater != null -> T("Paid", "שולם")
             else -> null
         })
     }
 
-    // "PAY QUICK": the bus ride kept with Asshole mode is bought. A failure comes as an alert with Moovit's reason; "Paid"
+    // "QUICK PAY": the bus ride kept with Asshole mode is bought. A failure comes as an alert with HopOn's reason; "Paid"
     // stays on the button for a few seconds, as on the app's square.
     private fun pay() {
-        Payer.payLater({ key, leg, journey -> notePaid(this, key, leg, journey) }) {
+        Payer.payLater(this, { key, leg, journey -> notePaid(this, key, leg, journey) }) {
             val paid = Payer.paidLater
             if (Payer.pending != null) Payer.laterError?.let { alert(this, T("Not paid", "לא שולם"), it) }
             post(force = true)
@@ -230,6 +302,8 @@ class TripService : Service() {
         private const val ID = 7
         private const val ALERT_ID = 8
         private const val CHANNEL = "navigation"
+        private const val ALERTS = "trip-alerts"
+        private val BUZZ = longArrayOf(0, 300, 150, 300)
         private const val ACT_END = "uk.noammm.kav.trip.END"
         private const val ACT_REPOST = "uk.noammm.kav.trip.REPOST"
         private const val ACT_PAY = "uk.noammm.kav.trip.PAY"
@@ -269,8 +343,8 @@ class TripService : Service() {
 
         fun alert(ctx: Context, title: String, text: String) {
             if (!NotificationManagerCompat.from(ctx).areNotificationsEnabled()) return
-            ensureChannel(ctx)
-            val n = NotificationCompat.Builder(ctx, CHANNEL)
+            ensureAlerts(ctx)
+            val n = NotificationCompat.Builder(ctx, ALERTS)
                 .setSmallIcon(R.drawable.ic_trip_notice)
                 .setContentTitle(title)
                 .setContentText(text)
@@ -278,8 +352,25 @@ class TripService : Service() {
                 .setContentIntent(openApp(ctx))
                 .setAutoCancel(true)
                 .setCategory(NotificationCompat.CATEGORY_REMINDER)
+                .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
                 .build()
             runCatching { NotificationManagerCompat.from(ctx).notify(ALERT_ID, n) }
+        }
+
+        // Get off, change, a transfer running out: a channel of their own that buzzes, apart from the trip's notice,
+        // which changes every few seconds and can have the phone quiet the alerts posted beside it.
+        private fun ensureAlerts(ctx: Context) {
+            NotificationManagerCompat.from(ctx).createNotificationChannel(
+                NotificationChannelCompat.Builder(ALERTS, NotificationManagerCompat.IMPORTANCE_HIGH)
+                    .setName(T("Trip alerts", "התראות נסיעה"))
+                    .setDescription(T(
+                        "When to get off or change, and when a free transfer is about to end",
+                        "מתי לרדת או להחליף, ומתי מעבר חינם עומד להסתיים",
+                    ))
+                    .setVibrationEnabled(true)
+                    .setVibrationPattern(BUZZ)
+                    .build(),
+            )
         }
 
         private fun ensureChannel(ctx: Context) {
@@ -335,6 +426,8 @@ class TripService : Service() {
                 .setShowWhen(false)
                 .setColor(accent)
                 .setCategory(Notification.CATEGORY_NAVIGATION)
+                // The next step at a glance on the lock screen, without unlocking.
+                .setVisibility(Notification.VISIBILITY_PUBLIC)
                 .setForegroundServiceBehavior(Notification.FOREGROUND_SERVICE_IMMEDIATE)
                 .addExtras(Bundle().apply { putBoolean(PROMOTED, true) })
                 .build()
@@ -357,6 +450,7 @@ class TripService : Service() {
                 .setShowWhen(false)
                 .setColor(accent)
                 .setCategory(NotificationCompat.CATEGORY_NAVIGATION)
+                .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
                 .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
                 .build()
     }

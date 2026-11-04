@@ -1,0 +1,15 @@
+{
+  "id": "3.2-sources",
+  "en": {
+    "title": "A note about this update",
+    "text": "you can now choose new providers for trip planning, live locations and the timetable separately in settings.\n\nthe timetable downloads during setup and stays up to date in the background. the last copy stays on your phone for use without signal.",
+    "helpTitle": "kav needs your help",
+    "help": "kav has no ads and never will. keeping its server and the app running takes time and money, so if kav helps you, buying me a coffee keeps it running."
+  },
+  "he": {
+    "title": "הודעה על העדכון הזה",
+    "text": "אפשר עכשיו לבחור ספקים חדשים בנפרד לתכנון מסלולים, למיקומים בזמן אמת וללוח הזמנים בהגדרות.\n\nלוח הזמנים יורד בזמן ההגדרה ומתעדכן ברקע. העותק האחרון נשאר בטלפון לשימוש גם בלי קליטה.",
+    "helpTitle": "Kav צריכה את העזרה שלכם",
+    "help": "ב-Kav אין פרסומות ולא יהיו. התחזוקה של השרת והיישומון דורשת זמן וכסף, אז אם Kav עוזרת לכם, קפה עוזר לה להמשיך לעבוד."
+  }
+}

@@ -13,11 +13,19 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.layout
+import androidx.compose.ui.layout.positionInParent
+import androidx.compose.ui.composed
+import kotlinx.coroutines.launch
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.delay
 import kotlin.math.abs
 import kotlin.math.roundToInt
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.core.spring
 
 private const val FAST = 240
 private const val MED = 360
@@ -29,6 +37,14 @@ fun forward(): ContentTransform =
 fun backward(): ContentTransform =
     fadeIn(tween(MED)) togetherWith
         (slideOutHorizontally(tween(MED)) { it / 6 } + fadeOut(tween(FAST)))
+
+// Between things picked with chips, as a line's ways: the new one comes in from the side of its chip, the old one leaves
+// the other way.
+fun sideways(next: Boolean): ContentTransform {
+    val from = if (next != T.rtl) 1 else -1
+    return (slideInHorizontally(tween(MED)) { from * it / 6 } + fadeIn(tween(MED))) togetherWith
+        (slideOutHorizontally(tween(MED)) { -from * it / 6 } + fadeOut(tween(FAST)))
+}
 
 private val lift = spring<IntOffset>(dampingRatio = .9f, stiffness = 380f)
 
@@ -112,3 +128,43 @@ fun Modifier.popIn(index: Int, key: Any?): Modifier {
         scaleY = 0.97f + 0.03f * p
     }
 }
+
+// List keys that are each used once: a repeat gets the count of those before it, as a list can't show one key twice.
+fun uniqueKeys(keys: List<String>): List<String> {
+    val seen = HashMap<String, Int>()
+    return keys.map { k -> seen.merge(k, 1, Int::plus)!!.let { n -> if (n == 1) k else "$k#$n" } }
+}
+
+// Eases a move within its parent instead of jumping there: a departure that moves along its row glides over. Off
+// (enabled false), it's placed where it's put, as a row being dragged is, and glides again from there once on.
+fun Modifier.glide(enabled: Boolean = true): Modifier = composed {
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
+    val shift = remember { Animatable(androidx.compose.ui.geometry.Offset.Zero, androidx.compose.ui.geometry.Offset.VectorConverter) }
+    val last = remember { arrayOfNulls<androidx.compose.ui.geometry.Offset>(1) }
+    layout { measurable, constraints ->
+        val p = measurable.measure(constraints)
+        layout(p.width, p.height) {
+            val at = coordinates?.positionInParent()
+            val before = last[0]
+            var offset = shift.value
+            if (at != null) {
+                last[0] = at
+                // Drawn where it was this frame, then on its way.
+                if (enabled && before != null && before != at) {
+                    offset += before - at
+                    val from = offset
+                    scope.launch {
+                        shift.snapTo(from)
+                        shift.animateTo(androidx.compose.ui.geometry.Offset.Zero, spring(dampingRatio = 1f, stiffness = 500f))
+                    }
+                }
+            }
+            p.place(offset.x.roundToInt(), offset.y.roundToInt())
+        }
+    }
+}
+
+// A screen over the tabs (Settings, paying, the payment history, a report) slides up whole and opaque and back down,
+// so the screen under it never shows through a fade.
+fun modalIn(): EnterTransition = slideInVertically(spring(dampingRatio = 1f, stiffness = 400f)) { it }
+fun modalOut(): ExitTransition = slideOutVertically(spring(dampingRatio = 1f, stiffness = 400f)) { it }

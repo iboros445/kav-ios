@@ -12,19 +12,19 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.coroutineScope
-import uk.noammm.kav.data.Moovit
-import uk.noammm.kav.data.MoovitSession
+import kotlinx.coroutines.delay
+import uk.noammm.kav.data.KavLive
+import uk.noammm.kav.data.KavPlan
+import uk.noammm.kav.data.Transit
+import uk.noammm.kav.data.shownName
 import java.util.Date
+import androidx.compose.material3.minimumInteractiveComponentSize
+import androidx.compose.ui.text.font.FontWeight
 
 private val hm get() = clockFormat()
 
@@ -38,76 +38,42 @@ fun whenLabel(t: Long, now: Long = System.currentTimeMillis() / 1000): String {
     }
 }
 
-private suspend fun onlineSession(): MoovitSession? = runCatching { Online.open() }.getOrNull()
-
+// compact: the small size, for a card that's already inside another.
 @Composable
-fun rememberStopNames(ids: List<Int>): Map<Int, Moovit.StopInfo> {
-    val wanted = ids.filter { it > 0 }.distinct()
-    val key = wanted.sorted().joinToString(",")
-    var out by remember(key) { mutableStateOf(emptyMap<Int, Moovit.StopInfo>()) }
-    LaunchedEffect(key) {
-        if (wanted.isEmpty()) return@LaunchedEffect
-        val s = onlineSession() ?: return@LaunchedEffect
-        for (batch in wanted.chunked(6)) {
-            val resolved = coroutineScope {
-                batch.map { id -> async(Dispatchers.IO) {
-                    Moovit.stopInfo(s, id)?.let { id to it }
-                } }.awaitAll().filterNotNull().toMap()
-            }
-            out = out + resolved
-        }
-    }
-    return out
-}
-
-@Composable
-fun rememberLineRoute(shapeId: Int): List<Pair<Double, Double>> =
-    rememberLineRoutes(listOf(shapeId))[shapeId].orEmpty()
-
-@Composable
-fun rememberLineRoutes(shapeIds: List<Int>): Map<Int, List<Pair<Double, Double>>> {
-    val wanted = shapeIds.filter { it > 0 }.distinct().sorted()
-    val key = wanted.joinToString(",")
-    var out by remember(key) { mutableStateOf(emptyMap<Int, List<Pair<Double, Double>>>()) }
-    LaunchedEffect(key) {
-        if (wanted.isEmpty()) return@LaunchedEffect
-        val s = onlineSession() ?: return@LaunchedEffect
-        out = withContext(Dispatchers.IO) {
-            wanted.associateWith { runCatching { Moovit.tripShape(s, it) }.getOrDefault(emptyList()) }
-                .filterValues { it.isNotEmpty() }
-        }
-    }
-    return out
-}
-
-@Composable
-fun LiveLocationButton(live: Boolean, onClick: () -> Unit) {
+fun LiveLocationButton(live: Boolean, tint: Color = K.realtime, compact: Boolean = false, onClick: () -> Unit) {
     Row(
-        Modifier.heightIn(min = 44.dp).glassSurface(K.rControl)
+        Modifier.minimumInteractiveComponentSize().heightIn(min = if (compact) 40.dp else 48.dp).clip(K.capsule).background(K.fill)
             .clickable(role = Role.Button, onClick = onClick)
-            .padding(horizontal = K.gap4, vertical = 10.dp),
+            .padding(horizontal = if (compact) K.gap4 else K.gap5),
         verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(K.gap2),
     ) {
-        LiveGlyph(if (live) K.live else K.dim, 14.dp)
-        Spacer(Modifier.width(6.dp))
+        LiveGlyph(if (live) tint else K.textTertiary, if (compact) 16.dp else 18.dp)
         Text(
-            T("Live location", "מיקום בזמן אמת"), fontSize = 14.sp,
-            color = if (live) K.text else K.dim,
+            T("Live location", "מיקום בזמן אמת"), style = if (compact) K.type.subhead else K.type.bodyStrong,
+            fontWeight = FontWeight.Medium, color = if (live) K.text else K.textSecondary, maxLines = 1,
         )
     }
 }
 
 @Composable
 fun LiveLocationScreen(
-    leg: Moovit.Leg,
+    leg: Transit.Leg,
     boardStopId: Int,
-    r: Moovit.Resolved,
+    r: Transit.Resolved,
     onBack: () -> Unit,
 ) {
-    val arrival = r.arrival(leg)
+    val own = r.arrival(leg)
+    // Without a position of its own, where Kav's server has its trip: it places a train under way by its times though a
+    // station's answer can have the train without one, and a train that has left the rider's station is still its run.
+    val route = own?.vehicleId?.let(KavLive::routeOf) ?: KavPlan.routeOf(leg.lineId)?.takeIf { own == null && r.isTrain(leg) }
+    val spots = rememberKavSpots(listOfNotNull(route?.takeIf { own?.hasLocation != true }))
+    val arrival = route?.let { KavLive.followed(own, spots, it, leg.dep) } ?: own
     val info = r.line(leg.lineId)
-    val now = System.currentTimeMillis() / 1000
-    val fetched = rememberLineRoute(arrival?.tripShapeId ?: -1)
+    // Every second, for how long ago the position came.
+    val now by produceState(System.currentTimeMillis() / 1000) {
+        while (true) { delay(1000); value = System.currentTimeMillis() / 1000 }
+    }
 
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())
         .padding(bottom = LocalBottomBarInset.current)) {
@@ -119,17 +85,20 @@ fun LiveLocationScreen(
         ) {
             val agency = info?.agencyId ?: -1
             val rt = if (info != null) r.routeType(agency) else 3
-            val plate = plateFor(rt, agency)
-            Row(
-                Modifier.clip(RoundedCornerShape(10.dp)).background(plate?.fill ?: K.surface1)
+            val plate = linePlate(rt, agency) { Operators.of(r, agency) }
+            if (K.lineBadgeAppearance == LineBadgeAppearance.STRIP && modeOf(rt) == Mode.BUS) {
+                LinePlateBadge(leg.shortName.ifBlank { null } ?: info?.number?.ifBlank { null } ?: "…", Mode.BUS, plate,
+                    glyph = { ink, size -> AgencyMark(rt, agency, ink, size) })
+            } else Row(
+                Modifier.clip(RoundedCornerShape(K.rBadge)).background(plate?.fill ?: K.surface1)
                     .padding(horizontal = 10.dp, vertical = 7.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 AgencyMark(rt, agency, plate?.ink ?: K.muted, 15.dp)
                 Spacer(Modifier.width(6.dp))
                 Text(
-                    leg.shortName.ifBlank { null } ?: info?.number?.ifBlank { null } ?: "#${leg.lineId}",
-                    fontSize = 15.sp, color = plate?.ink ?: K.text, fontWeight = FontWeight.Medium,
+                    leg.shortName.ifBlank { null } ?: info?.number?.ifBlank { null } ?: "…",
+                    style = K.type.bodyStrong, color = plate?.ink ?: K.text,
                     maxLines = 1, overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.widthIn(max = 130.dp),
                 )
@@ -137,7 +106,7 @@ fun LiveLocationScreen(
             Spacer(Modifier.width(K.gap3))
             Column(Modifier.weight(1f)) {
                 Text(
-                    info?.destination?.ifBlank { null }?.let { T("to $it", "אל $it") } ?: "",
+                    info?.destination?.ifBlank { null }?.let { T("to ${shownName(it)}", "אל ${shownName(it)}") } ?: "",
                     fontSize = 14.sp, color = K.muted, maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
                 )
@@ -149,7 +118,7 @@ fun LiveLocationScreen(
 
         VehicleMap(
             leg, arrival, modeOf(if (info != null) r.routeType(info.agencyId) else 3),
-            approach = lineRoute(arrival, r).ifEmpty { fetched },
+            approach = lineRoute(arrival, r),
             modifier = Modifier.padding(horizontal = K.gap3),
         )
 
@@ -158,15 +127,15 @@ fun LiveLocationScreen(
     }
 }
 
-fun lineRoute(a: Moovit.Arrival?, r: Moovit.Resolved): List<Pair<Double, Double>> {
+fun lineRoute(a: Transit.Arrival?, r: Transit.Resolved): List<Pair<Double, Double>> {
     if (a == null || a.tripShapeId <= 0) return emptyList()
-    return r.shapes[a.tripShapeId] ?: Moovit.cachedShape(a.tripShapeId)
+    return r.shapes[a.tripShapeId].orEmpty()
 }
 
 @Composable
 private fun VehicleMap(
-    leg: Moovit.Leg,
-    a: Moovit.Arrival?,
+    leg: Transit.Leg,
+    a: Transit.Arrival?,
     mode: Mode,
     approach: List<Pair<Double, Double>> = emptyList(),
     modifier: Modifier = Modifier,
@@ -198,16 +167,16 @@ private fun VehicleMap(
         points,
         modifier.fillMaxWidth().height(260.dp).panel(K.rCard),
         geometry = geometry,
-        live = vehicleGeometry(listOfNotNull(bus?.let { it to mode })),
+        live = vehicleGeometry(listOfNotNull(bus?.let { it to mode }), LocalDensity.current),
     )
 }
 
 @Composable
 private fun StatusBlock(
-    leg: Moovit.Leg,
+    leg: Transit.Leg,
     boardStopId: Int,
-    a: Moovit.Arrival?,
-    r: Moovit.Resolved,
+    a: Transit.Arrival?,
+    r: Transit.Resolved,
     now: Long,
 ) {
     Column(
@@ -218,15 +187,15 @@ private fun StatusBlock(
         val (headline, tint) = when {
             a?.status == 3 -> T("Canceled for this station", "מבוטל עבור תחנה זו") to K.critical
             a?.vehicleStatus == 3 -> T("Line not departed yet", "הקו טרם יצא") to K.dim
+            a != null && !a.hasLocation && a.rtUtc > 0 -> T("There's a live time, but no position right now", "יש זמן בזמן אמת, אבל אין מיקום כרגע") to K.dim
             (a == null || !a.hasLocation) && lineLive -> T("Your bus hasn't set out yet", "האוטובוס שלכם עוד לא יצא לדרך") to K.dim
             a == null || !a.hasLocation -> T("This line doesn’t have a live location", "לקו הזה אין מיקום בזמן אמת") to K.dim
             a.vehicleStatus == 2 -> T("Out of route", "מחוץ למסלול") to K.problem
-            now - a.sampleUtc <= 120 -> T("Location updated recently", "המיקום עודכן לאחרונה") to K.live
-            else -> T("Location is estimated", "המיקום משוער") to K.problem
+            else -> locationHeadline(a.sampleUtc, now)
         }
         Row(verticalAlignment = Alignment.CenterVertically) {
             if (a?.hasLocation == true) { LiveGlyph(tint, 13.dp); Spacer(Modifier.width(6.dp)) }
-            Text(headline, fontSize = 15.sp, fontWeight = FontWeight.Medium, color = tint)
+            Text(headline, style = K.type.bodyStrong, color = tint)
         }
         if (a != null && a.vehicleStatus == 2) {
             Text(
@@ -236,7 +205,7 @@ private fun StatusBlock(
         }
         if (a != null && a.sampleUtc > 0) {
             Text(
-                T("Location updated: ${hm.format(Date(a.sampleUtc * 1000))}", "המיקום עודכן: ${hm.format(Date(a.sampleUtc * 1000))}"),
+                updatedLabel(a),
                 fontSize = 14.sp, color = K.dim, modifier = Modifier.padding(top = K.gap1),
             )
         }
@@ -244,7 +213,7 @@ private fun StatusBlock(
         Spacer(Modifier.height(K.gap4))
         val nextStop = nextStopOnLeg(leg, a)
         if (nextStop != null) {
-            Fact(T("Next stop", "התחנה הבאה"), r.stopName(nextStop) ?: "#$nextStop")
+            Fact(T("Next stop", "התחנה הבאה"), r.stopName(nextStop) ?: "…")
         }
         val away = a?.stopsAway ?: -1
         if (away >= 0) Fact(if (away == 1) T("1 stop away", "תחנה אחת") else T("Stops away", "תחנות"), if (away == 1) "" else "$away")
@@ -252,10 +221,11 @@ private fun StatusBlock(
         if (a != null && a.rtUtc > 0) {
             Fact(T("Arriving", "הגעה"), whenLabel(a.rtUtc, now))
         }
+        a?.let { KavLive.plateOf(it.vehicleId) }?.let { Fact(T("Number plate", "מספר רישוי"), it) }
     }
 }
 
-internal fun nextStopOnLeg(leg: Moovit.Leg, arrival: Moovit.Arrival?): Int? {
+internal fun nextStopOnLeg(leg: Transit.Leg, arrival: Transit.Arrival?): Int? {
     if (arrival == null || arrival.nextStopIndex < 0 || arrival.stopIndex < 0) return null
     return leg.stops.getOrNull(arrival.nextStopIndex - arrival.stopIndex)
 }

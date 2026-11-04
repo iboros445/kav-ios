@@ -14,7 +14,7 @@ import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.core.graphics.ColorUtils
-import uk.noammm.kav.data.Moovit
+import uk.noammm.kav.data.Transit
 import uk.noammm.kav.ui.Fix
 import uk.noammm.kav.ui.K
 import uk.noammm.kav.ui.Mode
@@ -32,15 +32,22 @@ import uk.noammm.kav.ui.distanceToPath
 import uk.noammm.kav.ui.drawModeMark
 import uk.noammm.kav.ui.drawWalker
 import uk.noammm.kav.ui.isFresh
+import uk.noammm.kav.ui.isRail
 import uk.noammm.kav.ui.legMode
+import uk.noammm.kav.ui.busOn
+import uk.noammm.kav.ui.minutesToAlight
+import uk.noammm.kav.ui.platformChange
+import uk.noammm.kav.ui.riderTrip
 import uk.noammm.kav.ui.modeName
+import uk.noammm.kav.ui.modeOf
 import uk.noammm.kav.ui.pathLength
-import uk.noammm.kav.ui.ISRAEL
 import uk.noammm.kav.ui.routeTints
 import uk.noammm.kav.ui.stopsProgress
+import uk.noammm.kav.ui.tripArrival
 import uk.noammm.kav.ui.whenLabel
 import java.util.Date
 import kotlin.math.max
+import kotlin.math.min
 import kotlin.math.roundToInt
 
 internal data class Glyph(val mode: Mode?, val here: Boolean = false)
@@ -54,8 +61,12 @@ internal data class TripNotice(
     val progress: Int,
     val glyph: Glyph,
     val tint: Int,
-    // The notification's button for a bus ride kept with Asshole mode: "PAY QUICK", then "Paying" and "Paid".
+    // The notification's button for a bus ride kept with Asshole mode: "QUICK PAY", then "Paying" and "Paid".
     val pay: String? = null,
+    // The time the title and chip give (when the bus leaves your stop, or gets you to the one you get off at) as the
+    // title writes it, and how live it is, for the picture-in-picture to colour it as the search results do.
+    val dueText: String = "",
+    val due: Transit.Departure? = null,
 ) {
     val max get() = parts.sumOf { it.first }
 }
@@ -74,9 +85,12 @@ private class Run(
     val walk: Boolean,
 )
 
-private class Say(val title: String, val text: String, val chip: String, val glyph: Glyph, val tint: Int)
+private class Say(
+    val title: String, val text: String, val chip: String, val glyph: Glyph, val tint: Int,
+    val dueText: String = "", val due: Transit.Departure? = null,
+)
 
-private fun lengthOf(leg: Moovit.Leg): Double =
+private fun lengthOf(leg: Transit.Leg): Double =
     pathLength(leg.shape).takeIf { it >= 1.0 }
         ?: leg.meters.toDouble().takeIf { it >= 1.0 }
         ?: max(1.0, (leg.arr - leg.dep) / 60.0 * 250.0)
@@ -96,12 +110,12 @@ internal fun tripNotice(journey: ActiveJourney, current: Int, fix: Fix?, now: Lo
     val index = current.coerceIn(0, steps.lastIndex)
     val r = journey.resolved
     val live = fix?.takeIf { it.isFresh(now) }
-    fun pick(ride: Moovit.Leg, wait: Moovit.Leg?, legIndex: Int) =
+    fun pick(ride: Transit.Leg, wait: Transit.Leg?, legIndex: Int) =
         boardingChoice(ride, wait, journey.chosen[legIndex] ?: 0)
     val coloured = chosenLegs(journey.trip, journey.chosen)
-        .filter { it.shape.size >= 2 && it.kind != Moovit.LegKind.WALK }
+        .filter { it.shape.size >= 2 && it.kind != Transit.LegKind.WALK }
     val tints = routeTints(coloured, r)
-    fun colourOf(leg: Moovit.Leg) = coloured.indexOfFirst { it === leg }.let { if (it < 0) accent else tints[it].toArgb() }
+    fun colourOf(leg: Transit.Leg) = coloured.indexOfFirst { it === leg }.let { if (it < 0) accent else tints[it].toArgb() }
 
     val runs = steps.mapIndexedNotNull { i, s ->
         val (leg, colour) = when (s) {
@@ -152,7 +166,7 @@ internal fun tripNotice(journey: ActiveJourney, current: Int, fix: Fix?, now: Lo
 
     val hm = clockFormat()
     fun time(utc: Long) = hm.format(Date(utc * 1000))
-    fun lineName(ride: Moovit.Leg): String {
+    fun lineName(ride: Transit.Leg): String {
         val number = ride.shortName.ifBlank { r.line(ride.lineId)?.number.orEmpty() }
         val mode = modeName(legMode(ride, r))
         return if (number.isBlank()) mode else "$mode $number"
@@ -181,7 +195,7 @@ internal fun tripNotice(journey: ActiveJourney, current: Int, fix: Fix?, now: Lo
         is Step.Wait -> {
             val (ride, wait) = pick(step.ride, step.wait, step.legIndex)
             val dep = r.departures(ride, wait).firstOrNull { it.tripId == ride.tripId }
-                ?: Moovit.Departure(ride.tripId, ride.dep)
+                ?: Transit.Departure(ride.tripId, ride.dep)
             val glyph = Glyph(legMode(ride, r))
             if (dep.status == 3) Say(
                 T("${lineName(ride)} is cancelled", "${lineName(ride)} מבוטל"),
@@ -189,29 +203,33 @@ internal fun tripNotice(journey: ActiveJourney, current: Int, fix: Fix?, now: Lo
                 T("Cancelled", "בוטל"), glyph, colourOf(ride),
             ) else {
                 val mins = ((dep.timeUtc - now) / 60).coerceAtLeast(0)
+                val leaves = whenLabel(dep.timeUtc, now)
                 Say(
-                    "${lineName(ride)} · ${whenLabel(dep.timeUtc, now)}",
+                    "${lineName(ride)} · $leaves",
                     listOfNotNull(
                         r.stopName(ride.fromStop)?.takeIf { it.isNotBlank() },
                         r.platform(ride, wait).takeIf { it.isNotBlank() }?.let { T("Platform $it", "רציף $it") },
                         if (dep.live && r.arrival(ride) != null) T("Live", "בזמן אמת") else T("Scheduled", "מתוזמן"),
                     ).joinToString(" · "),
                     if (mins == 0L) T("now", "עכשיו") else T("$mins min", "$mins דק׳"),
-                    glyph, colourOf(ride),
+                    glyph, colourOf(ride), leaves, dep,
                 )
             }
         }
         is Step.Ride -> {
             val ride = pick(step.ride, step.wait, step.legIndex).first
-            // The chip says how long until getting off: the share of the route still ahead of the ride's planned time.
-            val length = runs.getOrNull(runAt)?.metres ?: 0.0
-            val mins = if (length > 0) kotlin.math.ceil(left / length * (ride.arr - ride.dep) / 60.0).toLong()
-            else (ride.arr - now) / 60
+            // How long until getting off leads, as on the trip screen: a locked phone shows only this text.
+            val mins = minutesToAlight(ride, r, live, now)
+            val soon = if (mins <= 0L) T("now", "עכשיו") else T("$mins min", "$mins דק׳")
+            // As live as the bus's own time at your stop, else at the ride's stop timed nearest it; with none, the
+            // timetable's.
+            val bus = riderTrip(ride, r, live, now)?.let { trip ->
+                ride.stops.asReversed().firstNotNullOfOrNull { stop -> r.live[Transit.ArrivalKey(stop, trip)]?.takeIf { it.rtUtc > 0 } }
+            }
             Say(
-                "$togo · ${place(ride.toStop)}",
-                T("On ${lineName(ride)}", "ב${lineName(ride)}"),
-                if (mins <= 0L) T("now", "עכשיו") else T("$mins min", "$mins דק׳"),
-                Glyph(legMode(ride, r)), colourOf(ride),
+                "$soon · ${place(ride.toStop)}",
+                T("On ${lineName(ride)} · $togo", "ב${lineName(ride)} · $togo"),
+                soon, Glyph(legMode(ride, r)), colourOf(ride), soon, bus?.departure() ?: Transit.Departure(ride.tripId, ride.arr),
             )
         }
         is Step.Taxi -> Say(
@@ -233,9 +251,11 @@ internal fun tripNotice(journey: ActiveJourney, current: Int, fix: Fix?, now: Lo
             )
         }
     }
+    val riding = (steps[index] as? Step.Ride)?.let { pick(it.ride, it.wait, it.legIndex).first }
+    val arrive = tripArrival(journey.trip, r, journey.chosen, riding, live, now)
     return TripNotice(
-        say.title, say.text, T("Arrive ${time(journey.trip.arr)}", "הגעה ב-${time(journey.trip.arr)}"),
-        say.chip, parts, progress, say.glyph, say.tint,
+        say.title, say.text, T("Arrive ${time(arrive)}", "הגעה ב-${time(arrive)}"),
+        say.chip, parts, progress, say.glyph, say.tint, dueText = say.dueText, due = say.due,
     )
 }
 
@@ -272,7 +292,42 @@ private fun icon(glyph: Glyph, tint: Int, px: Int, round: Boolean): Bitmap = ico
     image.asAndroidBitmap()
 }
 
-internal class TripAlert(val key: String, val title: String, val text: String)
+internal class TripAlert(val key: String, val title: String, val text: String, val spoken: String = title)
+
+private const val LAST_STRETCH_M = 1_000.0
+private const val LAST_STRETCH_S = 90.0
+private const val TRAFFIC_AHEAD_S = 30 * 60L
+private const val TRANSFER_WARN_S = 10 * 60L
+
+// Ten minutes before the ticket's free transfers run out, while a ride is still to be boarded: that one may cost again.
+// Only when it can use the ticket: not on a train, and the next ride is a bus or light rail, which a bus
+// ticket's transfer covers, costing no more than the ride the ticket paid for (`paidLeg`, when known).
+internal fun transferAlert(journey: ActiveJourney, current: Int, transferEndsUtc: Long?, now: Long, paidLeg: Int? = null): TripAlert? {
+    val ends = transferEndsUtc ?: return null
+    if (ends - now !in 1..TRANSFER_WARN_S) return null
+    val steps = buildSteps(journey.trip, journey.fromLabel, journey.toLabel)
+    if (steps.isEmpty()) return null
+    val at = current.coerceIn(0, steps.lastIndex)
+    val r = journey.resolved
+    fun covered(ride: Transit.Leg): Boolean {
+        val agency = r.line(ride.lineId)?.agencyId ?: -1
+        val type = r.routeType(agency)
+        return !isRail(type, agency) && modeOf(type) in setOf(Mode.BUS, Mode.TRAM, Mode.SUBWAY)
+    }
+    fun chosen(ride: Transit.Leg, wait: Transit.Leg?, leg: Int) = boardingChoice(ride, wait, journey.chosen[leg] ?: 0).first
+    (steps[at] as? Step.Ride)?.let { if (!covered(chosen(it.ride, it.wait, it.legIndex))) return null }
+    val next = steps.drop(at).firstOrNull { it is Step.Wait } as? Step.Wait ?: return null
+    val ride = chosen(next.ride, next.wait, next.legIndex)
+    if (!covered(ride)) return null
+    val paid = paidLeg?.let { chosenLegs(journey.trip, journey.chosen).getOrNull(it) }
+    if (paid != null && paid.fare > 0 && ride.fare > paid.fare) return null
+    val left = (ends - now + 59) / 60
+    return TripAlert(
+        "transfer-$ends", T("Free transfer ends in $left min", "המעבר בחינם מסתיים בעוד $left דק׳"),
+        T("A ride you board after that is paid again", "נסיעה שתעלו אליה אחרי זה תשולם מחדש"),
+        T("Your free transfer ends in ", "המעבר בחינם מסתיים בעוד ") + T.count(left, "1 minute", "דקה אחת", "minutes", "דקות"),
+    )
+}
 
 internal fun tripAlert(journey: ActiveJourney, current: Int, fix: Fix?, now: Long): TripAlert? {
     val steps = buildSteps(journey.trip, journey.fromLabel, journey.toLabel)
@@ -281,33 +336,69 @@ internal fun tripAlert(journey: ActiveJourney, current: Int, fix: Fix?, now: Lon
     return when (val step = steps[current.coerceIn(0, steps.lastIndex)]) {
         is Step.Wait -> {
             val (ride, wait) = boardingChoice(step.ride, step.wait, journey.chosen[step.legIndex] ?: 0)
-            val at = r.departures(ride, wait).firstOrNull { it.tripId == ride.tripId }?.timeUtc ?: ride.dep
+            val dep = r.departures(ride, wait).firstOrNull { it.tripId == ride.tripId }
+            val at = dep?.timeUtc ?: ride.dep
             val line = ride.shortName.ifBlank { r.line(ride.lineId)?.number.orEmpty() }
-            if (at - now !in 0..90 || line.isBlank()) null else TripAlert(
-                "wait-${step.legIndex}", T("$line is arriving", "$line מגיע"),
-                listOfNotNull(r.stopName(ride.fromStop), whenLabel(at, now)).joinToString(" · "),
-            )
+            val where = listOfNotNull(r.stopName(ride.fromStop), whenLabel(at, now)).joinToString(" · ")
+            val late = dep?.delayed == true
+            when {
+                line.isBlank() -> null
+                at - now in 0..90 -> TripAlert(
+                    "wait-${step.legIndex}", T("$line is arriving", "$line מגיע"), where,
+                    T("Line $line is arriving", "קו $line מגיע"),
+                )
+                // Once per ride, while there is still time to change plans.
+                late && at - now in 91..TRAFFIC_AHEAD_S -> TripAlert(
+                    "traffic-${step.legIndex}", T("$line is delayed by traffic", "$line מתעכב בגלל עומסי תנועה"), where,
+                    T("Line $line is delayed by traffic", "קו $line מתעכב בגלל עומסי תנועה"),
+                )
+                else -> null
+            }
         }
         is Step.Ride -> {
             val ride = boardingChoice(step.ride, step.wait, journey.chosen[step.legIndex] ?: 0).first
             val total = ride.stops.size
-            val progress = stopsProgress(ride, r.stops, r.arrival(ride), fix, now)
-            // Counting stops needs every stop's position, and a saved trip often knows only a few of them: then the
-            // last stop is near when less than an average gap between stops is left along the route.
+            val progress = stopsProgress(ride, r.stops, busOn(ride, r, riderTrip(ride, r, fix, now)), fix, now)
+            // A train's next stop can be half an hour away, so the alert also waits for the last stretch: about 90
+            // seconds at the current speed, at least a kilometre. Without every stop's position (saved trips often lack
+            // them), the route left must also be shorter than an average gap between stops.
             val located = ride.stops.all { r.stops[it]?.point != null }
-            val left = fix?.takeIf { !located && total >= 2 && it.isFresh(now) && it.aboard(ride.shape) }?.let {
-                val length = pathLength(ride.shape)
-                (length - alongPath(it.lat, it.lon, ride.shape)) to length / (total - 1)
-            }
+            val aboard = fix?.takeIf { total >= 2 && it.isFresh(now) && it.aboard(ride.shape) }
+            val left = aboard?.let { pathLength(ride.shape) - alongPath(it.lat, it.lon, ride.shape) }
+            // A GPS speed spike must not stretch it: no train here goes faster than 180 km/h.
+            val stretch = max(LAST_STRETCH_M, (aboard?.speed ?: 0f).coerceAtMost(50f) * LAST_STRETCH_S)
             val nearEnd = when {
-                left != null -> left.first <= left.second
-                progress >= 0 -> total >= 2 && progress >= total - 1f
-                else -> ride.arr - now in 0..120
+                // Going by the vehicle without the rider's own position, the stop before theirs can be half an hour off on a
+                // train, so it also waits for the expected arrival there (live, or the plan with its delay) within two minutes.
+                left == null -> if (progress >= 0) total >= 2 && progress >= total - 1f && minutesToAlight(ride, r, fix, now) <= 2
+                    else ride.arr - now in 0..120
+                located -> left <= stretch && progress >= total - 1f
+                else -> left <= min(stretch, pathLength(ride.shape) / (total - 1))
             }
-            if (!nearEnd) null else TripAlert(
-                "ride-${step.legIndex}", T("Get off at the next stop", "רדו בתחנה הבאה"),
-                r.stopName(ride.toStop) ?: journey.toLabel,
-            )
+            val stop = r.stopName(ride.toStop) ?: journey.toLabel
+            val jammed = (r.live[Transit.ArrivalKey(ride.toStop, ride.tripId)]?.traffic ?: 0) >= 2
+            // "The next stop" only when Kav counted every stop to the rider's. Without their positions it goes by
+            // distance or time, and a city's last kilometre can hold two or three stops.
+            val counted = located && progress >= total - 1f
+            val title = if (counted) T("Get off at the next stop", "רדו בתחנה הבאה") else T("Your stop is coming up", "התחנה שלכם מתקרבת")
+            // Changing trains there: which platform the next one leaves from, as the ride's card says it.
+            val change = platformChange(step, ride, r, journey.chosen)
+            when {
+                // An English voice can't read the Hebrew most stop names are in.
+                nearEnd -> TripAlert(
+                    "ride-${step.legIndex}", title, listOfNotNull(stop, change).joinToString(" · "),
+                    (if (T.rtl || stop.none { it in '\u0590'..'\u05FF' }) "$title, $stop" else title) + (change?.let { ". $it" } ?: ""),
+                )
+                jammed -> {
+                    val at = clockFormat().format(Date(r.alightAt(ride) * 1000))
+                    TripAlert(
+                        "traffic-${step.legIndex}", T("Traffic on your ride", "עומסי תנועה בדרך"),
+                        T("Getting off around $at · $stop", "ירידה בסביבות $at · $stop"),
+                        T("Traffic on your ride. You'll get off around $at", "עומסי תנועה בדרך. תרדו בסביבות $at"),
+                    )
+                }
+                else -> null
+            }
         }
         else -> null
     }

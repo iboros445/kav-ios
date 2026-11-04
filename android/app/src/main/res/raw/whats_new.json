@@ -1,0 +1,5 @@
+{
+  "version": "3.3.1",
+  "en": "- favourites are an even grid, four to a row, and editing keeps the same grid instead of squeezing everything into one line\n- drag a favourite anywhere while editing, across rows too\n- the place search shows your favourites the same way",
+  "he": "- המועדפים מסודרים ברשת אחידה, ארבעה בכל שורה, והעריכה שומרת על אותה רשת במקום לדחוס הכול לשורה אחת\n- בעריכה אפשר לגרור מועדף לכל מקום, גם בין שורות\n- חיפוש המקומות מציג את המועדפים באותה צורה"
+}

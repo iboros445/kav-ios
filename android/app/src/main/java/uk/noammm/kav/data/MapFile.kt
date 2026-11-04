@@ -6,6 +6,8 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import java.io.File
+import org.json.JSONArray
+import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
 import kotlinx.coroutines.CancellationException
@@ -30,6 +32,12 @@ object MapFile {
     var state by mutableStateOf<State>(State.Missing)
         private set
 
+    // The map Kav draws: its own, from the file on the phone, or satellite photos with its names on them, which load
+    // online as the map is looked at.
+    enum class Type { STANDARD, SATELLITE }
+
+    var type by mutableStateOf(Type.STANDARD)
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     fun file(ctx: Context) = File(File(ctx.filesDir, "map"), "israel.pmtiles")
@@ -43,11 +51,59 @@ object MapFile {
         }
     }
 
-    // OLED draws the map like a battery saver: black ground, grey roads, no buildings or land colours.
-    fun styleJson(ctx: Context, light: Boolean = false, oled: Boolean = false): String =
-        ctx.assets.open(when { light -> "map/style-light.json"; oled -> "map/style-oled.json"; else -> "map/style.json" })
-            .reader().use { it.readText() }
-            .replace("__MAP__", "pmtiles://file://" + file(ctx).absolutePath)
+    // OLED draws the map like a battery saver: black ground, grey roads, no buildings or land colours. Satellite keeps
+    // the dark map's names, light with a dark edge, which read on any photo. remote: read from the file on GitHub, a
+    // piece at a time, for a preview before it's downloaded.
+    fun styleJson(ctx: Context, light: Boolean = false, oled: Boolean = false, type: Type = Type.STANDARD, remote: Boolean = false): String {
+        val name = when {
+            type == Type.SATELLITE -> "map/style.json"
+            light -> "map/style-light.json"
+            oled -> "map/style-oled.json"
+            else -> "map/style.json"
+        }
+        val json = ctx.assets.open(name).reader().use { it.readText() }
+            .replace("__MAP__", if (remote) "pmtiles://$URL" else "pmtiles://file://" + file(ctx).absolutePath)
+        return when (type) {
+            Type.STANDARD -> json
+            Type.SATELLITE -> satellite(JSONObject(json)).toString()
+        }
+    }
+
+    fun attribution(type: Type): String = when (type) {
+        Type.STANDARD -> "Protomaps · © OpenStreetMap"
+        Type.SATELLITE -> "Esri, Vantor, Earthstar Geographics · Protomaps · © OpenStreetMap"
+    }
+
+    // Esri's World Imagery needs no key and has photos to zoom 19 over Israel.
+    private const val PHOTOS = "https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
+
+    // The photos under the map's names: the land, water, buildings and roads drawn on top would hide what the photo
+    // shows, so only the background and the names stay.
+    internal fun satellite(style: JSONObject): JSONObject {
+        style.getJSONObject("sources").put("satellite", JSONObject()
+            .put("type", "raster").put("tiles", JSONArray().put(PHOTOS)).put("tileSize", 256).put("maxzoom", 19))
+        val layers = style.getJSONArray("layers")
+        val kept = JSONArray()
+        for (i in 0 until layers.length()) {
+            val layer = layers.getJSONObject(i)
+            when (layer.optString("type")) {
+                "background" -> {
+                    kept.put(layer)
+                    kept.put(JSONObject().put("id", "satellite").put("type", "raster").put("source", "satellite"))
+                }
+                "symbol" -> if (layer.optString("id") != "roads_oneway") kept.put(onPhotos(layer))
+            }
+        }
+        return style.put("layers", kept)
+    }
+
+    // The black map's names are dark grey, which a photo swallows: white with a dark edge instead. Road shields keep
+    // their own plate.
+    private fun onPhotos(layer: JSONObject): JSONObject {
+        val paint = layer.optJSONObject("paint")?.takeIf { it.has("text-halo-color") } ?: return layer
+        paint.put("text-color", "rgba(255,255,255,0.95)").put("text-halo-color", "rgba(0,0,0,0.75)").put("text-halo-width", 1.5)
+        return layer
+    }
 
     fun startDownload(ctx: Context) {
         if (state is State.Downloading || state is State.Ready) return

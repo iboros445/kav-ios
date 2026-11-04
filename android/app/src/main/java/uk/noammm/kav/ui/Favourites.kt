@@ -6,12 +6,10 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.gestures.detectDragGestures
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.*
@@ -28,20 +26,26 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.zIndex
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.layout.Layout
+import androidx.compose.ui.layout.layoutId
+import androidx.compose.ui.unit.Constraints
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.launch
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.semantics.Role
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
-import uk.noammm.kav.data.Moovit
+import uk.noammm.kav.data.Transit
 import kotlin.math.roundToInt
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.style.TextAlign
 
-class Favourite(val id: String, val name: String, val icon: String, val place: Moovit.Place?) {
-    fun copy(name: String = this.name, icon: String = this.icon, place: Moovit.Place? = this.place) =
+class Favourite(val id: String, val name: String, val icon: String, val place: Transit.Place?) {
+    fun copy(name: String = this.name, icon: String = this.icon, place: Transit.Place? = this.place) =
         Favourite(id, name, icon, place)
 
     companion object {
@@ -116,7 +120,45 @@ fun favouriteIcon(key: String): ImageVector =
 
 val Favourite.label: String get() = if (id == Favourite.HOME) T("Home", "בית") else name
 
+// The saved place under the favourite's own name, its address or stop name kept as the detail.
+fun Favourite.named(p: Transit.Place): Transit.Place =
+    if (label.isBlank() || label == p.name) p else Transit.Place(label, p.name, p.lat, p.lon, p.type, p.mode)
+
+// The narrowest a column may get: a tile and the gap beside it.
 private val SLOT = 72.dp + K.gap2
+
+// Where a tile sits in the grid, counted in cells, so it glides to a new place whatever size the cells are.
+private class GridSpot(val at: Animatable<Offset, AnimationVector2D>)
+
+@Composable
+private fun rememberSpot(index: Int, cols: Int, still: Boolean = false): GridSpot {
+    val target = Offset((index % cols).toFloat(), (index / cols).toFloat())
+    val spot = remember { GridSpot(Animatable(target, Offset.VectorConverter)) }
+    LaunchedEffect(target, still) {
+        if (!still) spot.at.animateTo(target, spring(dampingRatio = .8f, stiffness = Spring.StiffnessMediumLow))
+    }
+    return spot
+}
+
+// Equal columns across the whole width, rows filled from the start, every row as tall as the tallest tile.
+@Composable
+private fun SpotGrid(cols: Int, slots: Int, pitch: FloatArray, modifier: Modifier, content: @Composable () -> Unit) {
+    val gap = with(LocalDensity.current) { K.gap1.roundToPx() }
+    Layout(content, modifier) { measurables, constraints ->
+        val cellW = constraints.maxWidth.toFloat() / cols
+        val tiles = measurables.map { it.measure(Constraints.fixedWidth(cellW.toInt())) }
+        val rowH = tiles.maxOfOrNull { it.height } ?: 0
+        val rows = (slots + cols - 1) / cols
+        pitch[0] = cellW
+        pitch[1] = (rowH + gap).toFloat()
+        layout(constraints.maxWidth, rows * rowH + (rows - 1).coerceAtLeast(0) * gap) {
+            tiles.forEachIndexed { i, t ->
+                val at = (measurables[i].layoutId as GridSpot).at.value
+                t.placeRelative((at.x * cellW).roundToInt(), (at.y * pitch[1]).roundToInt())
+            }
+        }
+    }
+}
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -132,125 +174,180 @@ fun FavouriteStrip(
     val manage = onReorder != null
     var editMode by remember { mutableStateOf(false) }
     val inEdit = manage && editMode
-    val slotPx = with(LocalDensity.current) { SLOT.toPx() }
     val dir = if (LocalLayoutDirection.current == LayoutDirection.Rtl) -1f else 1f
     var order by remember(favourites) { mutableStateOf<List<Favourite>?>(null) }
     var held by remember { mutableStateOf<String?>(null) }
-    var dx by remember { mutableFloatStateOf(0f) }
+    var drag by remember { mutableStateOf(Offset.Zero) }
+    val pitch = remember { floatArrayOf(1f, 1f) }
+    val scope = rememberCoroutineScope()
     val shown = order ?: favourites
-    androidx.activity.compose.BackHandler(inEdit) { editMode = false; order = null; held = null; dx = 0f }
+    val travel by animateFloatAsState(
+        if (inEdit) 1f else 0f,
+        spring(dampingRatio = .58f, stiffness = Spring.StiffnessMediumLow), label = "editTravel",
+    )
+    androidx.activity.compose.BackHandler(inEdit) { editMode = false; order = null; held = null; drag = Offset.Zero }
 
-    Column(Modifier.fillMaxWidth()) {
-        Row(
-            Modifier.fillMaxWidth()
-                .horizontalScroll(rememberScrollState(), enabled = held == null)
-                .padding(horizontal = horizontalPadding, vertical = K.gap2),
-            horizontalArrangement = Arrangement.spacedBy(K.gap2),
-        ) {
-            shown.forEach { f ->
-                val set = f.place != null
-                val lifted = held == f.id
-                val lift by animateFloatAsState(
-                    if (lifted) 1.08f else 1f,
-                    spring(dampingRatio = .6f, stiffness = Spring.StiffnessMedium), label = "lift",
-                )
-                val removable = onRemove != null && f.id != Favourite.HOME
-                Column(
-                    Modifier.width(72.dp)
-                        .zIndex(if (lifted) 1f else 0f)
-                        .graphicsLayer {
-                            translationX = if (lifted) dx else 0f
-                            scaleX = lift
-                            scaleY = lift
-                        }
-                        .clip(RoundedCornerShape(K.rControl))
-                        .then(
-                            if (!inEdit) Modifier
-                            else Modifier.pointerInput(favourites, dir) {
-                                detectDragGestures(
-                                    onDragStart = { held = f.id; dx = 0f },
-                                    onDragCancel = { held = null; dx = 0f; order = null },
-                                    onDragEnd = {
-                                        val moved = order
-                                        held = null; dx = 0f
-                                        if (moved != null) onReorder?.invoke(moved)
-                                    },
-                                    onDrag = { change, drag ->
-                                        change.consume()
-                                        dx += drag.x
-                                        val list = (order ?: favourites).toMutableList()
-                                        val at = list.indexOfFirst { it.id == f.id }
-                                        if (at < 0) return@detectDragGestures
-                                        val travelled = dx * dir
-                                        if (travelled > slotPx / 2 && at < list.size - 1) {
-                                            list.add(at + 1, list.removeAt(at))
-                                            dx -= slotPx * dir
-                                            order = list
-                                        } else if (travelled < -slotPx / 2 && at > 0) {
-                                            list.add(at - 1, list.removeAt(at))
-                                            dx += slotPx * dir
-                                            order = list
-                                        }
-                                    },
-                                )
+    // A favourite's tile, in its cell of the grid.
+    @Composable
+    fun Tile(f: Favourite, index: Int, cols: Int) {
+        val set = f.place != null
+        val lifted = held == f.id
+        val spot = rememberSpot(index, cols, still = lifted)
+        val origin = remember { floatArrayOf(0f, 0f) }
+        val lift by animateFloatAsState(
+            if (lifted) 1.08f else 1f,
+            spring(dampingRatio = .6f, stiffness = Spring.StiffnessMedium), label = "lift",
+        )
+        val removable = onRemove != null && f.id != Favourite.HOME
+        // Lets go of a tile where the finger left it, so it glides from there into its cell.
+        fun drop(keep: Boolean) {
+            val moved = order
+            if (!keep) order = null
+            scope.launch(start = CoroutineStart.UNDISPATCHED) {
+                spot.at.snapTo(Offset(origin[0] + drag.x * dir / pitch[0], origin[1] + drag.y / pitch[1]))
+                held = null
+                drag = Offset.Zero
+            }
+            if (keep && moved != null) onReorder?.invoke(moved)
+        }
+        Column(
+            Modifier.layoutId(spot)
+                .zIndex(if (lifted) 1f else 0f)
+                .graphicsLayer {
+                    translationX = if (lifted) drag.x else 0f
+                    translationY = if (lifted) drag.y else 0f
+                    scaleX = lift
+                    scaleY = lift
+                }
+                .clip(RoundedCornerShape(K.rTile))
+                .then(
+                    if (!inEdit) Modifier
+                    else Modifier.pointerInput(favourites, dir, cols) {
+                        detectDragGestures(
+                            onDragStart = {
+                                origin[0] = spot.at.value.x
+                                origin[1] = spot.at.value.y
+                                drag = Offset.Zero
+                                held = f.id
+                            },
+                            onDragCancel = { drop(keep = false) },
+                            onDragEnd = { drop(keep = true) },
+                            onDrag = { change, by ->
+                                change.consume()
+                                drag += by
+                                val list = (order ?: favourites).toMutableList()
+                                val at = list.indexOfFirst { it.id == f.id }
+                                if (at < 0) return@detectDragGestures
+                                val col = (origin[0] + drag.x * dir / pitch[0]).roundToInt().coerceIn(0, cols - 1)
+                                val row = (origin[1] + drag.y / pitch[1]).roundToInt().coerceAtLeast(0)
+                                val to = (row * cols + col).coerceIn(0, list.size - 1)
+                                if (to != at) {
+                                    list.add(to, list.removeAt(at))
+                                    order = list
+                                }
                             },
                         )
-                        .combinedClickable(
-                            role = Role.Button,
-                            onClick = { if (inEdit) onEdit(f) else onPick(f) },
-                            onLongClick = if (inEdit) null else ({ onEdit(f) }),
-                        )
-                        .padding(vertical = K.gap2),
-                    horizontalAlignment = Alignment.CenterHorizontally,
+                    },
+                )
+                .combinedClickable(
+                    role = Role.Button,
+                    onClick = { if (inEdit) onEdit(f) else onPick(f) },
+                    onLongClick = if (inEdit) null else ({ onEdit(f) }),
+                )
+                .padding(horizontal = K.gap1, vertical = K.gap2),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Box(contentAlignment = Alignment.Center) {
+                Box(
+                    Modifier.size(48.dp).clip(RoundedCornerShape(K.rTile))
+                        .background(if (set) K.fill else Color.Transparent)
+                        .border(
+                            if (lifted) 1.5.dp else 1.dp,
+                            if (lifted) K.accent else if (set) Color.Transparent else K.separator,
+                            RoundedCornerShape(K.rTile),
+                        ),
+                    contentAlignment = Alignment.Center,
                 ) {
-                    Box(contentAlignment = Alignment.Center) {
-                        Box(
-                            Modifier.size(46.dp).clip(RoundedCornerShape(14.dp))
-                                .background(if (set) K.accent.copy(alpha = .16f) else K.surface1.copy(alpha = .62f))
-                                .border(
-                                    if (set || lifted) 1.dp else 0.5.dp,
-                                    if (lifted) K.accent else if (set) K.accent.copy(alpha = .5f) else K.text.copy(alpha = .14f),
-                                    RoundedCornerShape(14.dp),
-                                ),
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            Icon(favouriteIcon(f.icon), contentDescription = null, tint = if (set) K.accent else K.muted, modifier = Modifier.size(24.dp))
-                        }
-                        androidx.compose.animation.AnimatedVisibility(
-                            visible = inEdit && removable,
-                            modifier = Modifier.align(Alignment.TopEnd).offset(x = 7.dp, y = (-7).dp),
-                            enter = scaleIn(
-                                spring(dampingRatio = .55f, stiffness = Spring.StiffnessMedium), initialScale = .5f,
-                            ) + fadeIn(tween(120)),
-                            exit = scaleOut(tween(140), targetScale = .5f) + fadeOut(tween(120)),
-                        ) {
-                            Box(
-                                Modifier.size(24.dp).clip(RoundedCornerShape(999.dp)).background(K.critical)
-                                    .clickable(
-                                        role = Role.Button,
-                                        onClickLabel = T("Remove ${f.label}", "הסרת ${f.label}"),
-                                    ) { onRemove?.invoke(f) },
-                                contentAlignment = Alignment.Center,
-                            ) {
-                                Icon(Icons.Rounded.Close, contentDescription = null, tint = K.bg, modifier = Modifier.size(14.dp))
-                            }
-                        }
+                    Icon(favouriteIcon(f.icon), contentDescription = null, tint = if (set) K.text else K.textTertiary, modifier = Modifier.size(24.dp))
+                }
+                androidx.compose.animation.AnimatedVisibility(
+                    visible = inEdit && removable,
+                    modifier = Modifier.align(Alignment.TopEnd).offset(x = 7.dp, y = (-7).dp),
+                    enter = scaleIn(
+                        spring(dampingRatio = .55f, stiffness = Spring.StiffnessMedium), initialScale = .5f,
+                    ) + fadeIn(tween(120)),
+                    exit = scaleOut(tween(140), targetScale = .5f) + fadeOut(tween(120)),
+                ) {
+                    Box(
+                        Modifier.size(24.dp).clip(K.capsule).background(K.critical)
+                            .clickable(
+                                role = Role.Button,
+                                onClickLabel = T("Remove ${f.label}", "הסרת ${f.label}"),
+                            ) { onRemove?.invoke(f) },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(Icons.Rounded.Close, contentDescription = null, tint = K.bg, modifier = Modifier.size(14.dp))
                     }
-                    Spacer(Modifier.height(5.dp))
-                    Text(f.label, fontSize = 12.sp, color = if (set) K.text else K.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
             }
-            if (manage) EditControls(
-                editing = inEdit,
-                onToggle = { editMode = !editMode; order = null; held = null; dx = 0f },
-                onAdd = onAdd,
-            ) else StripTile(
-                Icons.Rounded.Add,
-                T("Add", "הוספה"),
-                T("Add a favourite", "הוספת מועדף"),
-                on = false,
-                onClick = onAdd,
+            Spacer(Modifier.height(K.gap1))
+            // The whole name: a long one takes a second line, and one still too long for two lines (or with a word
+            // wider than the tile) shrinks a little before anything is cut.
+            var labelSize by remember(f.label) { mutableStateOf(12.sp) }
+            Text(
+                f.label, style = K.type.caption, fontSize = labelSize, color = if (set) K.text else K.textSecondary,
+                maxLines = 2, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center,
+                onTextLayout = { if ((it.hasVisualOverflow || it.didOverflowWidth) && labelSize > 10.sp) labelSize *= 0.92f },
             )
+        }
+    }
+
+    Column(Modifier.fillMaxWidth()) {
+        BoxWithConstraints(Modifier.fillMaxWidth().padding(horizontal = horizontalPadding, vertical = K.gap2)) {
+            val cols = ((maxWidth + K.gap2) / SLOT).toInt().coerceAtLeast(1)
+            // Editing adds the Add tile before Done, so the grid gains a cell.
+            val slots = shown.size + if (inEdit) 2 else 1
+            SpotGrid(
+                cols, slots, pitch,
+                Modifier.fillMaxWidth().animateContentSize(spring(dampingRatio = 1f, stiffness = 500f)),
+            ) {
+                shown.forEachIndexed { i, f -> key("favourite", f.id) { Tile(f, i, cols) } }
+                if (!manage) key("add") {
+                    StripTile(
+                        Icons.Rounded.Add, T("Add", "הוספה"), T("Add a favourite", "הוספת מועדף"),
+                        on = false, onClick = onAdd, modifier = Modifier.layoutId(rememberSpot(shown.size, cols)),
+                    )
+                } else {
+                    if (inEdit || travel > 0f) key("add") {
+                        StripTile(
+                            Icons.Rounded.Add, T("Add", "הוספה"), T("Add a favourite", "הוספת מועדף"),
+                            on = false, onClick = onAdd, enabled = inEdit,
+                            modifier = Modifier.layoutId(rememberSpot(shown.size, cols)).graphicsLayer {
+                                val grown = .3f + .7f * travel.coerceAtLeast(0f)
+                                alpha = travel.coerceIn(0f, 1f)
+                                scaleX = grown
+                                scaleY = grown
+                            },
+                        )
+                    }
+                    key("edit") {
+                        val flipped = travel > .5f
+                        StripTile(
+                            if (flipped) Icons.Rounded.Check else Icons.Rounded.Edit,
+                            if (flipped) T("Done", "סיום") else T("Edit", "עריכה"),
+                            if (inEdit) T("Finish editing favourites", "סיום עריכת המועדפים")
+                            else T("Sort and remove favourites", "סידור והסרה של מועדפים"),
+                            on = inEdit,
+                            onClick = { editMode = !editMode; order = null; held = null; drag = Offset.Zero },
+                            modifier = Modifier.layoutId(rememberSpot(shown.size + if (inEdit) 1 else 0, cols)),
+                            iconModifier = Modifier.graphicsLayer {
+                                rotationY = travel * 180f - if (flipped) 180f else 0f
+                                cameraDistance = 12f * density
+                            },
+                        )
+                    }
+                }
+            }
         }
         AnimatedVisibility(
             visible = inEdit,
@@ -259,7 +356,7 @@ fun FavouriteStrip(
         ) {
             Text(
                 T("Drag to reorder, tap to edit", "גררו לסידור, הקישו לעריכה"),
-                fontSize = 12.sp, color = K.dim, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                style = K.type.caption, color = K.textTertiary, maxLines = 1, overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.padding(horizontal = horizontalPadding),
             )
         }
@@ -267,49 +364,10 @@ fun FavouriteStrip(
 }
 
 @Composable
-private fun EditControls(editing: Boolean, onToggle: () -> Unit, onAdd: () -> Unit) {
-    val slotPx = with(LocalDensity.current) { SLOT.toPx() }
-    val travel by animateFloatAsState(
-        if (editing) 1f else 0f,
-        spring(dampingRatio = .58f, stiffness = Spring.StiffnessMediumLow), label = "editTravel",
-    )
-    Box(Modifier.width(72.dp + SLOT * travel.coerceIn(0f, 1f))) {
-        StripTile(
-            Icons.Rounded.Add,
-            T("Add", "הוספה"),
-            T("Add a favourite", "הוספת מועדף"),
-            on = false,
-            onClick = onAdd,
-            enabled = editing,
-            modifier = Modifier.graphicsLayer {
-                val grown = .3f + .7f * travel.coerceAtLeast(0f)
-                alpha = travel.coerceIn(0f, 1f)
-                scaleX = grown
-                scaleY = grown
-            },
-        )
-        val flipped = travel > .5f
-        StripTile(
-            if (flipped) Icons.Rounded.Check else Icons.Rounded.Edit,
-            if (flipped) T("Done", "סיום") else T("Edit", "עריכה"),
-            if (editing) T("Finish editing favourites", "סיום עריכת המועדפים")
-            else T("Sort and remove favourites", "סידור והסרה של מועדפים"),
-            on = editing,
-            onClick = onToggle,
-            modifier = Modifier.offset { IntOffset((slotPx * travel).roundToInt(), 0) },
-            iconModifier = Modifier.graphicsLayer {
-                rotationY = travel * 180f - if (flipped) 180f else 0f
-                cameraDistance = 12f * density
-            },
-        )
-    }
-}
-
-@Composable
 private fun PlaceLine(f: Favourite, onChange: () -> Unit) {
     val p = f.place
     Row(
-        Modifier.fillMaxWidth().heightIn(min = 48.dp).panel(K.rControl)
+        Modifier.fillMaxWidth().heightIn(min = 48.dp).panel(K.rTile)
             .clickable(
                 role = Role.Button,
                 onClickLabel = T("Change where ${f.label} is", "שינוי המיקום של ${f.label}"),
@@ -330,7 +388,7 @@ private fun PlaceLine(f: Favourite, onChange: () -> Unit) {
                 Text(it, fontSize = 12.sp, color = K.dim, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
         }
-        Text(T("Change", "שינוי"), fontSize = 13.sp, color = K.accent)
+        Text(T("Change", "שינוי"), style = K.type.subhead, color = K.accentInk)
     }
 }
 
@@ -345,25 +403,20 @@ private fun StripTile(
     iconModifier: Modifier = Modifier,
     enabled: Boolean = true,
 ) {
-    val fill by animateColorAsState(
-        if (on) K.accent.copy(alpha = .16f) else K.surface1.copy(alpha = .62f), tween(220), label = "tileFill",
-    )
-    val edge by animateColorAsState(if (on) K.accent else K.text.copy(alpha = .14f), tween(220), label = "tileEdge")
-    val ink by animateColorAsState(if (on) K.accent else K.muted, tween(220), label = "tileInk")
+    val fill by animateColorAsState(if (on) K.accent else K.fill, tween(220), label = "tileFill")
+    val ink by animateColorAsState(if (on) K.onAccent else K.textSecondary, tween(220), label = "tileInk")
     Column(
-        modifier.width(72.dp).clip(RoundedCornerShape(K.rControl))
+        modifier.fillMaxWidth().clip(RoundedCornerShape(K.rTile))
             .clickable(enabled = enabled, role = Role.Button, onClick = onClick)
-            .padding(vertical = K.gap2),
+            .padding(horizontal = K.gap1, vertical = K.gap2),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Box(
-            Modifier.size(46.dp).clip(RoundedCornerShape(14.dp))
-                .background(fill)
-                .border(if (on) 1.dp else 0.5.dp, edge, RoundedCornerShape(14.dp)),
+            Modifier.size(48.dp).clip(RoundedCornerShape(K.rTile)).background(fill),
             contentAlignment = Alignment.Center,
         ) { Icon(icon, contentDescription = description, tint = ink, modifier = iconModifier.size(24.dp)) }
-        Spacer(Modifier.height(5.dp))
-        Text(label, fontSize = 12.sp, color = ink)
+        Spacer(Modifier.height(K.gap1))
+        Text(label, style = K.type.caption, color = K.textSecondary)
     }
 }
 
@@ -384,7 +437,7 @@ fun FavouriteEditor(
         ) {
             Text(
                 if (existing == null) T("New favourite", "מועדף חדש") else existing.label,
-                fontSize = 18.sp, color = K.text, fontWeight = FontWeight.SemiBold,
+                style = K.type.title,
             )
             if (existing?.id != Favourite.HOME) KavField(name, { name = it }, T("Name", "שם"), autoFocus = existing == null)
             if (existing != null && onChangePlace != null) PlaceLine(existing, onChangePlace)
@@ -395,36 +448,27 @@ fun FavouriteEditor(
                 items(FavouriteIcons, key = { it.first }) { (key, vector) ->
                     val on = key == icon
                     Box(
-                        Modifier.size(52.dp).clip(RoundedCornerShape(14.dp))
+                        Modifier.size(52.dp).clip(RoundedCornerShape(K.rTile))
                             .background(if (on) K.accent.copy(alpha = .18f) else K.plate)
-                            .border(1.dp, if (on) K.accent else K.border, RoundedCornerShape(14.dp))
+                            .border(1.dp, if (on) K.accent else K.border, RoundedCornerShape(K.rTile))
                             .clickable(role = Role.RadioButton) { icon = key },
                         contentAlignment = Alignment.Center,
                     ) {
-                        Icon(vector, contentDescription = key, tint = if (on) K.accent else K.muted, modifier = Modifier.size(26.dp))
+                        Icon(vector, contentDescription = key, tint = if (on) K.accentInk else K.muted, modifier = Modifier.size(26.dp))
                     }
                 }
             }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(K.gap2)) {
-                if (onRemove != null) Box(
-                    Modifier.heightIn(min = 44.dp).panel(K.rPill)
-                        .clickable(role = Role.Button, onClick = onRemove).padding(horizontal = K.gap4),
-                    contentAlignment = Alignment.Center,
-                ) { Text(T("Remove", "הסרה"), fontSize = 14.sp, color = K.critical) }
+                if (onRemove != null) {
+                    KavButton(T("Remove", "הסרה"), onRemove, Modifier.heightIn(min = 52.dp), style = ButtonStyle.Destructive)
+                }
                 Spacer(Modifier.weight(1f))
-                Box(
-                    Modifier.heightIn(min = 44.dp).panel(K.rPill)
-                        .clickable(role = Role.Button, onClick = onDismiss).padding(horizontal = K.gap4),
-                    contentAlignment = Alignment.Center,
-                ) { Text(T("Cancel", "ביטול"), fontSize = 14.sp, color = K.text) }
+                KavButton(T("Cancel", "ביטול"), onDismiss, Modifier.heightIn(min = 52.dp), style = ButtonStyle.Secondary)
                 val ready = name.isNotBlank() || existing?.id == Favourite.HOME
-                Box(
-                    Modifier.heightIn(min = 44.dp).clip(RoundedCornerShape(K.rPill))
-                        .background(if (ready) K.accent else K.surface4)
-                        .clickable(enabled = ready, role = Role.Button) { onSave(name.trim().ifBlank { existing?.name ?: "" }, icon) }
-                        .padding(horizontal = K.gap4),
-                    contentAlignment = Alignment.Center,
-                ) { Text(if (existing == null) T("Next", "הבא") else T("Save", "שמירה"), fontSize = 14.sp, color = if (ready) K.onAccent else K.muted, fontWeight = FontWeight.Medium) }
+                KavButton(
+                    if (existing == null) T("Next", "הבא") else T("Save", "שמירה"),
+                    { onSave(name.trim().ifBlank { existing?.name ?: "" }, icon) }, enabled = ready,
+                )
             }
         }
     }
