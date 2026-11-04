@@ -61,6 +61,7 @@ import uk.noammm.kav.ui.T
 fun MainViewController(): UIViewController {
     Log.i("Kav", "MainViewController: start")
     setUnhandledExceptionHook { e -> Log.e("Kav", "unhandled exception", e) }
+    seedProviders()
     val activity = MainActivity()
     activity.onCreate(null)
     Log.i("Kav", "MainViewController: onCreate done, content=${activity.content != null}")
@@ -87,6 +88,20 @@ fun MainViewController(): UIViewController {
         }
     }
     return controller
+}
+
+/**
+ * A new rider's providers, before upstream reads them. Upstream starts on Kav's server for live times (which only
+ * answers Noam's signed APKs) and Moovit's website for plans and timetables (a hidden WebView this build doesn't have
+ * yet), so the iPhone build starts on Bus Nearby for all three. Choices already made are kept.
+ */
+private fun seedProviders() {
+    val prefs = android.content.KavApplicationContext.getSharedPreferences("kav", android.content.Context.MODE_PRIVATE)
+    val edit = prefs.edit()
+    for (key in listOf("liveSource", "planSource", "timetableSource")) {
+        if (prefs.getString(key, null) == null) edit.putString(key, uk.noammm.kav.data.Source.BUS_NEARBY.key)
+    }
+    edit.apply()
 }
 
 /** The activity's lifecycle follows the app: upstream collects live data only while it is STARTED or RESUMED. */

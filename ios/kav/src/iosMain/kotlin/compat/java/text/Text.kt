@@ -7,6 +7,10 @@ import platform.Foundation.NSDate
 import platform.Foundation.NSDateFormatter
 import platform.Foundation.NSLocale
 import platform.Foundation.NSString
+import platform.Foundation.NSCaseInsensitiveSearch
+import platform.Foundation.NSDiacriticInsensitiveSearch
+import platform.Foundation.NSMakeRange
+import platform.Foundation.compare
 import platform.Foundation.NSTimeZone
 import platform.Foundation.localTimeZone
 import platform.Foundation.decomposedStringWithCanonicalMapping
@@ -36,10 +40,47 @@ class SimpleDateFormat(pattern: String, locale: Locale = Locale.getDefault()) {
 
     fun format(millis: Long): String = format(Date(millis))
 
+    var isLenient: Boolean
+        get() = formatter.lenient
+        set(v) { formatter.lenient = v }
+
     fun parse(text: String): Date {
         val d = formatter.dateFromString(text) ?: throw ParseException("Unparseable date: \"$text\"", 0)
         return Date((d.timeIntervalSince1970 * 1000).toLong())
     }
+
+    /** Parses from pos.index; NSDateFormatter reads whole strings, so a match consumes the rest of the text. */
+    fun parse(text: String, pos: ParsePosition): Date? {
+        val d = formatter.dateFromString(text.substring(pos.index)) ?: run { pos.errorIndex = pos.index; return null }
+        pos.index = text.length
+        return Date((d.timeIntervalSince1970 * 1000).toLong())
+    }
+}
+
+class ParsePosition(var index: Int) {
+    var errorIndex: Int = -1
+}
+
+/** Locale-aware string order, on NSString.compare(options:range:locale:). */
+class Collator private constructor(private val locale: NSLocale) : Comparator<String> {
+    override fun compare(a: String, b: String): Int =
+        (a as NSString).compare(b, NSCaseInsensitiveSearch or NSDiacriticInsensitiveSearch, NSMakeRange(0u, (a as NSString).length), locale).toInt()
+
+    companion object {
+        fun getInstance(): Collator = getInstance(Locale.getDefault())
+        fun getInstance(locale: Locale): Collator = Collator(NSLocale.localeWithLocaleIdentifier(locale.toLanguageTag()))
+    }
+}
+
+class DateFormatSymbols(locale: Locale = Locale.getDefault()) {
+    private val f = NSDateFormatter().apply { this.locale = NSLocale.localeWithLocaleIdentifier(locale.toLanguageTag()) }
+    @Suppress("UNCHECKED_CAST")
+    val months: Array<String> get() = ((f.standaloneMonthSymbols as? List<String>) ?: emptyList()).toTypedArray()
+    @Suppress("UNCHECKED_CAST")
+    val shortMonths: Array<String> get() = ((f.shortStandaloneMonthSymbols as? List<String>) ?: emptyList()).toTypedArray()
+    // Java puts an empty string first, so weekdays[Calendar.SUNDAY] (1) is Sunday.
+    @Suppress("UNCHECKED_CAST")
+    val weekdays: Array<String> get() = (listOf("") + ((f.standaloneWeekdaySymbols as? List<String>) ?: emptyList())).toTypedArray()
 }
 
 object Normalizer {

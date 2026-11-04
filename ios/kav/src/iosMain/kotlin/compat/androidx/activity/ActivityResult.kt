@@ -32,4 +32,26 @@ object ActivityResultContracts {
     class OpenDocument : ActivityResultContract<Array<String>, Uri?>() {
         override fun run(input: Array<String>, done: (Uri?) -> Unit) = DocumentPickers.open(done)
     }
+
+    /** Photos from the library (PHPickerViewController), copied into the cache so they read as file Uris. */
+    class PickVisualMedia : ActivityResultContract<androidx.activity.result.PickVisualMediaRequest, Uri?>() {
+        override fun run(input: androidx.activity.result.PickVisualMediaRequest, done: (Uri?) -> Unit) =
+            android.content.PhotoPicker.pick(1) { done(it.firstOrNull()) }
+
+        interface VisualMediaType
+        object ImageOnly : VisualMediaType
+        object ImageAndVideo : VisualMediaType
+        object VideoOnly : VisualMediaType
+    }
+
+    class PickMultipleVisualMedia(private val maxItems: Int = 20) : ActivityResultContract<androidx.activity.result.PickVisualMediaRequest, List<Uri>>() {
+        override fun run(input: androidx.activity.result.PickVisualMediaRequest, done: (List<Uri>) -> Unit) =
+            android.content.PhotoPicker.pick(maxItems, done)
+    }
+
+    /** Android hands an Intent to another app and gets its answer; iOS has none to hand it to, so it comes back cancelled. */
+    class StartActivityForResult : ActivityResultContract<android.content.Intent, androidx.activity.result.ActivityResult>() {
+        override fun run(input: android.content.Intent, done: (androidx.activity.result.ActivityResult) -> Unit) =
+            done(androidx.activity.result.ActivityResult(android.app.Activity.RESULT_CANCELED, null))
+    }
 }

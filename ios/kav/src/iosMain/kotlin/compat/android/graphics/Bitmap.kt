@@ -35,8 +35,37 @@ class Bitmap internal constructor(internal val image: androidx.compose.ui.graphi
 
     companion object {
         fun createBitmap(width: Int, height: Int, config: Config): Bitmap = Bitmap(androidx.compose.ui.graphics.ImageBitmap(width, height))
+
+        /** A region of [src] transformed by [m]: rotations by multiples of 90 degrees and scaling, which is what upstream asks. */
+        fun createBitmap(src: Bitmap, x: Int, y: Int, width: Int, height: Int, m: Matrix?, filter: Boolean): Bitmap {
+            val turns = Math.floorMod(kotlin.math.round((m?.degrees ?: 0f) / 90f).toInt(), 4)
+            val sw = width * (m?.sx ?: 1f); val sh = height * (m?.sy ?: 1f)
+            val (w, h) = if (turns % 2 == 0) sw to sh else sh to sw
+            val out = SkBitmap().also { it.allocN32Pixels(kotlin.math.abs(w).toInt().coerceAtLeast(1), kotlin.math.abs(h).toInt().coerceAtLeast(1)) }
+            val canvas = SkCanvas(out)
+            canvas.translate(out.width / 2f, out.height / 2f)
+            canvas.rotate(turns * 90f)
+            canvas.drawImageRect(SkImage.makeFromBitmap(src.skia), Rect.makeXYWH(x.toFloat(), y.toFloat(), width.toFloat(), height.toFloat()),
+                Rect.makeXYWH(-sw / 2f, -sh / 2f, sw, sh))
+            canvas.close()
+            return Bitmap(out)
+        }
     }
 }
+
+/** android.graphics.Matrix, the part Kav uses: a rotation and a scale for createBitmap. */
+class Matrix {
+    internal var degrees = 0f
+    internal var sx = 1f
+    internal var sy = 1f
+    fun postRotate(d: Float): Boolean { degrees += d; return true }
+    fun preRotate(d: Float): Boolean { degrees += d; return true }
+    fun setRotate(d: Float) { degrees = d }
+    fun postScale(x: Float, y: Float): Boolean { sx *= x; sy *= y; return true }
+    fun reset() { degrees = 0f; sx = 1f; sy = 1f }
+}
+
+private object Math { fun floorMod(a: Int, b: Int): Int = ((a % b) + b) % b }
 
 object BitmapFactory {
     class Options {
@@ -59,6 +88,13 @@ object BitmapFactory {
         canvas.close()
         return Bitmap(bmp)
     }
+
+    fun decodeStream(input: java.io.InputStream?, outPadding: Any?, opts: Options?): Bitmap? {
+        val bytes = runCatching { input?.readBytes() }.getOrNull() ?: return null
+        return decodeByteArray(bytes, 0, bytes.size, opts)
+    }
+
+    fun decodeStream(input: java.io.InputStream?): Bitmap? = decodeStream(input, null, null)
 
     fun decodeFile(path: String, opts: Options?): Bitmap? {
         val bytes = runCatching { File(path).readBytes() }.getOrNull() ?: return null

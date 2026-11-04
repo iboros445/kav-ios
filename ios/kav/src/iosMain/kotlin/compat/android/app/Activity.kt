@@ -4,6 +4,10 @@ import android.content.Context
 import android.view.Window
 
 open class Activity : Context() {
+    companion object {
+        const val RESULT_OK = -1
+        const val RESULT_CANCELED = 0
+    }
     val window: Window = Window()
     open fun finish() {}
     /** iOS asks for a permission once; after a refusal only the Settings app can grant it, Android's "don't ask again". */

@@ -1,5 +1,5 @@
 //@cmp
-// iOS override of android/app/src/main/java/uk/noammm/kav/ui/Liquid.kt @ e945f0b. Keep public API identical.
+// iOS override of android/app/src/main/java/uk/noammm/kav/ui/Liquid.kt @ ede72bd. Keep public API identical.
 //
 // Android draws the glass with AGSL (RuntimeShader + RenderEffect). Compose on iOS renders with Skia, whose SkSL is
 // the same language, so the shader text is unchanged and only the host calls differ. If the shader fails to compile
@@ -36,7 +36,12 @@ import org.jetbrains.skia.ColorFilter as SkColorFilter
 import org.jetbrains.skia.ColorMatrix as SkColorMatrix
 
 // The shaders below are from Kyant0's AndroidLiquidGlass (Apache License 2.0, Copyright 2025 Kyant).
-internal val liquidTint get() = K.bg.copy(alpha = .72f)
+// Over the bare page a pane comes out the cards' own shade, with what passes under it showing through.
+internal val liquidTint: androidx.compose.ui.graphics.Color get() {
+    val a = .72f
+    fun over(card: Float, page: Float) = ((card - (1 - a) * page) / a).coerceIn(0f, 1f)
+    return androidx.compose.ui.graphics.Color(over(K.surface.red, K.bg.red), over(K.surface.green, K.bg.green), over(K.surface.blue, K.bg.blue), a)
+}
 
 class LiquidBackdrop internal constructor(internal val layer: GraphicsLayer) {
     internal var origin by mutableStateOf(Offset.Zero)

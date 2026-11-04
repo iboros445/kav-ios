@@ -12,6 +12,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.IO as CoroutinesIO
 import kotlin.math.abs
 import kotlin.math.floor
+import kotlin.math.pow
 import kotlin.time.Clock
 import kotlin.time.TimeSource
 import kotlin.time.ExperimentalTime
@@ -31,6 +32,7 @@ object Integer {
     fun toHexString(i: Int): String = i.toUInt().toString(16)
     fun parseInt(s: String): Int = s.toInt()
     fun valueOf(i: Int): Int = i
+    fun bitCount(i: Int): Int = i.countOneBits()
 }
 
 // kotlinx.coroutines keeps Dispatchers.IO as an extension on Native; on the JVM it is a member, so upstream imports nothing.
@@ -64,6 +66,11 @@ class JavaClass(private val k: kotlin.reflect.KClass<*>) {
 }
 val <T : Any> T.javaClass: JavaClass get() = JavaClass(this::class)
 
+// ---- Java getters return platform types (String!), and upstream calls String members on them directly.
+// On a null these throw as the JVM would. ----
+val String?.length: Int get() = this!!.length
+fun String?.lowercase(): String = this!!.lowercase()
+
 // ---- String.lowercase(Locale) / uppercase(Locale) ----
 fun String.lowercase(locale: Locale): String = lowercase()
 fun String.uppercase(locale: Locale): String = uppercase()
@@ -91,11 +98,87 @@ object System {
 }
 
 object Math {
+    const val PI: Double = kotlin.math.PI
+    const val E: Double = kotlin.math.E
     fun toRadians(d: Double): Double = d / 180.0 * kotlin.math.PI
     fun toDegrees(r: Double): Double = r * 180.0 / kotlin.math.PI
     fun hypot(x: Double, y: Double): Double = kotlin.math.hypot(x, y)
-    fun round(d: Double): Long = floor(d + 0.5).toLong()
-    fun round(f: Float): Int = floor(f + 0.5f).toInt()
+    fun round(d: Double): Long = kotlin.math.floor(d + 0.5).toLong()
+    fun round(f: Float): Int = kotlin.math.floor(f + 0.5f).toInt()
+    fun abs(a: Int): Int = kotlin.math.abs(a)
+    fun abs(a: Long): Long = kotlin.math.abs(a)
+    fun abs(a: Double): Double = kotlin.math.abs(a)
+    fun abs(a: Float): Float = kotlin.math.abs(a)
+    fun max(a: Int, b: Int): Int = maxOf(a, b)
+    fun max(a: Long, b: Long): Long = maxOf(a, b)
+    fun max(a: Double, b: Double): Double = maxOf(a, b)
+    fun max(a: Float, b: Float): Float = maxOf(a, b)
+    fun min(a: Int, b: Int): Int = minOf(a, b)
+    fun min(a: Long, b: Long): Long = minOf(a, b)
+    fun min(a: Double, b: Double): Double = minOf(a, b)
+    fun min(a: Float, b: Float): Float = minOf(a, b)
+    fun pow(a: Double, b: Double): Double = a.pow(b)
+    fun sqrt(a: Double): Double = kotlin.math.sqrt(a)
+    fun sin(a: Double): Double = kotlin.math.sin(a)
+    fun cos(a: Double): Double = kotlin.math.cos(a)
+    fun tan(a: Double): Double = kotlin.math.tan(a)
+    fun atan(a: Double): Double = kotlin.math.atan(a)
+    fun atan2(y: Double, x: Double): Double = kotlin.math.atan2(y, x)
+    fun sinh(a: Double): Double = kotlin.math.sinh(a)
+    fun log(a: Double): Double = kotlin.math.ln(a)
+    fun exp(a: Double): Double = kotlin.math.exp(a)
+    fun floor(a: Double): Double = kotlin.math.floor(a)
+    fun ceil(a: Double): Double = kotlin.math.ceil(a)
+    fun signum(a: Double): Double = kotlin.math.sign(a)
+    fun floorDiv(a: Int, b: Int): Int { val q = a / b; return if (a % b != 0 && (a xor b) < 0) q - 1 else q }
+    fun floorDiv(a: Long, b: Long): Long { val q = a / b; return if (a % b != 0L && (a xor b) < 0) q - 1 else q }
+    fun floorDiv(a: Long, b: Int): Long = floorDiv(a, b.toLong())
+    fun floorMod(a: Int, b: Int): Int = a - floorDiv(a, b) * b
+    fun floorMod(a: Long, b: Long): Long = a - floorDiv(a, b) * b
+    fun floorMod(a: Long, b: Int): Int = floorMod(a, b.toLong()).toInt()
+}
+
+// ---- java.lang.Thread: upstream starts plain background threads and sleeps on them ----
+class Thread(private val body: () -> Unit) {
+    constructor(r: java.lang.Runnable) : this({ r.run() })
+    var isDaemon: Boolean = false
+    var name: String = "Thread"
+    var priority: Int = 5
+    fun start() {
+        platform.darwin.dispatch_async(platform.darwin.dispatch_get_global_queue(platform.darwin.DISPATCH_QUEUE_PRIORITY_DEFAULT.toLong(), 0u)) { body() }
+    }
+    fun interrupt() {}
+    companion object {
+        const val MIN_PRIORITY = 1
+        fun sleep(ms: Long) { platform.Foundation.NSThread.sleepForTimeInterval(ms / 1000.0) }
+    }
+}
+
+// ---- java.util.LinkedHashMap(capacity, loadFactor, accessOrder) with removeEldestEntry: upstream's LRU caches.
+// Kotlin/Native's LinkedHashMap is final, so this same-package class stands in for every upstream use. ----
+open class LinkedHashMap<K, V>(initialCapacity: Int = 16, @Suppress("UNUSED_PARAMETER") loadFactor: Float = 0.75f,
+                               private val accessOrder: Boolean = false) : AbstractMutableMap<K, V>() {
+    constructor(from: Map<out K, V>) : this(from.size) { putAll(from) }
+    private val inner = kotlin.collections.LinkedHashMap<K, V>(initialCapacity)
+    override val entries: MutableSet<MutableMap.MutableEntry<K, V>> get() = inner.entries
+    override val size: Int get() = inner.size
+    override fun containsKey(key: K): Boolean = inner.containsKey(key)
+    override fun get(key: K): V? {
+        if (!accessOrder || !inner.containsKey(key)) return inner[key]
+        @Suppress("UNCHECKED_CAST") val v = inner.remove(key) as V
+        inner[key] = v
+        return v
+    }
+    override fun put(key: K, value: V): V? {
+        val old = if (accessOrder) inner.remove(key) else null
+        val prev = inner.put(key, value) ?: old
+        val eldest = inner.entries.firstOrNull()
+        if (eldest != null && removeEldestEntry(eldest)) inner.remove(eldest.key)
+        return prev
+    }
+    override fun remove(key: K): V? = inner.remove(key)
+    override fun clear() = inner.clear()
+    protected open fun removeEldestEntry(eldest: MutableMap.MutableEntry<K, V>?): Boolean = false
 }
 
 // ---- String.format (java.util.Formatter subset: %d %s %f %x %X %% %n, flags - 0 + , and width/precision/arg index) ----

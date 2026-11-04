@@ -1,4 +1,4 @@
-// iOS override of android/app/src/main/java/uk/noammm/kav/data/Updates.kt @ e945f0b. Keep public API identical.
+// iOS override of android/app/src/main/java/uk/noammm/kav/data/Updates.kt @ ede72bd. Keep public API identical.
 //
 // Android downloads an APK from the upstream releases and hands it to the system installer. On iOS an app cannot
 // install itself: updates arrive through the SideStore source (see ios/INSTALL.md). Until Phase 5 wires that up,
@@ -63,6 +63,29 @@ object Updates {
             pageUrl = o.optString("html_url").ifBlank { IOS_PAGE },
         )
     }
+
+    // The newest release the background check found, kept on the phone so Kav can tell of it as it opens without
+    // asking GitHub then. GitHub is asked at most once a day. (Same as upstream.)
+    private const val DAY_MS = 24 * 3600_000L
+
+    private fun storeFile(ctx: Context) = File(ctx.filesDir, "release.json")
+
+    fun stored(ctx: Context): Release? = runCatching { fromJson(JSONObject(storeFile(ctx).readText())) }.getOrNull()
+
+    fun store(ctx: Context, release: Release) = storeFile(ctx).writeText(toJson(release).toString())
+
+    fun checkIfDue(ctx: Context): Release? =
+        if (!due(storeFile(ctx).lastModified(), System.currentTimeMillis())) null else latest().also { store(ctx, it) }
+
+    internal fun due(checkedAt: Long, now: Long) = now - checkedAt >= DAY_MS || checkedAt > now
+
+    internal fun toJson(r: Release): JSONObject = JSONObject().put("version", r.version).put("name", r.name).put("notes", r.notes)
+        .put("apkUrl", r.apkUrl).put("apkBytes", r.apkBytes).put("pageUrl", r.pageUrl)
+
+    internal fun fromJson(o: JSONObject) = Release(
+        o.getString("version"), o.optString("name"), o.optString("notes"), o.optString("apkUrl").ifBlank { null },
+        o.optLong("apkBytes", -1L), o.optString("pageUrl").ifBlank { IOS_PAGE },
+    )
 
     fun isNewer(remote: String, installed: String): Boolean {
         val a = segments(remote); val b = segments(installed)

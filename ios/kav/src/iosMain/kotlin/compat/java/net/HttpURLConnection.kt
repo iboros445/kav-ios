@@ -93,6 +93,11 @@ open class HttpURLConnection(url: URL) : URLConnection(url) {
 
     override fun connect() { started() }
 
+    // Body size hints: NSURLSession sends the whole body at once, so these only exist for upstream to call.
+    fun setFixedLengthStreamingMode(contentLength: Int) {}
+    fun setFixedLengthStreamingMode(contentLength: Long) {}
+    fun setChunkedStreamingMode(chunkLength: Int) {}
+
     val responseCode: Int get() = started().awaitResponse().status
     val responseMessage: String? get() = null
 
@@ -105,8 +110,8 @@ open class HttpURLConnection(url: URL) : URLConnection(url) {
             return started().stream
         }
 
-    /** The body of a 4xx/5xx response, or null when the request succeeded. */
-    val errorStream: InputStream? get() = if (started().awaitResponse().status >= 400) started().stream else null
+    /** The body of a 4xx/5xx response; empty when the request succeeded (Android gives null, which upstream never reads). */
+    val errorStream: InputStream get() = if (started().awaitResponse().status >= 400) started().stream else java.io.ByteArrayInputStream(ByteArray(0))
 
     fun disconnect() { exchange?.cancel() }
 
@@ -119,6 +124,7 @@ open class HttpURLConnection(url: URL) : URLConnection(url) {
         private val lock = NSCondition()
         private var response: Response? = null
         private var failure: String? = null
+        private var failureCode: Long = 0
         private var finished = false
         private val chunks = ArrayDeque<ByteArray>()
         private var task: NSURLSessionDataTask? = null
@@ -155,7 +161,7 @@ open class HttpURLConnection(url: URL) : URLConnection(url) {
             try {
                 while (response == null && failure == null) lock.wait()
                 response?.let { return it }
-                throw IOException(failure)
+                throw failed()
             } finally { lock.unlock() }
         }
 
@@ -176,7 +182,7 @@ open class HttpURLConnection(url: URL) : URLConnection(url) {
                     try {
                         while (chunks.isEmpty() && !finished) lock.wait()
                         if (chunks.isEmpty()) {
-                            if (failure != null) throw IOException(failure)
+                            if (failure != null) throw failed()
                             return -1
                         }
                         cur = chunks.removeFirst()
@@ -193,13 +199,19 @@ open class HttpURLConnection(url: URL) : URLConnection(url) {
             override fun close() { cancel() }
         }
 
+        // The java.net exception Android raises for the same failure, so upstream's catch blocks tell them apart.
+        private fun failed(): IOException = when (failureCode) {
+            -1001L -> SocketTimeoutException(failure)
+            -1003L, -1006L, -1009L, -1004L, -1005L, -1018L, -1020L -> UnknownHostException(failure)
+            in -1206L..-1200L, -2000L -> javax.net.ssl.SSLException(failure)
+            else -> IOException(failure)
+        }
+
         fun onResponse(r: NSHTTPURLResponse) {
             val map = HashMap<String, String>()
             r.allHeaderFields.forEach { (k, v) -> if (k != null && v != null) map[k.toString().lowercase()] = v.toString() }
             val status = r.statusCode.toInt()
             if (status >= 400) android.util.Log.w("KavHttp", "$method ${where()} -> HTTP $status${revisions(map)}")
-            // TEMPORARY (Live vehicles investigation): Moovit's entity lookups also when they succeed.
-            else if ("Entities/Entity" in url) android.util.Log.i("KavHttp", "$method ${where()} -> HTTP $status${revisions(map)}")
             lock.lock(); response = Response(status, map); lock.broadcast(); lock.unlock()
         }
 
@@ -220,6 +232,7 @@ open class HttpURLConnection(url: URL) : URLConnection(url) {
             lock.lock()
             if (error != null && failure == null && !finished) {
                 failure = error.localizedDescription
+                failureCode = error.code
                 android.util.Log.w("KavHttp", "$method ${where()} failed: ${error.domain} ${error.code} ${error.localizedDescription}")
             }
             finished = true

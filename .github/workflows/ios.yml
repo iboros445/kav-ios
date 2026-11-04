@@ -1,13 +1,20 @@
 name: iOS
 
+# The repo is private, so macOS minutes are counted (at 10x): builds run for pushes to the iOS branches only, and a
+# commit that changes no code says [skip ci]. Manual runs can add the simulator tests.
 on:
   push:
-    branches: ['**']
+    branches: ['sync/**', 'claude/ios-migration-plan-4ojstt']
     tags: ['ios-v*']
   workflow_dispatch:
+    inputs:
+      tests:
+        description: Run the Kotlin simulator tests too (~10 more macOS minutes)
+        type: boolean
+        default: false
 
 permissions:
-  contents: write   # the SideStore source release
+  contents: read
 
 concurrency:
   group: ios-${{ github.ref }}
@@ -69,17 +76,18 @@ jobs:
           echo "version=$v" >> "$GITHUB_OUTPUT"
           echo "Upstream versionName: $v"
 
-      # The MOT timetable has no licence, so it is never committed: take il.kav out of upstream's release APK.
-      - name: Fetch il.kav from the upstream release APK
+      # The app downloads the timetable at setup (upstream's nightly `timetable` release); the simulator tests read
+      # a copy from the test assets. It has no licence, so it is never committed.
+      - name: Fetch il.kav for the tests
+        if: inputs.tests
         continue-on-error: true
         working-directory: .
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           mkdir -p ios/app/assets
-          tmp=$(mktemp -d)
-          gh release download --repo ImNoammm/kav --pattern '*.apk' --dir "$tmp"
-          unzip -p "$tmp"/*.apk assets/il.kav > ios/app/assets/il.kav
+          gh release download timetable --repo ImNoammm/kav --pattern 'il.kav.gz' --dir "$RUNNER_TEMP"
+          gunzip -c "$RUNNER_TEMP/il.kav.gz" > ios/app/assets/il.kav
           ls -l ios/app/assets/il.kav
 
       - name: Bundle the map style, fonts and sprites
@@ -88,6 +96,11 @@ jobs:
           mkdir -p ios/app/assets
           cp -R android/app/src/main/assets/map ios/app/assets/map
           cp .github/icon.png ios/app/assets/icon.png
+          # res/raw (notices, release notes, the Moovit scripts) as assets/raw/<file>: see the R and Resources shims.
+          mkdir -p ios/app/assets/raw
+          cp android/app/src/main/res/raw/* ios/app/assets/raw/
+          # Other assets upstream reads by name (report.js for the ministry's form, and any added later).
+          find android/app/src/main/assets -maxdepth 1 -type f -exec cp {} ios/app/assets/ \;
 
       # compile errors first and alone, so a failed run says why in a few lines
       # Device target first: the link below reuses this compile (the simulator one waits for the tests at the end).
@@ -155,33 +168,9 @@ jobs:
           path: ios/app/Kav.ipa
           if-no-files-found: error
 
-      # SideStore source: every build of the iOS branch replaces the IPA on the rolling `ios-nightly` release and
-      # rewrites source.json next to it, so SideStore → Sources can install and update Kav without a computer.
-      # Source URL: https://github.com/iboros445/kav-ios/releases/download/ios-nightly/source.json
-      - name: Publish to the SideStore source
-        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/claude/ios-migration-plan-4ojstt'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ios-nightly
-        run: |
-          ipa="Kav-${{ steps.ver.outputs.version }}-${{ github.run_number }}.ipa"
-          cp app/Kav.ipa "$RUNNER_TEMP/$ipa"
-          notes="Build ${{ github.run_number }}: $(git log -1 --format=%s)"
-          if ! gh release view "$TAG" >/dev/null 2>&1; then
-            gh release create "$TAG" --prerelease --target "$GITHUB_SHA" --title "Kav for iPhone (latest build)" \
-              --notes "Rolling development build. Add the source in SideStore: https://github.com/${{ github.repository }}/releases/download/$TAG/source.json"
-          fi
-          # IPA first, then the source that points at it, then drop older IPAs
-          gh release upload "$TAG" "$RUNNER_TEMP/$ipa" --clobber
-          python3 tools/make_source_json.py --ipa app/Kav.ipa \
-            --url "https://github.com/${{ github.repository }}/releases/download/$TAG/$ipa" \
-            --notes "$notes" > "$RUNNER_TEMP/source.json"
-          gh release upload "$TAG" "$RUNNER_TEMP/source.json" --clobber
-          gh release view "$TAG" --json assets --jq '.assets[].name' | grep -E '^Kav-.*\.ipa$' | grep -vxF "$ipa" \
-            | xargs -r -n1 gh release delete-asset "$TAG" -y
-
       # Last on purpose: linking the test binary takes ~9 minutes, and the IPA above must not wait for it.
       - name: Kotlin simulator tests
+        if: inputs.tests
         timeout-minutes: 25
         env:
           # simctl hands SIMCTL_CHILD_* to the simulated process with the prefix removed

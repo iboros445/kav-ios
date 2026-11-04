@@ -1,5 +1,5 @@
 //@cmp
-// iOS override of android/app/src/main/java/uk/noammm/kav/TripService.kt @ dcd6ab5. Keep public API identical.
+// iOS override of android/app/src/main/java/uk/noammm/kav/TripService.kt @ ede72bd. Keep public API identical.
 //
 // Android keeps a foreground service and an ongoing notification for a trip under way. iOS has neither; Phase 4 of
 // ios/MIGRATION_PLAN.md adds background location and local notifications behind these same entry points. Until then

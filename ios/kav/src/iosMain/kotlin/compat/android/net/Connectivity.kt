@@ -9,6 +9,7 @@ import platform.SystemConfiguration.SCNetworkReachabilityFlagsVar
 import platform.SystemConfiguration.SCNetworkReachabilityGetFlags
 import platform.SystemConfiguration.kSCNetworkReachabilityFlagsConnectionRequired
 import platform.SystemConfiguration.kSCNetworkReachabilityFlagsReachable
+import platform.SystemConfiguration.kSCNetworkReachabilityFlagsIsWWAN
 
 class Network internal constructor()
 
@@ -31,5 +32,12 @@ class ConnectivityManager constructor() {
     }
 
     val activeNetwork: Network? get() = if (online()) Network() else null
+
+    /** Cellular counts as metered, as on Android; Wi-Fi does not (iOS's Low Data Mode is not visible here). */
+    val isActiveNetworkMetered: Boolean get() = memScoped {
+        val ref = SCNetworkReachabilityCreateWithName(null, "apple.com") ?: return@memScoped false
+        val flags = alloc<SCNetworkReachabilityFlagsVar>()
+        SCNetworkReachabilityGetFlags(ref, flags.ptr) && (flags.value and kSCNetworkReachabilityFlagsIsWWAN) != 0u
+    }
     fun getNetworkCapabilities(network: Network): NetworkCapabilities = NetworkCapabilities(online())
 }

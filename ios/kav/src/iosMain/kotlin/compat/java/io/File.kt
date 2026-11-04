@@ -98,6 +98,19 @@ class File(path: String) : Comparable<File> {
     override fun toString(): String = path
 
     companion object {
+        private var tempCounter = 0
+
+        fun createTempFile(prefix: String, suffix: String?, directory: File?): File {
+            val dir = directory ?: android.content.KavApplicationContext.cacheDir
+            dir.mkdirs()
+            while (true) {
+                val f = File(dir, prefix + kotlin.random.Random.nextLong(1L shl 40).toString(36) + (tempCounter++) + (suffix ?: ".tmp"))
+                if (!f.exists() && f.createNewFile()) return f
+            }
+        }
+
+        fun createTempFile(prefix: String, suffix: String?): File = createTempFile(prefix, suffix, null)
+
         const val separator = "/"
         const val separatorChar = '/'
 

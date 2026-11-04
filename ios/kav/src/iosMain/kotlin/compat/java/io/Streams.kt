@@ -8,6 +8,7 @@ import java.nio.charset.Charset
 open class IOException(message: String? = null, cause: Throwable? = null) : Exception(message, cause)
 open class FileNotFoundException(message: String? = null) : IOException(message)
 class EOFException(message: String? = null) : IOException(message)
+open class InterruptedIOException(message: String? = null) : IOException(message)
 class UncheckedIOException(cause: IOException) : RuntimeException(cause.message, cause)
 
 interface Closeable : AutoCloseable { override fun close() }

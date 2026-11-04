@@ -1,7 +1,12 @@
 # Upstream files NOT compiled for iOS, because an iOS replacement exists.
 # Format: <path under android/app/src/main/java>  <upstream base sha>  <reason>
 # Replacement: ios/kav/src/iosMain/kotlin/overrides/<same path with .kt -> .ios.kt>. See UPSTREAM_SYNC.md.
-uk/noammm/kav/data/Updates.kt  e945f0b  no APK installer on iOS; updates come from the SideStore source
-uk/noammm/kav/ui/Liquid.kt  e945f0b  AGSL RuntimeShader -> Skia RuntimeEffect
-uk/noammm/kav/ui/Qr.kt  dcd6ab5  CameraX + zxing; AVFoundation + a QR encoder come in Phase 6
-uk/noammm/kav/TripService.kt  dcd6ab5  Android foreground service; Phase 4 adds background location + local notifications
+uk/noammm/kav/data/Updates.kt  ede72bd  no APK installer on iOS; updates come from the SideStore source
+uk/noammm/kav/ui/Liquid.kt  ede72bd  AGSL RuntimeShader -> Skia RuntimeEffect
+uk/noammm/kav/ui/Qr.kt  ede72bd  CameraX + zxing; AVFoundation + a QR encoder come in Phase 6
+uk/noammm/kav/TripService.kt  ede72bd  Android foreground service; Phase 4 adds background location + local notifications
+uk/noammm/kav/Checks.kt  ede72bd  JobScheduler + PackageInstaller; iOS runs the checks when Kav comes to the front
+uk/noammm/kav/data/AutoUpdate.kt  ede72bd  APK self-install; SideStore updates Kav on iOS
+uk/noammm/kav/data/MoovitWebPage.kt  ede72bd  hidden Android WebView; a WKWebView bridge comes later
+uk/noammm/kav/Speaker.kt  ede72bd  Android TextToSpeech; AVSpeechSynthesizer on iOS
+uk/noammm/kav/LineAlerts.kt  ede72bd  AlarmManager wakes; no scheduled wakes for an iPhone app yet

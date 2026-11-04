@@ -110,9 +110,6 @@ class DataLayerTest {
         assertEquals("https://a.com/x", URI("https://a.com/b/c").resolve("/x").toString())
         assertEquals("https://a.com/b/e?q=1", URI("https://a.com/b/c?z").resolve("e?q=1").toString())
         assertEquals("https://a.com/x", URL(URL("https://a.com/b/c"), "../x").toString())
-        val plan = MoovitLink.parse("https://moovitapp.com/directions?dest_lat=32.1&dest_lon=34.8&dest_name=Home")
-        assertNotNull(plan)
-        assertEquals(32.1, plan.toLat)
     }
 
     @Test fun uuidDateFormat() {

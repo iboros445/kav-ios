@@ -64,7 +64,7 @@ OUT=$("$KN/bin/kotlinc-native" -target "$TARGET" -p library -nowarn \
   -l "$CACHE/coroutines.klib" -l "$CACHE/atomicfu.klib" \
   -opt-in=kotlin.experimental.ExperimentalNativeApi -opt-in=kotlinx.cinterop.ExperimentalForeignApi \
   -opt-in=kotlin.time.ExperimentalTime -opt-in=kotlin.concurrent.atomics.ExperimentalAtomicApi \
-  -o "$W/out.klib" $FILES "$STAMP"/*.kt "$HERE/klib_check_stubs/ComposeRuntimeStub.kt" "$HERE/klib_check_stubs/CrossFileStubs.kt" "$HERE/klib_check_stubs/KotlinTestStub.kt" \
+  -o "$W/out.klib" $FILES "$STAMP"/*.kt "$HERE"/klib_check_stubs/*.kt \
   $(find "$UP" -name '*.kt') $TESTS 2>&1)
 RC=$?
 set -e

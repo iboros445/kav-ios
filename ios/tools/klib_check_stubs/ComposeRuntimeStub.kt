@@ -12,3 +12,8 @@ interface MutableState<T> : State<T> { override var value: T }
 fun <T> mutableStateOf(value: T): MutableState<T> = object : MutableState<T> { override var value = value }
 operator fun <T> State<T>.getValue(thisObj: Any?, property: KProperty<*>): T = value
 operator fun <T> MutableState<T>.setValue(thisObj: Any?, property: KProperty<*>, value: T) { this.value = value }
+
+class SnapshotStateMap<K, V> internal constructor(private val m: MutableMap<K, V> = HashMap()) : MutableMap<K, V> by m
+fun <K, V> mutableStateMapOf(): SnapshotStateMap<K, V> = SnapshotStateMap()
+class SnapshotStateList<T> internal constructor(private val l: MutableList<T> = ArrayList()) : MutableList<T> by l
+fun <T> mutableStateListOf(): SnapshotStateList<T> = SnapshotStateList()

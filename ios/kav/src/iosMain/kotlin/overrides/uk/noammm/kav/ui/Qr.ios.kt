@@ -1,5 +1,5 @@
 //@cmp
-// iOS override of android/app/src/main/java/uk/noammm/kav/ui/Qr.kt @ dcd6ab5. Keep public API identical.
+// iOS override of android/app/src/main/java/uk/noammm/kav/ui/Qr.kt @ ede72bd. Keep public API identical.
 //
 // Paying for rides needs a camera QR reader (AVFoundation) and a QR encoder for the ticket. Both come with the payments
 // phase (ios/MIGRATION_PLAN.md, Phase 6); until then these show a plain notice in the same space.
