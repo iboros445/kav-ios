@@ -1,7 +1,7 @@
 name: iOS
 
-# The repo is private, so macOS minutes are counted (at 10x): builds run for pushes to the iOS branches only, and a
-# commit that changes no code says [skip ci]. Manual runs can add the simulator tests.
+# Builds run for pushes to the iOS branches (a commit that changes no code says [skip ci]). Manual runs can add the
+# simulator tests.
 on:
   push:
     branches: ['sync/**', 'claude/ios-migration-plan-4ojstt']
@@ -167,6 +167,8 @@ jobs:
           name: Kav-ipa
           path: ios/app/Kav.ipa
           if-no-files-found: error
+          # Each IPA is ~30 MB; keep only recent ones so artifact storage stays small.
+          retention-days: 3
 
       # Last on purpose: linking the test binary takes ~9 minutes, and the IPA above must not wait for it.
       - name: Kotlin simulator tests
