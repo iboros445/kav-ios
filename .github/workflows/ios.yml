@@ -143,7 +143,19 @@ jobs:
           zip -qry Kav.ipa Payload
           ls -l Kav.ipa
 
+      # Self-hosted: every IPA also lands on this Mac, so a full GitHub artifact quota never loses a build.
+      - name: Copy Kav.ipa to ~/Kav-builds
+        working-directory: ios/app
+        run: |
+          mkdir -p ~/Kav-builds
+          cp Kav.ipa ~/Kav-builds/Kav-${{ steps.ver.outputs.version }}-${{ github.run_number }}.ipa
+          cp Kav.ipa ~/Kav-builds/Kav-latest.ipa
+          # keep the 10 newest numbered builds
+          ls -t ~/Kav-builds/Kav-*-*.ipa | tail -n +11 | xargs rm -f
+          ls -l ~/Kav-builds
+
       - uses: actions/upload-artifact@v4
+        continue-on-error: true
         with:
           name: Kav-ipa
           path: ios/app/Kav.ipa
