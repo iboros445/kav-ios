@@ -14,7 +14,7 @@ on:
         default: false
 
 permissions:
-  contents: read
+  contents: write   # the SideStore source release (ios-nightly)
 
 concurrency:
   group: ios-${{ github.ref }}
@@ -153,6 +153,31 @@ jobs:
           # keep the 10 newest numbered builds
           ls -t ~/Kav-builds/Kav-*-*.ipa | tail -n +11 | xargs rm -f
           ls -l ~/Kav-builds
+
+      # SideStore source: every push build on iboros445/kav-ios replaces the IPA on the rolling `ios-nightly` release and
+      # rewrites source.json next to it, so SideStore picks up the update.
+      # Source URL: https://github.com/iboros445/kav-ios/releases/download/ios-nightly/source.json
+      - name: Publish to the SideStore source
+        if: github.repository == 'iboros445/kav-ios' && github.event_name == 'push' && startsWith(github.ref, 'refs/heads/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ios-nightly
+        run: |
+          ipa="Kav-${{ steps.ver.outputs.version }}-${{ github.run_number }}.ipa"
+          cp app/Kav.ipa "$RUNNER_TEMP/$ipa"
+          notes="Build ${{ github.run_number }}: $(git log -1 --format=%s)"
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --prerelease --target "$GITHUB_SHA" --title "Kav for iPhone (latest build)" \
+              --notes "Rolling development build. Add the source in SideStore: https://github.com/${{ github.repository }}/releases/download/$TAG/source.json"
+          fi
+          # IPA first, then the source that points at it, then drop older IPAs
+          gh release upload "$TAG" "$RUNNER_TEMP/$ipa" --clobber
+          python3 tools/make_source_json.py --ipa app/Kav.ipa \
+            --url "https://github.com/${{ github.repository }}/releases/download/$TAG/$ipa" \
+            --notes "$notes" > "$RUNNER_TEMP/source.json"
+          gh release upload "$TAG" "$RUNNER_TEMP/source.json" --clobber
+          gh release view "$TAG" --json assets --jq '.assets[].name' | grep -E '^Kav-.*\.ipa$' | grep -vxF "$ipa" \
+            | xargs -r -n1 gh release delete-asset "$TAG" -y
 
       - uses: actions/upload-artifact@v4
         continue-on-error: true
