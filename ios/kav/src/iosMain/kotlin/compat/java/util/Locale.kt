@@ -14,6 +14,7 @@ class Locale private constructor(private val tag: String, @Suppress("UNUSED_PARA
 
     companion object {
         val US = Locale("en-US", Unit)
+        val UK = Locale("en-GB", Unit)
         val ENGLISH = Locale("en", Unit)
         val ROOT = Locale("und", Unit)
         fun forLanguageTag(tag: String): Locale = Locale(tag, Unit)

@@ -38,7 +38,18 @@ class File(path: String) : Comparable<File> {
     val isAbsolute: Boolean get() = path.startsWith("/")
     val absolutePath: String get() = if (isAbsolute) path else join(fm.currentDirectoryPath, path)
     val absoluteFile: File get() = File(absolutePath)
-    val canonicalPath: String get() = absolutePath
+    // "." and ".." worked out by name. Links are left alone, so a folder and a file inside it always share a prefix
+    // (MapPack's TarGz checks an entry stays inside the folder it unpacks into this way).
+    val canonicalPath: String get() {
+        val parts = ArrayList<String>()
+        for (p in absolutePath.split('/')) when (p) {
+            "", "." -> {}
+            ".." -> if (parts.isNotEmpty()) parts.removeAt(parts.lastIndex)
+            else -> parts.add(p)
+        }
+        return "/" + parts.joinToString("/")
+    }
+    val canonicalFile: File get() = File(canonicalPath)
     val extension: String get() = name.substringAfterLast('.', "")
     val nameWithoutExtension: String get() = name.substringBeforeLast('.')
 
@@ -70,6 +81,12 @@ class File(path: String) : Comparable<File> {
         fm.contentsOfDirectoryAtPath(path, null)?.map { it as String }?.sorted()?.toTypedArray()
 
     fun listFiles(): Array<File>? = list()?.map { File(this, it) }?.toTypedArray()
+
+    // kotlin.io's walk: this file, then everything under it, a folder before what's in it.
+    fun walkTopDown(): Sequence<File> = sequence {
+        yield(this@File)
+        if (isDirectory) listFiles()?.forEach { yieldAll(it.walkTopDown()) }
+    }
 
     fun readBytes(): ByteArray = FileInputStream(this).use { it.readBytes() }
     fun readText(charset: Charset = Charset.UTF_8): String = readBytes().decodeToString()

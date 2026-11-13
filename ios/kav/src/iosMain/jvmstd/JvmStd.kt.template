@@ -16,6 +16,7 @@ import kotlin.math.pow
 import kotlin.time.Clock
 import kotlin.time.TimeSource
 import kotlin.time.ExperimentalTime
+import platform.Foundation.dateWithTimeIntervalSinceNow
 
 // ---- annotations that exist in kotlin.jvm on Android and elsewhere on Native ----
 typealias Volatile = kotlin.concurrent.Volatile
@@ -87,6 +88,37 @@ fun StringBuilder.append(chars: CharArray, offset: Int, len: Int): StringBuilder
 // ios/MIGRATION_PLAN.md if a race ever shows up: replace with a real lock here, once.
 inline fun <R> synchronized(@Suppress("UNUSED_PARAMETER") lock: Any, block: () -> R): R = block()
 
+// ---- java.lang.Object as a monitor: Net.Unpacking hands a gzip stream between two real threads with
+// synchronized(lock) + wait/notifyAll, so this one does lock (an NSCondition; not reentrant, upstream never nests). ----
+open class Object {
+    @PublishedApi internal val monitor = platform.Foundation.NSCondition()
+    fun wait() = monitor.wait()
+    fun wait(ms: Long) { monitor.waitUntilDate(platform.Foundation.NSDate.dateWithTimeIntervalSinceNow(ms / 1000.0)) }
+    fun notify() = monitor.signal()
+    fun notifyAll() = monitor.broadcast()
+}
+
+inline fun <R> synchronized(lock: Object, block: () -> R): R {
+    lock.monitor.lock()
+    try { return block() } finally { lock.monitor.unlock() }
+}
+
+// ---- java.lang.ThreadLocal: kept in the current NSThread's dictionary ----
+class ThreadLocal<T> {
+    private val key = "kav.threadLocal." + kotlin.random.Random.nextLong()
+    private class Box<T>(val value: T)
+    @Suppress("UNCHECKED_CAST")
+    fun get(): T? = (platform.Foundation.NSThread.currentThread.threadDictionary.objectForKey(key) as? Box<T>)?.value
+    fun set(value: T) { platform.Foundation.NSThread.currentThread.threadDictionary.setObject(Box(value), forKey = key as platform.Foundation.NSString) }
+    fun remove() { platform.Foundation.NSThread.currentThread.threadDictionary.removeObjectForKey(key) }
+}
+
+// ---- java.lang.Runtime: Net shares the week's sorting out between the cores ----
+object Runtime {
+    fun getRuntime(): Runtime = this
+    fun availableProcessors(): Int = platform.Foundation.NSProcessInfo.processInfo.activeProcessorCount.toInt()
+}
+
 // ---- java.lang.System / Math ----
 object System {
     @OptIn(ExperimentalTime::class)
@@ -122,6 +154,8 @@ object Math {
     fun sin(a: Double): Double = kotlin.math.sin(a)
     fun cos(a: Double): Double = kotlin.math.cos(a)
     fun tan(a: Double): Double = kotlin.math.tan(a)
+    fun asin(a: Double): Double = kotlin.math.asin(a)
+    fun acos(a: Double): Double = kotlin.math.acos(a)
     fun atan(a: Double): Double = kotlin.math.atan(a)
     fun atan2(y: Double, x: Double): Double = kotlin.math.atan2(y, x)
     fun sinh(a: Double): Double = kotlin.math.sinh(a)

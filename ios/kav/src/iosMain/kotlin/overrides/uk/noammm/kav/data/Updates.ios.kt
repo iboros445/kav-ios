@@ -1,4 +1,4 @@
-// iOS override of android/app/src/main/java/uk/noammm/kav/data/Updates.kt @ ede72bd. Keep public API identical.
+// iOS override of android/app/src/main/java/uk/noammm/kav/data/Updates.kt @ 449cd8a. Keep public API identical.
 //
 // Android downloads an APK from the upstream releases and hands it to the system installer. On iOS an app cannot
 // install itself: updates arrive through the SideStore source (see ios/INSTALL.md). Until Phase 5 wires that up,
@@ -37,7 +37,7 @@ object Updates {
         (NSBundle.mainBundle.objectForInfoDictionaryKey("CFBundleShortVersionString") as? String) ?: "0"
 
     fun latest(): Release {
-        val c = (URL("https://api.github.com/repos/$IOS_OWNER/$IOS_REPO/releases/latest").openConnection() as HttpURLConnection).apply {
+        val c = (RiderProxy.open(URL("https://api.github.com/repos/$IOS_OWNER/$IOS_REPO/releases/latest")) as HttpURLConnection).apply {
             connectTimeout = 10_000; readTimeout = 15_000
             setRequestProperty("Accept", "application/vnd.github+json")
             setRequestProperty("X-GitHub-Api-Version", "2022-11-28")
@@ -109,7 +109,7 @@ object Updates {
         }
         dir(ctx).listFiles()?.forEach { if (it != file) it.delete() }
         val part = File(file.path + ".part")
-        val c = URL(url).openConnection() as HttpURLConnection
+        val c = RiderProxy.open(URL(url)) as HttpURLConnection
         c.connectTimeout = 15_000; c.readTimeout = 30_000
         c.setRequestProperty("User-Agent", "Kav")
         if (c.responseCode != 200) throw RuntimeException(T("Download HTTP ${c.responseCode}", "הורדה נכשלה, שגיאת HTTP ${c.responseCode}"))

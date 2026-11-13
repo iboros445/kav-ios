@@ -5,3 +5,6 @@ package uk.noammm.kav.ui
 fun metres(la1: Double, lo1: Double, la2: Double, lo2: Double): Double = 0.0
 
 internal const val COFFEE_URL = "https://www.buymeacoffee.com/Noamm"
+
+// ui/Theme.kt, for MapFile and MapTileProvider.
+enum class Look { DARK, OLED, LIGHT }

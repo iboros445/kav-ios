@@ -12,7 +12,16 @@ import kav.compat.native.toByteArray
 import kav.compat.native.toNSData
 import platform.Foundation.NSCondition
 import platform.Foundation.NSError
+import platform.Foundation.NSHTTPCookieAcceptPolicy
+import platform.Foundation.NSHTTPCookieStorage
 import platform.Foundation.NSHTTPURLResponse
+import platform.Foundation.NSURLAuthenticationChallenge
+import platform.Foundation.NSURLCredential
+import platform.Foundation.NSURLCredentialPersistence
+import platform.Foundation.NSURLSessionAuthChallengeDisposition
+import platform.Foundation.NSURLSessionAuthChallengePerformDefaultHandling
+import platform.Foundation.NSURLSessionAuthChallengeUseCredential
+import platform.Foundation.credentialWithUser
 import platform.Foundation.NSMutableURLRequest
 import platform.Foundation.NSOperationQueue
 import platform.Foundation.NSURL
@@ -55,6 +64,15 @@ open class HttpURLConnection(url: URL) : URLConnection(url) {
     var requestMethod: String = "GET"
     var instanceFollowRedirects: Boolean = true
 
+    // Set by URL.openConnection(proxy). The login is Android's java.net.Authenticator's job; here the opener
+    // (RiderProxy.open) hands it over directly.
+    var proxy: Proxy? = null
+    var proxyLogin: Pair<String, String>? = null
+
+    // Not java.net: the system's cookie store (kept across launches) instead of none, for GoogleSession, whose requests
+    // have to carry Google's own cookies.
+    var keepCookies: Boolean = false
+
     private val requestHeaders = LinkedHashMap<String, String>()
     private val body = ByteArrayOutputStream()
     private var exchange: Exchange? = null
@@ -84,7 +102,7 @@ open class HttpURLConnection(url: URL) : URLConnection(url) {
         val ex = Exchange(
             url.toExternalForm(), method, requestHeaders.toMap(),
             if (doOutput || body.size() > 0) body.toByteArray() else null,
-            readTimeout, instanceFollowRedirects,
+            readTimeout, instanceFollowRedirects, proxy, proxyLogin, keepCookies,
         )
         exchange = ex
         ex.start()
@@ -120,6 +138,7 @@ open class HttpURLConnection(url: URL) : URLConnection(url) {
     private class Exchange(
         val url: String, val method: String, val requestHeaders: Map<String, String>, val body: ByteArray?,
         val readTimeoutMs: Int, val followRedirects: Boolean,
+        val proxy: Proxy?, val proxyLogin: Pair<String, String>?, val keepCookies: Boolean,
     ) {
         private val lock = NSCondition()
         private var response: Response? = null
@@ -141,7 +160,12 @@ open class HttpURLConnection(url: URL) : URLConnection(url) {
             for ((k, v) in requestHeaders) req.setValue(v, forHTTPHeaderField = k)
             if (body != null) req.HTTPBody = body.toNSData()
             val config = NSURLSessionConfiguration.ephemeralSessionConfiguration
-            config.HTTPShouldSetCookies = false
+            if (keepCookies) {
+                config.HTTPCookieStorage = NSHTTPCookieStorage.sharedHTTPCookieStorage
+                config.HTTPCookieAcceptPolicy = NSHTTPCookieAcceptPolicy.NSHTTPCookieAcceptPolicyAlways
+                config.HTTPShouldSetCookies = true
+            } else config.HTTPShouldSetCookies = false
+            proxyDictionary()?.let { config.connectionProxyDictionary = it }
             val queue = NSOperationQueue().apply { maxConcurrentOperationCount = 1 }
             val d = Delegate(this)
             delegate = d
@@ -149,6 +173,34 @@ open class HttpURLConnection(url: URL) : URLConnection(url) {
             session = s
             task = s.dataTaskWithRequest(req).also { it.resume() }
             s.finishTasksAndInvalidate()
+        }
+
+        // CFNetwork's proxy keys (kCFNetworkProxies*, kCFStreamPropertySOCKS*): an HTTP proxy carries http and https
+        // (CONNECT), a SOCKS one everything.
+        private fun proxyDictionary(): Map<Any?, Any?>? {
+            val p = proxy ?: return null
+            val at = p.address() as? InetSocketAddress ?: return null
+            return when (p.type()) {
+                Proxy.Type.HTTP -> mapOf(
+                    "HTTPEnable" to 1, "HTTPProxy" to at.hostString, "HTTPPort" to at.port,
+                    "HTTPSEnable" to 1, "HTTPSProxy" to at.hostString, "HTTPSPort" to at.port,
+                )
+                Proxy.Type.SOCKS -> buildMap {
+                    put("SOCKSEnable", 1); put("SOCKSProxy", at.hostString); put("SOCKSPort", at.port)
+                    proxyLogin?.let { (user, password) ->
+                        put("SOCKSUser", user); put("SOCKSPassword", password)
+                        put("kCFStreamPropertySOCKSUser", user); put("kCFStreamPropertySOCKSPassword", password)
+                    }
+                }
+                Proxy.Type.DIRECT -> null
+            }
+        }
+
+        // An HTTP proxy's 407, answered with the rider's login once; a second ask means it was turned away.
+        fun proxyCredential(challenge: NSURLAuthenticationChallenge): NSURLCredential? {
+            val (user, password) = proxyLogin ?: return null
+            if (!challenge.protectionSpace.isProxy() || challenge.previousFailureCount > 0) return null
+            return NSURLCredential.credentialWithUser(user, password, NSURLCredentialPersistence.NSURLCredentialPersistenceForSession)
         }
 
         fun cancel() {
@@ -262,6 +314,15 @@ open class HttpURLConnection(url: URL) : URLConnection(url) {
             newRequest: NSURLRequest, completionHandler: (NSURLRequest?) -> Unit,
         ) {
             completionHandler(if (ex.followRedirects) newRequest else null)
+        }
+
+        override fun URLSession(
+            session: NSURLSession, task: NSURLSessionTask, didReceiveChallenge: NSURLAuthenticationChallenge,
+            completionHandler: (NSURLSessionAuthChallengeDisposition, NSURLCredential?) -> Unit,
+        ) {
+            val login = ex.proxyCredential(didReceiveChallenge)
+            if (login != null) completionHandler(NSURLSessionAuthChallengeUseCredential, login)
+            else completionHandler(NSURLSessionAuthChallengePerformDefaultHandling, null)
         }
     }
 }

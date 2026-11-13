@@ -24,6 +24,8 @@ object Log {
     fun e(tag: String, msg: String): Int = write("E", tag, msg, null)
     fun e(tag: String, msg: String, tr: Throwable?): Int = write("E", tag, msg, tr)
     fun getStackTraceString(tr: Throwable?): String = tr?.stackTraceToString() ?: ""
+    // Android turns a tag's debug logs on with `setprop log.tag.<TAG> DEBUG`; an iPhone has no such switch.
+    fun isLoggable(tag: String, level: Int): Boolean = level >= INFO
 
     private fun write(level: String, tag: String, msg: String, tr: Throwable?): Int {
         val line = "$level/$tag: $msg" + (tr?.let { "\n" + it.stackTraceToString() } ?: "")

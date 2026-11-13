@@ -62,6 +62,8 @@ kotlin {
             "kotlin.concurrent.atomics.ExperimentalAtomicApi",
             "kotlin.native.concurrent.ObsoleteWorkersApi",
         )
+        // compat/kotlin/concurrent/Thread.kt adds kotlin.concurrent.thread, which upstream calls by its full name.
+        freeCompilerArgs.add("-Xallow-kotlin-package")
         // Upstream code is compiled as-is; its warnings are not ours to fix.
         suppressWarnings.set(false)
     }

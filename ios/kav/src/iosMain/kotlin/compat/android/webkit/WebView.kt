@@ -67,6 +67,9 @@ open class WebViewClient {
     open fun onPageFinished(view: WebView, url: String?) {}
     open fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {}
     open fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? = null
+    // Only a proxy's login reaches this on Android (RiderProxy.answer). Pages on iOS don't go through the rider's proxy
+    // (RiderProxy.pagesFollow is false), so WKWebView never asks.
+    open fun onReceivedHttpAuthRequest(view: WebView, handler: HttpAuthHandler, host: String?, realm: String?) { handler.cancel() }
 }
 
 open class WebChromeClient {

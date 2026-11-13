@@ -139,6 +139,9 @@ class URL(spec: String) {
         else -> throw IOException("Unsupported protocol: $protocol")
     }
 
+    fun openConnection(proxy: Proxy): URLConnection =
+        openConnection().also { if (it is HttpURLConnection && proxy.type() != Proxy.Type.DIRECT) it.proxy = proxy }
+
     fun openStream(): java.io.InputStream = openConnection().inputStream
 }
 

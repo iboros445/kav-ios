@@ -1,5 +1,5 @@
 //@cmp
-// iOS override of android/app/src/main/java/uk/noammm/kav/LineAlerts.kt @ ede72bd. Keep public API identical.
+// iOS override of android/app/src/main/java/uk/noammm/kav/LineAlerts.kt @ 449cd8a. Keep public API identical.
 //
 // Android keeps a line alert's notification up to date every minute from an alarm that wakes the app. An iPhone app
 // can't be woken on a schedule without push or a background-task entitlement, so line alerts don't run on iOS yet.

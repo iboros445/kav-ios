@@ -1,5 +1,5 @@
 //@cmp
-// iOS override of android/app/src/main/java/uk/noammm/kav/ui/Liquid.kt @ ede72bd. Keep public API identical.
+// iOS override of android/app/src/main/java/uk/noammm/kav/ui/Liquid.kt @ 449cd8a. Keep public API identical.
 //
 // Android draws the glass with AGSL (RuntimeShader + RenderEffect). Compose on iOS renders with Skia, whose SkSL is
 // the same language, so the shader text is unchanged and only the host calls differ. If the shader fails to compile
@@ -14,10 +14,11 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.asComposeRenderEffect
+import androidx.compose.ui.graphics.drawscope.scale
 import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.graphics.layer.GraphicsLayer
 import androidx.compose.ui.graphics.layer.drawLayer
@@ -67,44 +68,59 @@ private fun saturation(s: Float) = SkColorMatrix(
     0f, 0f, 0f, 1f, 0f,
 )
 
+// Android draws a view that redraws every frame (the map) into a clipped RenderNode, so its changes don't make every
+// glass pane on the page redraw. Compose on iOS tracks what changed by layer already, so there's nothing to add.
+internal fun Modifier.ownDamage(): Modifier = this
+
+// glass: how much of it is glass, read as it's drawn; the rest is the cards' own solid shade, which the glass comes to
+// over the bare page. At none the glass isn't drawn at all, which spares the GPU while a pane moves over a moving map.
 @Composable
-internal fun Modifier.liquidPane(backdrop: LiquidBackdrop, radius: Dp): Modifier {
+internal fun Modifier.liquidPane(backdrop: LiquidBackdrop, radius: Dp, glass: (() -> Float)? = null): Modifier {
     val pane = rememberGraphicsLayer()
     val lens = remember { runCatching { RuntimeEffect.makeForShader(LIQUID_REFRACTION) }.getOrNull() }
     var at by remember { mutableStateOf(Offset.Zero) }
     return this
         .onPlaced { at = it.positionInRoot() }
         .clip(RoundedCornerShape(radius))
-        .drawBehind {
+        .drawWithCache {
             val r = radius.toPx().coerceAtMost(size.minDimension / 2)
             val dispersion = .25f
             val blur = 4.dp.toPx()
             val band = (size.minDimension * .3f).coerceIn(24.dp.toPx(), 48.dp.toPx())
             val reach = (size.minDimension * .65f).coerceIn(52.dp.toPx(), 110.dp.toPx())
-            // A shader only gets the pixels inside its clip, so the lens bends inward.
-            val pad = blur * 3 + reach
+            // A shader only gets the pixels inside its clip, so the lens bends inward: it never looks past the pane's edge,
+            // and only the blur needs a margin of what's around it.
+            val pad = blur * 3 + 2.dp.toPx()
+            // A card or a sheet is sampled at half size: under the blur it looks the same, and its effects cost a quarter
+            // as much, which is what keeps a map that redraws every frame smooth under it.
+            val s = if (size.minDimension >= 120.dp.toPx()) .5f else 1f
             if (lens != null) {
                 val shader = RuntimeShaderBuilder(lens).apply {
-                    uniform("size", size.width, size.height)
-                    uniform("offset", -pad, -pad)
-                    uniform("cornerRadii", r, r, r, r)
-                    uniform("refractionHeight", band)
-                    uniform("refractionAmount", -reach)
+                    uniform("size", size.width * s, size.height * s)
+                    uniform("offset", -pad * s, -pad * s)
+                    uniform("cornerRadii", r * s, r * s, r * s, r * s)
+                    uniform("refractionHeight", band * s)
+                    uniform("refractionAmount", -reach * s)
                     uniform("depthEffect", 1f)
                     uniform("chromaticAberration", dispersion)
                 }
                 val tone = ImageFilter.makeColorFilter(SkColorFilter.makeMatrix(saturation(if (K.light) 1.3f else 1.1f)), null, null)
-                val soft = ImageFilter.makeBlur(blur, blur, FilterTileMode.CLAMP, tone, null)
+                val soft = ImageFilter.makeBlur(blur * s, blur * s, FilterTileMode.CLAMP, tone, null)
                 pane.renderEffect = ImageFilter.makeCompose(ImageFilter.makeRuntimeShader(shader, "content", null), soft).asComposeRenderEffect()
             }
-            val away = at - backdrop.origin
-            val padded = IntSize((size.width + 2 * pad).roundToInt(), (size.height + 2 * pad).roundToInt())
-            pane.record(size = padded) {
-                drawRect(K.bg)
-                translate(pad - away.x, pad - away.y) { drawLayer(backdrop.layer) }
+            val padded = IntSize(((size.width + 2 * pad) * s).roundToInt(), ((size.height + 2 * pad) * s).roundToInt())
+            onDrawBehind {
+                val a = glass?.invoke()?.coerceIn(0f, 1f) ?: 1f
+                if (a <= 0f) { drawRect(K.surface); return@onDrawBehind }
+                val away = at - backdrop.origin
+                pane.record(size = padded) {
+                    drawRect(K.bg)
+                    scale(s, s, pivot = Offset.Zero) { translate(pad - away.x, pad - away.y) { drawLayer(backdrop.layer) } }
+                }
+                translate(-pad, -pad) { scale(1 / s, 1 / s, pivot = Offset.Zero) { drawLayer(pane) } }
+                drawRect(liquidTint)
+                if (a < 1f) drawRect(K.surface, alpha = 1f - a)
             }
-            translate(-pad, -pad) { drawLayer(pane) }
-            drawRect(liquidTint)
         }
 }
 

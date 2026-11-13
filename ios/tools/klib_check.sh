@@ -39,8 +39,10 @@ case "$SCOPE" in
   data) mkdir -p "$UP/uk/noammm/kav/data" "$UP/uk/noammm/kav/ui"
         cp "$SRC"/uk/noammm/kav/data/*.kt "$UP/uk/noammm/kav/data/"
         cp "$SRC"/uk/noammm/kav/ui/Strings.kt "$UP/uk/noammm/kav/ui/"
-        # these two use Prefs / ActiveJourney from MainActivity.kt (Compose), which only CI can compile
-        rm -f "$UP/uk/noammm/kav/data/Backup.kt" "$UP/uk/noammm/kav/data/JourneyFile.kt" ;;
+        # these use Prefs / ActiveJourney from MainActivity.kt and android.graphics.Bitmap (Compose/Skia), which only CI
+        # can compile
+        rm -f "$UP/uk/noammm/kav/data/Backup.kt" "$UP/uk/noammm/kav/data/JourneyFile.kt" "$UP/uk/noammm/kav/data/RecentRoutes.kt" \
+          "$UP/uk/noammm/kav/data/PlacePhotos.kt" ;;
   *) echo "KAV_SCOPE must be none or data"; exit 2 ;;
 esac
 # honour overrides.txt: drop upstream files an override replaces
@@ -60,7 +62,7 @@ TESTS=""; [ "${KAV_TESTS:-1}" = 1 ] && TESTS=$(find "$ROOT/ios/kav/src/iosTest/k
 FILES=$(find "$IOS/compat" "$IOS/overrides" "$IOS/platform" -name '*.kt' 2>/dev/null | xargs grep -L '^//@cmp' || true)
 echo ">> compiling for $TARGET (scope=$SCOPE): $(echo "$FILES" | wc -w) shim files, $(echo "$TESTS" | wc -w) test files, $(find "$UP" "$STAMP" -name '*.kt' | wc -l) upstream/stamped files"
 set +e
-OUT=$("$KN/bin/kotlinc-native" -target "$TARGET" -p library -nowarn \
+OUT=$("$KN/bin/kotlinc-native" -target "$TARGET" -p library -nowarn -Xallow-kotlin-package \
   -l "$CACHE/coroutines.klib" -l "$CACHE/atomicfu.klib" \
   -opt-in=kotlin.experimental.ExperimentalNativeApi -opt-in=kotlinx.cinterop.ExperimentalForeignApi \
   -opt-in=kotlin.time.ExperimentalTime -opt-in=kotlin.concurrent.atomics.ExperimentalAtomicApi \

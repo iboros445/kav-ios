@@ -1,5 +1,5 @@
 //@cmp
-// iOS override of android/app/src/main/java/uk/noammm/kav/Checks.kt @ ede72bd. Keep public API identical.
+// iOS override of android/app/src/main/java/uk/noammm/kav/Checks.kt @ 449cd8a. Keep public API identical.
 //
 // Android runs GitHub checks (Google's recipe, the timetable, updates) as a JobService about every six hours. iOS
 // gives an app no such schedule without a background-task entitlement a free Apple ID can't sign, so here the same

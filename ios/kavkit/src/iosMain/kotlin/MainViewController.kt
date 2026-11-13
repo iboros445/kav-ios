@@ -61,6 +61,8 @@ import uk.noammm.kav.ui.T
 fun MainViewController(): UIViewController {
     Log.i("Kav", "MainViewController: start")
     setUnhandledExceptionHook { e -> Log.e("Kav", "unhandled exception", e) }
+    // Android's Application.onCreate: before anything connects (the rider's proxy).
+    uk.noammm.kav.KavApp().onCreate()
     seedProviders()
     val activity = MainActivity()
     activity.onCreate(null)
