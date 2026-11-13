@@ -18,6 +18,18 @@ interface NativeMap {
     fun setLayerProperties(layerId: String, layoutJson: String, paintJson: String)
     fun addImage(name: String, png: NSData, scale: Double)
     fun setZoomLimits(min: Double, max: Double)
+    fun removeLayer(id: String)
+    fun removeSource(id: String)
+    fun removeImage(name: String)
+    /** Like addLayer, drawn under the layer [belowId] (on top when there is none). */
+    fun addLayerBelow(layerJson: String, belowId: String)
+    /** Told after each frame drawn, and whether it was drawn whole (every tile in). Null stops it. */
+    fun setFrameListener(listener: FrameRendered?)
+    /** The place at a point on the view, in pixels from its top left. */
+    fun screenToMap(x: Double, y: Double, out: MapPoint)
+    /** The part of the world the view shows. */
+    fun visibleBounds(out: MapBounds)
+    fun setMaximumFps(fps: Int)
     /** Zoom is MapLibre's; padding is in screen pixels (left, top, right, bottom). */
     fun moveCamera(lat: Double, lon: Double, zoom: Double, bearing: Double, pitch: Double, padLeft: Double, padTop: Double, padRight: Double, padBottom: Double)
     fun start()
@@ -29,6 +41,13 @@ interface NativeMapFactory { fun create(): NativeMap }
 
 /** A plain interface rather than a Kotlin lambda, so Swift sees a simple protocol with one method. */
 fun interface StyleLoaded { fun loaded() }
+fun interface FrameRendered { fun rendered(fully: Boolean) }
+
+/** Filled in by the native map (screenToMap). */
+class MapPoint { var lat: Double = 0.0; var lon: Double = 0.0 }
+
+/** Filled in by the native map (visibleBounds). */
+class MapBounds { var south: Double = 0.0; var west: Double = 0.0; var north: Double = 0.0; var east: Double = 0.0 }
 
 object MapBridge {
     /** Set from Swift: `MapBridge.shared.factory = MapLibreFactory()` */

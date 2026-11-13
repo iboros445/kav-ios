@@ -17,6 +17,7 @@ final class MapLibreFactory: NSObject, KavNativeMapFactory {
 final class MapLibreNativeMap: NSObject, KavNativeMap, MLNMapViewDelegate {
     private let mapView: MLNMapView
     private var pendingLoaded: KavStyleLoaded?
+    private var frameListener: KavFrameRendered?
 
     var view: UIView { mapView }
 
@@ -52,6 +53,8 @@ final class MapLibreNativeMap: NSObject, KavNativeMap, MLNMapViewDelegate {
     }
 
     func mapView(_ mapView: MLNMapView, didFinishLoading style: MLNStyle) {
+        // Kav eases nothing the map would: its fades are drawn step by step (TransitionOptions(0, 0) on Android).
+        style.transition = MLNTransition(duration: 0, delay: 0)
         let done = pendingLoaded
         pendingLoaded = nil
         done?.loaded()
@@ -75,6 +78,11 @@ final class MapLibreNativeMap: NSObject, KavNativeMap, MLNMapViewDelegate {
 
     func setSourceData(id: String, geoJson: String) {
         (mapView.style?.source(withIdentifier: id) as? MLNShapeSource)?.shape = shape(geoJson)
+    }
+
+    func removeSource(id: String) {
+        guard let style = mapView.style, let source = style.source(withIdentifier: id) else { return }
+        style.removeSource(source)
     }
 
     // MARK: layers
@@ -116,7 +124,16 @@ final class MapLibreNativeMap: NSObject, KavNativeMap, MLNMapViewDelegate {
         }
     }
 
-    func addLayer(layerJson: String) {
+    func addLayer(layerJson: String) { insert(layerJson, below: nil) }
+
+    func addLayerBelow(layerJson: String, belowId: String) { insert(layerJson, below: belowId) }
+
+    func removeLayer(id: String) {
+        guard let style = mapView.style, let layer = style.layer(withIdentifier: id) else { return }
+        style.removeLayer(layer)
+    }
+
+    private func insert(_ layerJson: String, below: String?) {
         guard let style = mapView.style,
               let data = layerJson.data(using: .utf8),
               let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
@@ -133,6 +150,7 @@ final class MapLibreNativeMap: NSObject, KavNativeMap, MLNMapViewDelegate {
         case "circle": layer = MLNCircleStyleLayer(identifier: id, source: source)
         case "symbol": layer = MLNSymbolStyleLayer(identifier: id, source: source)
         case "fill": layer = MLNFillStyleLayer(identifier: id, source: source)
+        case "fill-extrusion": layer = MLNFillExtrusionStyleLayer(identifier: id, source: source)
         default:
             NSLog("Kav map: unsupported layer type \(type)")
             return
@@ -140,7 +158,11 @@ final class MapLibreNativeMap: NSObject, KavNativeMap, MLNMapViewDelegate {
         if let filter = obj["filter"] { layer.predicate = NSPredicate(mglJSONObject: filter) }
         Self.apply(obj["layout"] as? [String: Any] ?? [:], to: layer)
         Self.apply(obj["paint"] as? [String: Any] ?? [:], to: layer)
-        style.addLayer(layer)
+        if let below, let under = style.layer(withIdentifier: below) {
+            style.insertLayer(layer, below: under)
+        } else {
+            style.addLayer(layer)
+        }
     }
 
     func setLayerProperties(layerId: String, layoutJson: String, paintJson: String) {
@@ -156,6 +178,10 @@ final class MapLibreNativeMap: NSObject, KavNativeMap, MLNMapViewDelegate {
     func addImage(name: String, png: Data, scale: Double) {
         guard let image = UIImage(data: png, scale: CGFloat(scale)) else { return }
         mapView.style?.setImage(image, forName: name)
+    }
+
+    func removeImage(name: String) {
+        mapView.style?.removeImage(forName: name)
     }
 
     // MARK: camera
@@ -181,11 +207,42 @@ final class MapLibreNativeMap: NSObject, KavNativeMap, MLNMapViewDelegate {
                           direction: bearing, animated: false)
     }
 
+    // Points come in pixels (Compose); MapLibre iOS works in points.
+    func screenToMap(x: Double, y: Double, out: KavMapPoint) {
+        let s = Double(UIScreen.main.scale)
+        let c = mapView.convert(CGPoint(x: x / s, y: y / s), toCoordinateFrom: mapView)
+        out.lat = c.latitude
+        out.lon = c.longitude
+    }
+
+    func visibleBounds(out: KavMapBounds) {
+        let b = mapView.visibleCoordinateBounds
+        out.south = b.sw.latitude
+        out.west = b.sw.longitude
+        out.north = b.ne.latitude
+        out.east = b.ne.longitude
+    }
+
+    // MARK: frames
+
+    func setFrameListener(listener: KavFrameRendered?) {
+        frameListener = listener
+    }
+
+    func mapViewDidFinishRenderingFrame(_ mapView: MLNMapView, fullyRendered: Bool) {
+        frameListener?.rendered(fully: fullyRendered)
+    }
+
+    func setMaximumFps(fps: Int32) {
+        mapView.preferredFramesPerSecond = MLNMapViewPreferredFramesPerSecond(rawValue: Int(fps))
+    }
+
     // MARK: lifecycle
 
     func start() {}
     func stop() {}
     func destroy() {
+        frameListener = nil
         mapView.delegate = nil
         mapView.removeFromSuperview()
     }

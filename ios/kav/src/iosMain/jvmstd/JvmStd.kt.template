@@ -106,6 +106,8 @@ fun String.uppercase(locale: Locale): String = uppercase()
 // ---- kotlin.io helpers that exist only on the JVM ----
 fun ByteArray.inputStream(): ByteArrayInputStream = ByteArrayInputStream(this)
 fun ByteArray.toString(charset: Charset): String = String(this, charset)
+// java.lang.String(char[]): an error on Native (deprecated), so the package's own beats it.
+fun String(chars: CharArray): String = chars.concatToString()
 fun StringBuilder.append(chars: CharArray, offset: Int, len: Int): StringBuilder = appendRange(chars, offset, offset + len)
 
 // ---- kotlin.synchronized: Compose state and the Kav singletons only need mutual exclusion

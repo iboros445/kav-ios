@@ -4,11 +4,18 @@ open class View {
     open val context: android.content.Context get() = android.content.KavApplicationContext
     // Compose hosts every view on iOS: none sits in an Android view tree.
     open val parent: ViewParent? get() = null
-    var alpha: Float = 1f
+    open var alpha: Float = 1f
     var translationY: Float = 0f
     var scaleX: Float = 1f
     var scaleY: Float = 1f
     fun animate(): ViewPropertyAnimator = ViewPropertyAnimator(this)
+
+    fun interface OnLayoutChangeListener {
+        fun onLayoutChange(v: View, left: Int, top: Int, right: Int, bottom: Int, oldLeft: Int, oldTop: Int, oldRight: Int, oldBottom: Int)
+    }
+    // Compose lays every view out on iOS and moves the map itself when it's resized, so none is told.
+    @Suppress("UNUSED_PARAMETER") fun addOnLayoutChangeListener(l: OnLayoutChangeListener) {}
+    @Suppress("UNUSED_PARAMETER") fun removeOnLayoutChangeListener(l: OnLayoutChangeListener) {}
 
     companion object {
         val ALPHA = Property<View>("alpha")

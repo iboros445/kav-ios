@@ -11,7 +11,10 @@ class Surface {
     }
 }
 
-class Display { val rotation: Int get() = Surface.ROTATION_0 }
+class Display {
+    val rotation: Int get() = Surface.ROTATION_0
+    val refreshRate: Float get() = platform.UIKit.UIScreen.mainScreen.maximumFramesPerSecond.toFloat()
+}
 
 class WindowManager {
     val defaultDisplay: Display get() = Display()

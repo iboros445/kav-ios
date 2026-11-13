@@ -17,20 +17,33 @@ class LineString private constructor(private val points: List<Point>) {
     companion object { fun fromLngLats(points: List<Point>): LineString = LineString(points) }
 }
 
-class Feature private constructor(private val geometry: Any) {
-    private val props = JSONObject()
+class Polygon private constructor(private val rings: List<List<Point>>) {
+    internal fun toJson(): JSONObject = JSONObject().put("type", "Polygon").put("coordinates", JSONArray().also { a ->
+        rings.forEach { ring -> a.put(JSONArray().also { r -> ring.forEach { r.put(it.coordinates()) } }) }
+    })
+
+    companion object { fun fromLngLats(rings: List<List<Point>>): Polygon = Polygon(rings) }
+}
+
+class Feature private constructor(private val geometry: Any, private val props: JSONObject = JSONObject()) {
+    fun properties(): JSONObject = props
 
     fun addStringProperty(key: String, value: String?) { props.put(key, value) }
     fun addNumberProperty(key: String, value: Number?) { props.put(key, value?.toDouble()) }
     fun addBooleanProperty(key: String, value: Boolean?) { props.put(key, value) }
 
     internal fun toJson(): JSONObject = JSONObject().put("type", "Feature")
-        .put("geometry", when (geometry) { is Point -> geometry.toJson(); is LineString -> geometry.toJson(); else -> JSONObject.NULL })
+        .put("geometry", when (geometry) {
+            is Point -> geometry.toJson(); is LineString -> geometry.toJson(); is Polygon -> geometry.toJson(); else -> JSONObject.NULL
+        })
         .put("properties", props)
 
     companion object {
         fun fromGeometry(point: Point): Feature = Feature(point)
         fun fromGeometry(line: LineString): Feature = Feature(line)
+        fun fromGeometry(polygon: Polygon): Feature = Feature(polygon)
+        // The same properties object, as Android's Feature shares its JsonObject.
+        fun fromGeometry(point: Point, properties: JSONObject?): Feature = Feature(point, properties ?: JSONObject())
     }
 }
 
