@@ -158,10 +158,15 @@ final class MapLibreNativeMap: NSObject, KavNativeMap, MLNMapViewDelegate {
               let data = layerJson.data(using: .utf8),
               let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
               let id = obj["id"] as? String, let type = obj["type"] as? String,
-              let sourceId = obj["source"] as? String,
-              let source = style.source(withIdentifier: sourceId),
-              style.layer(withIdentifier: id) == nil else {
-            Self.log("cannot add layer \(layerJson.prefix(120))")
+              let sourceId = obj["source"] as? String else {
+            Self.log("cannot read layer \(layerJson.prefix(120))")
+            return
+        }
+        // TileMap puts its layers in again for each style it's handed (a fresh Style on the Kotlin side); one this map
+        // already has is kept as it is.
+        if style.layer(withIdentifier: id) != nil { return }
+        guard let source = style.source(withIdentifier: sourceId) else {
+            Self.log("layer \(id) not added: no source \(sourceId)")
             return
         }
         let layer: MLNVectorStyleLayer
@@ -177,8 +182,12 @@ final class MapLibreNativeMap: NSObject, KavNativeMap, MLNMapViewDelegate {
         }
         // MapLibre raises an Objective-C exception for a filter or value it can't take, which would end the app: a
         // refused filter leaves the layer unfiltered, a refused property its default, and the map still opens.
-        if let filter = obj["filter"],
-           let failed = KavCatch({ layer.predicate = NSPredicate(mglJSONObject: filter) }) {
+        // A bare true or false is a filter in the style spec (Expression.literal(true) for the rider's layer), but
+        // MapLibre iOS only reads arrays.
+        if let filter = obj["filter"] as? Bool {
+            layer.predicate = NSPredicate(value: filter)
+        } else if let filter = obj["filter"],
+                  let failed = KavCatch({ layer.predicate = NSPredicate(mglJSONObject: filter) }) {
             Self.log("layer \(id): filter \(filter) refused: \(failed)")
         }
         Self.apply(obj["layout"] as? [String: Any] ?? [:], to: layer)
