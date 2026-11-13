@@ -335,7 +335,7 @@ internal fun Net.endsAt(stop: Int): List<Int> {
     val trains = HashMap<String, Int>()
     val first = HashMap<String, Int>()
     for (i in dStart[stop] until dStart[stop + 1]) {
-        val end = tripLast(tripOf(cST[dConn[i]]))
+        val end = tripLast(tripOf(dConn[i]))
         if (name[end] == name[stop]) continue
         trains[name[end]] = (trains[name[end]] ?: 0) + 1
         first.putIfAbsent(name[end], end)
@@ -346,6 +346,6 @@ internal fun Net.endsAt(stop: Int): List<Int> {
 // The numbered lines leaving a stop, in number order.
 internal fun Net.linesAt(stop: Int): List<String> {
     val out = HashSet<String>()
-    for (i in dStart[stop] until dStart[stop + 1]) rShort[tripRoute[tripOf(cST[dConn[i]])]].takeIf { it.isNotBlank() }?.let(out::add)
+    for (i in dStart[stop] until dStart[stop + 1]) rShort[tripRoute[tripOf(dConn[i])]].takeIf { it.isNotBlank() }?.let(out::add)
     return out.sortedWith(compareBy({ it.takeWhile(Char::isDigit).toIntOrNull() ?: Int.MAX_VALUE }, { it }))
 }

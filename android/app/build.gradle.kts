@@ -20,8 +20,8 @@ android {
         applicationId = "uk.noammm.kav"
         minSdk = 26
         targetSdk = 35
-        versionCode = 35
-        versionName = "3.3.1"
+        versionCode = 40
+        versionName = "4.3"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         // MapLibre's renderer is native code. Every phone Kav can reach is arm64;
         // x86_64 stays so the release APK still installs on the emulator.
@@ -60,12 +60,17 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
-    implementation(platform("androidx.compose:compose-bom:2024.10.01"))
+    implementation(platform("androidx.compose:compose-bom:2026.06.01"))
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-graphics")
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.material:material-icons-extended")
-    implementation("org.maplibre.gl:android-sdk:12.3.1")
+    implementation("org.maplibre.gl:android-sdk-vulkan-opengl:13.7.1")
+    // The same OkHttp MapLibre ships with, for its client (GovMapTiles).
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    // Puts the app's and Compose's baseline profiles in place for Android to compile ahead of time. Compose brings 1.3.1,
+    // which gives up on Android 15 and newer ("unsupported ART version"), so those phones never got either profile.
+    implementation("androidx.profileinstaller:profileinstaller:1.4.1")
     // A script in Google's Street View frame, so one finger turns it (StreetView.kt).
     implementation("androidx.webkit:webkit:1.18.0")
     // Reading a bus QR code with the camera, and drawing a ticket's QR for the inspector.

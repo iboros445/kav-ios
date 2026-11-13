@@ -49,9 +49,20 @@
     <!-- Gett, to open a taxi ride in it when it's installed (Gett.kt), else its Play Store page. -->
     <queries>
         <package android:name="com.gettaxi.android" />
+        <!-- The apps a trip can be sent to straight from the Share sheet. -->
+        <intent>
+            <action android:name="android.intent.action.SEND" />
+            <data android:mimeType="text/plain" />
+        </intent>
+        <!-- The phone's text-to-speech engines, for alerts said out loud (Speaker.kt): unlisted here, an engine the
+             rider installed is hidden from Kav and nothing is said (GrapheneOS, which ships none of its own). -->
+        <intent>
+            <action android:name="android.intent.action.TTS_SERVICE" />
+        </intent>
     </queries>
 
     <application
+        android:name=".KavApp"
         android:label="@string/app_name"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher"
@@ -70,11 +81,21 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-            <!-- The seven-character trip code opens the saved route. App Links verifies Kav's release certificate. -->
+            <!-- A trip link on someone's own Kav server (server/selfhost): its page opens Kav with kav://trip?host=...&id=...,
+                 since only Kav's own domain is verified for its https links. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="kav" android:host="trip" />
+            </intent-filter>
+            <!-- The seven-character trip code opens the saved route, on share.kavapp.link and, for links made before it,
+                 kav.noammm.uk. App Links verifies Kav's release certificate on both. -->
             <intent-filter android:autoVerify="true">
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="https" android:host="share.kavapp.link" />
                 <data android:scheme="https" android:host="kav.noammm.uk" />
                 <data android:pathPattern="/......." />
                 <data android:pathPrefix="/l/" />
@@ -84,23 +105,6 @@
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
-                <data android:scheme="https" android:host="moovitapp.com" android:pathPrefix="/i/" />
-                <data android:scheme="https" android:host="www.moovitapp.com" android:pathPrefix="/i/" />
-                <data android:scheme="https" android:host="moovitapp.com" android:pathPrefix="/tripplan/i/" />
-                <data android:scheme="https" android:host="www.moovitapp.com" android:pathPrefix="/tripplan/i/" />
-            </intent-filter>
-            <intent-filter>
-                <action android:name="android.intent.action.VIEW" />
-                <category android:name="android.intent.category.DEFAULT" />
-                <category android:name="android.intent.category.BROWSABLE" />
-                <data android:scheme="https" android:host="moovitapp.com" android:path="/directions" />
-                <data android:scheme="https" android:host="www.moovitapp.com" android:path="/directions" />
-            </intent-filter>
-            <intent-filter>
-                <action android:name="android.intent.action.VIEW" />
-                <category android:name="android.intent.category.DEFAULT" />
-                <category android:name="android.intent.category.BROWSABLE" />
-                <data android:scheme="https" android:host="moovit.onelink.me" />
                 <data android:scheme="https" android:host="busnear.by" />
             </intent-filter>
             <intent-filter>
@@ -110,13 +114,6 @@
                 <data android:scheme="https" android:host="busnearby.co.il" android:pathPrefix="/itinerary/" />
                 <data android:scheme="https" android:host="*.busnearby.co.il" android:pathPrefix="/itinerary/" />
                 <data android:scheme="https" android:host="egg.hopon.co" android:pathPrefix="/itinerary/" />
-            </intent-filter>
-            <intent-filter>
-                <action android:name="android.intent.action.VIEW" />
-                <category android:name="android.intent.category.DEFAULT" />
-                <category android:name="android.intent.category.BROWSABLE" />
-                <data android:scheme="moovit" android:host="i" />
-                <data android:scheme="moovit" android:host="directions" />
             </intent-filter>
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />

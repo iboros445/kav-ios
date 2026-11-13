@@ -31,6 +31,7 @@ import androidx.compose.runtime.staticCompositionLocalOf
 val LocalLiquidBackdrop = staticCompositionLocalOf<LiquidBackdrop?> { null }
 
 // AGSL needs Android 13.
+@get:androidx.annotation.ChecksSdkIntAtLeast(api = 33)
 val liquidGlassReady get() = Build.VERSION.SDK_INT >= 33
 
 @Composable
@@ -42,11 +43,12 @@ fun Modifier.glassBackdrop(liquid: LiquidBackdrop?): Modifier =
 
 // The floating layer: the tab bar, buttons over a map or a list, a field that stays on top. The cards' own shade and
 // hairline, so it sits with them; glass where it's chosen, that same shade over the bare page.
+// glass: how much of it is glass right now, read as it's drawn (liquidPane); none is the cards' solid shade.
 @Composable
-fun Modifier.glassSurface(radius: Dp = 22.dp): Modifier {
+fun Modifier.glassSurface(radius: Dp = 22.dp, glass: (() -> Float)? = null): Modifier {
     val liquid = LocalLiquidBackdrop.current
-    if (!K.liquid || liquid == null) return panel(radius)
-    return liquidPane(liquid, radius).border(0.5.dp, K.separator, RoundedCornerShape(radius))
+    if (!liquidGlassReady || !K.liquid || liquid == null) return panel(radius)
+    return liquidPane(liquid, radius, glass).border(0.5.dp, K.separator, RoundedCornerShape(radius))
 }
 
 // A card on the page: its own shade and a hairline. solid: one that floats over others, a sheet or a menu.

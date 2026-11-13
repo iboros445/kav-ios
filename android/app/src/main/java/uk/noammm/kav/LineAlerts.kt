@@ -154,7 +154,7 @@ object LineAlerts {
             .setCategory(NotificationCompat.CATEGORY_REMINDER)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .build()
-        runCatching { nm.notify(TAG, notificationId(a), n) }
+        try { nm.notify(TAG, notificationId(a), n) } catch (_: SecurityException) {}
     }
 
     private fun schedule(ctx: Context, at: Long?) {

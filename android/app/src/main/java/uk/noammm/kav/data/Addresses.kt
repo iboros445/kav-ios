@@ -4,22 +4,22 @@ import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
 
-// A search holding a house number asks Google's map search for the house, and GovMap, the Survey of Israel's map,
-// when Google only knows the street: measured on 200 bank branches, Google has the house for about 9 in 10 and
+// A search holding a house number asks the search picked (Search) for the house, and GovMap, the Survey of Israel's map,
+// when it only knows the street. With Google's: measured on 200 bank branches, Google has the house for about 9 in 10 and
 // GovMap for 4 in 5, and each finds some the other misses. GovMap gets only the typed text, never a location.
 object Addresses {
     private const val SEARCH = "https://www.govmap.gov.il/api/search-service/autocomplete"
 
-    fun find(query: String, at: Pair<Double, Double>?): List<Transit.Place> {
+    fun find(query: String, at: Pair<Double, Double>?, search: PlaceSearch = Search.provider): List<Transit.Place> {
         val typed = TypedAddress.parse(query) ?: return emptyList()
-        runCatching { GoogleMaps.geocode(query, at) }.getOrNull()?.let { return listOf(it) }
+        runCatching { search.house(query, at) }.getOrNull()?.let { return listOf(it) }
         val body = JSONObject()
             .put("searchText", query.trim())
             .put("language", if (query.any { it in 'א'..'ת' }) "he" else "en")
             .put("isAccurate", false)
             .put("maxResults", 10)
             .toString().toByteArray()
-        val c = (URL(SEARCH).openConnection() as HttpURLConnection).apply {
+        val c = (RiderProxy.open(URL(SEARCH)) as HttpURLConnection).apply {
             requestMethod = "POST"; doOutput = true
             connectTimeout = 4000; readTimeout = 4000
             setRequestProperty("Content-Type", "application/json")

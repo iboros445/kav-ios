@@ -1,14 +1,14 @@
 {
-  "id": "3.2-sources",
+  "id": "4.3-kav-own-sources",
   "en": {
     "title": "A note about this update",
-    "text": "you can now choose new providers for trip planning, live locations and the timetable separately in settings.\n\nthe timetable downloads during setup and stays up to date in the background. the last copy stays on your phone for use without signal.",
+    "text": "at moovit's request, kav no longer uses moovit as a source. if you had picked moovit for trips, the timetable or alerts, kav switched you to its own. kav's planner uses the ministry of transport's live data with arrival times learned from the buses that really passed each stop, and it has improved a lot over the past few weeks. your trips, favourites and settings are all still here. kav is nowhere near stopping: it is moving faster than ever, and it is coming for the top spot.",
     "helpTitle": "kav needs your help",
     "help": "kav has no ads and never will. keeping its server and the app running takes time and money, so if kav helps you, buying me a coffee keeps it running."
   },
   "he": {
     "title": "הודעה על העדכון הזה",
-    "text": "אפשר עכשיו לבחור ספקים חדשים בנפרד לתכנון מסלולים, למיקומים בזמן אמת וללוח הזמנים בהגדרות.\n\nלוח הזמנים יורד בזמן ההגדרה ומתעדכן ברקע. העותק האחרון נשאר בטלפון לשימוש גם בלי קליטה.",
+    "text": "לבקשת Moovit, Kav כבר לא משתמשת ב-Moovit כמקור. אם בחרתם ב-Moovit למסלולים, ללוח הזמנים או להתראות, Kav העבירה אתכם למקור שלה. המתכנן של Kav משתמש בנתוני זמן האמת של משרד התחבורה, עם זמני הגעה שנלמדו מהאוטובוסים שבאמת עברו בכל תחנה, והוא השתפר מאוד בשבועות האחרונים. הנסיעות, המועדפים וההגדרות שלכם נשארו. Kav לא מתקרבת לעצירה: היא מתקדמת מהר מתמיד, והיא באה לקחת את המקום הראשון.",
     "helpTitle": "Kav צריכה את העזרה שלכם",
     "help": "ב-Kav אין פרסומות ולא יהיו. התחזוקה של השרת והיישומון דורשת זמן וכסף, אז אם Kav עוזרת לכם, קפה עוזר לה להמשיך לעבוד."
   }

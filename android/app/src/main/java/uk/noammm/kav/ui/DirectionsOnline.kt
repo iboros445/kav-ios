@@ -6,6 +6,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material3.Text
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.runtime.*
 import androidx.lifecycle.repeatOnLifecycle
 import androidx.compose.animation.core.VisibilityThreshold
@@ -41,10 +42,9 @@ private data class OpenTrip(
     val toLabel: String,
     val resume: Boolean = false,
     val backHome: Boolean = false,
+    // The stops on the way it was planned through, kept with the trip so it's planned through them again.
+    val stopovers: List<Transit.Place> = emptyList(),
 )
-
-// A recent trip shown on the routes its search found, while the plan inputs are still the ones they answer.
-private class SavedTrip(val trip: RecentTrip, val key: List<Any?>)
 
 private enum class Sort(val labelText: () -> String) {
     RECOMMENDED({ T("Recommended", "מומלץ") }),
@@ -60,13 +60,19 @@ private enum class Sort(val labelText: () -> String) {
 private const val TOO_CLOSE_M = 120.0
 private const val TOO_CLOSE = "too-close"
 
-private val HERE = listOf("Current location", "המיקום הנוכחי")
+internal val HERE = listOf("Current location", "המיקום הנוכחי")
 
 private fun hereName() = T(HERE[0], HERE[1])
 
 private fun herePlace(at: Pair<Double, Double>) = Place(hereName(), "", at.first, at.second)
 
 private fun isHere(p: Place?) = p != null && p.name in HERE
+
+// How long after its first bus left a latest route is planned again when opened, rather than shown as it was.
+private const val LEFT_S = 120L
+
+private fun departed(trip: Transit.Itinerary): Boolean =
+    trip.rides.firstOrNull()?.let { it.dep + LEFT_S < System.currentTimeMillis() / 1000 } == true
 
 private fun endpointName(p: Place?) = if (isHere(p)) hereName() else p?.name
 
@@ -117,8 +123,10 @@ fun DirectionsOnline(model: KavModel) {
     var timeType by remember { mutableIntStateOf(Transit.TIME_DEPARTURE) }
     var whenOpen by remember { mutableStateOf(false) }
     var orderOpen by remember { mutableStateOf(false) }
-    var saved by remember { mutableStateOf<SavedTrip?>(null) }
     var linkTrip by remember { mutableStateOf<List<TripLink.Ride>?>(null) }
+    // The latest route's rides, when it's opened after its first bus left: planned again for now on the planner chosen,
+    // it opens on the soonest departure of the same lines, else on the list of routes.
+    var againTrip by remember { mutableStateOf<List<TripLink.Ride>?>(null) }
     var openingLink by remember { mutableStateOf(false) }
     var linkError by remember { mutableStateOf<String?>(null) }
     var lastLink by remember { mutableStateOf<TripLink.Plan?>(null) }
@@ -132,7 +140,7 @@ fun DirectionsOnline(model: KavModel) {
 
     LaunchedEffect(model.returnHome) {
         if (model.returnHome) {
-            open = null; picking = null; showResults = false; saved = null; linkTrip = null
+            open = null; picking = null; showResults = false; linkTrip = null
             model.pendingLink = null; linkError = null
             model.returnHome = false
         }
@@ -146,15 +154,19 @@ fun DirectionsOnline(model: KavModel) {
     }
     LaunchedEffect(model.pendingFrom, model.pendingTo) {
         if (model.pendingFrom != null || model.pendingTo != null) {
-            hereOrigin = null; stopovers = emptyList(); saved = null; showResults = true
+            hereOrigin = null; stopovers = emptyList(); showResults = true
             backToBoard = model.stationStop >= 0
         }
         model.pendingFrom?.let { fromPlace = it; model.pendingFrom = null }
         model.pendingTo?.let { toPlace = it; model.pendingTo = null }
     }
 
-    LaunchedEffect(model.pendingLink) {
-        val incoming = model.pendingLink ?: return@LaunchedEffect
+    // The link this run was started for, not the one pending when it gets to run: opened with Kav closed, this screen is
+    // first made before the link is handed over, and a run started then would take the link up, be cancelled as the
+    // link's own run starts, and on its way out clear the link from under that run, leaving an empty planner.
+    val pendingLink = model.pendingLink
+    LaunchedEffect(pendingLink) {
+        val incoming = pendingLink ?: return@LaunchedEffect
         // A place shared while one is being picked (a favourite's, say) goes into that search instead of starting a trip.
         if (picking != null && incoming.rides.isEmpty() && incoming.fromLat == null) {
             val point = if (incoming.toLat != null && incoming.toLon != null)
@@ -167,7 +179,7 @@ fun DirectionsOnline(model: KavModel) {
         }
         lastLink = incoming; openingLink = true; linkError = null
         hereOrigin = null; stopovers = emptyList()
-        open = null; saved = null; picking = null; linkTrip = null
+        open = null; picking = null; linkTrip = null
         fromPlace = null; toPlace = null; showResults = true
         try {
             // A trip shared from another app by its id: that app's servers have its ends.
@@ -189,7 +201,7 @@ fun DirectionsOnline(model: KavModel) {
             } else {
                 // A geo: link may name a place without a point: Google's place search finds it.
                 val found = if (link.toLat == null && link.toName != null) withContext(Dispatchers.IO) {
-                    GoogleMaps.suggest(link.toName, model.here).places.firstOrNull()
+                    uk.noammm.kav.data.Search.provider.suggest(link.toName, model.here).places.firstOrNull()
                 } else null
                 val toLat = found?.lat ?: link.toLat ?: throw IllegalArgumentException("Missing destination coordinates")
                 val toLon = found?.lon ?: link.toLon ?: throw IllegalArgumentException("Missing destination coordinates")
@@ -241,7 +253,7 @@ fun DirectionsOnline(model: KavModel) {
     // The inputs the results on screen were planned for: anything else is still being planned, never "no routes".
     val planKey = listOf(fromLL, toLL, departAt, timeType, filters, stopovers, planner)
     var plannedFor by remember { mutableStateOf<List<Any?>?>(null) }
-    LaunchedEffect(showResults, fromLL, toLL, departAt, timeType, filters, stopovers, openingLink, saved, planAgain, planner) {
+    LaunchedEffect(showResults, fromLL, toLL, departAt, timeType, filters, stopovers, openingLink, planAgain, planner) {
         if (!showResults || openingLink) { planning = false; return@LaunchedEffect }
         if (departAt != 0L && departAt < System.currentTimeMillis() && timeType != Transit.TIME_LAST) {
             departAt = 0L; timeType = Transit.TIME_DEPARTURE
@@ -249,18 +261,6 @@ fun DirectionsOnline(model: KavModel) {
         }
         raw = emptyList(); resolved = Transit.Resolved(); error = null
         launch { leaving.snapTo(0f); leaving.animateTo(1f, androidx.compose.animation.core.tween(150)) }
-        // A recent trip opens on the routes its search found, until anything about
-        // the trip changes.
-        saved?.let { keep ->
-            if (keep.key != planKey) { saved = null; return@LaunchedEffect }
-            val found = withContext(Dispatchers.IO) { Prefs.savedRoutes(ctx, keep.trip) }
-            // A trip saved before its routes were kept plans afresh.
-            if (found == null) { saved = null; return@LaunchedEffect }
-            plan = Transit.Plan(found.routes, found.sections)
-            raw = found.routes; resolved = found.resolved
-            planning = false; plannedFor = planKey
-            return@LaunchedEffect
-        }
         if (fromLL == null || toLL == null) { planning = false; return@LaunchedEffect }
         if (metres(fromLL.first, fromLL.second, toLL.first, toLL.second) < TOO_CLOSE_M) {
             error = TOO_CLOSE; planning = false; linkTrip = null; return@LaunchedEffect
@@ -311,15 +311,18 @@ fun DirectionsOnline(model: KavModel) {
                 val start = fromPlace?.takeUnless(::isHere)
                     ?: Place(T("Saved start", "נקודת ההתחלה השמורה"), "", fromLL.first, fromLL.second)
                 val trip = RecentTrip(start, dest, System.currentTimeMillis(), stopovers)
-                val details = resolved
-                withContext(Dispatchers.IO) { runCatching { Prefs.rememberTrip(ctx, trip, found, details, res.sections) } }
+                withContext(Dispatchers.IO) { runCatching { Prefs.rememberTrip(ctx, trip) } }
             }
             // Open only after this search and its stop/line details have arrived. A separate effect
             // can otherwise see the previous search before this one has started.
             val named = linkTrip
+            val again = againTrip
             val match = named?.let { raw.firstOrNull { exactTrip(it, named) } ?: raw.firstOrNull { sameLines(it, named) } }
+                ?: again?.let { raw.filter { sameLines(it, again) }.minByOrNull { it.dep } }
+            val fromName = fromPlace?.name ?: hereName()
+            val toName = toPlace?.name ?: T("Destination", "יעד")
             if (match != null) {
-                open = OpenTrip(match, resolved, fromPlace?.name ?: hereName(), toPlace?.name ?: T("Destination", "יעד"))
+                open = OpenTrip(match, resolved, fromName, toName, stopovers = stopovers)
             }
             planning = false
         } catch (e: kotlinx.coroutines.CancellationException) {
@@ -349,16 +352,12 @@ fun DirectionsOnline(model: KavModel) {
             android.util.Log.e("KavPlan", "online plan failed", e)
             error = when {
                 !uk.noammm.kav.hasNetwork(ctx) -> T(
-                    "No connection. Kav needs one to plan a trip.",
-                    "אין חיבור. Kav זקוק לחיבור כדי לתכנן נסיעה.",
+                    "No connection. The selected planner needs one.",
+                    "אין חיבור. המתכנן שנבחר זקוק לחיבור.",
                 )
                 e is KavPlan.NoTimetable -> T(
                     "Kav's planner has no timetable for that day yet. Try a nearer date.",
                     "לתכנון של Kav עוד אין לוח זמנים ליום הזה. נסו תאריך קרוב יותר.",
-                )
-                e is uk.noammm.kav.data.MoovitWeb.NoStopovers -> T(
-                    "Moovit's planner can't plan through stops on the way. Remove them, or pick another planner in Settings.",
-                    "המתכנן של Moovit לא מתכנן דרך עצירות בדרך. הסירו אותן, או בחרו מתכנן אחר בהגדרות.",
                 )
                 planner.provider -> T("The selected trip provider didn't answer.", "ספק תכנון המסלולים שנבחר לא ענה.")
                 KavLive.serverOf(planner) != KavLive.KAV_SERVER -> T("Your server didn't answer.", "השרת שלכם לא ענה.")
@@ -368,6 +367,7 @@ fun DirectionsOnline(model: KavModel) {
         }
         plannedFor = planKey
         linkTrip = null
+        againTrip = null
     }
 
     val lifecycle = androidx.lifecycle.compose.LocalLifecycleOwner.current.lifecycle
@@ -376,8 +376,7 @@ fun DirectionsOnline(model: KavModel) {
         if (!showResults || raw.isEmpty() || (active != null && open?.trip === active)) return@LaunchedEffect
         val otherTrips = raw.filterNot { it === active }
         if (otherTrips.isEmpty()) return@LaunchedEffect
-        // A recent trip's saved routes have no live times yet: they come at once, as with a search.
-        var wait = saved == null || resolved.live.isNotEmpty()
+        var wait = true
         var back = false
         // Only while Home is in front: behind another tab, or with Kav away, they wait, and come at once on coming back.
         lifecycle.repeatOnLifecycle(androidx.lifecycle.Lifecycle.State.STARTED) {
@@ -387,7 +386,7 @@ fun DirectionsOnline(model: KavModel) {
                 if (wait) kotlinx.coroutines.delay(resolved.pollSecs.coerceIn(15, 120) * 1000L)
                 wait = true
                 // From the server live locations come from; any other routes stay as they were kept.
-                if (!otherTrips.all { KavPlan.timed(it) }) break
+                if (!otherTrips.all { KavPlan.owns(it) }) break
                 val refreshed = withContext(Dispatchers.IO) { KavPlan.live(otherTrips, resolved) }
                 resolved = Transit.Resolved(
                     refreshed.lines + resolved.lines, refreshed.stops + resolved.stops,
@@ -395,6 +394,22 @@ fun DirectionsOnline(model: KavModel) {
                     refreshed.shapes + resolved.shapes, refreshed.pollSecs, refreshed.patterns + resolved.patterns,
                     resolved.delays + refreshed.delays,
                 )
+            }
+        }
+    }
+
+    // A trip opened on its own (the latest route, a link, one resumed) has its live times kept fresh as search results'
+    // are, from the moment it opens: without, it showed what was known when it was saved.
+    var openLive by remember { mutableStateOf<Pair<Transit.Itinerary, Transit.Resolved>?>(null) }
+    LaunchedEffect(open?.trip, model.activeJourney?.trip, lifecycle, KavLive.source) {
+        val chosen = open ?: return@LaunchedEffect
+        if (model.activeJourney?.trip === chosen.trip || raw.any { it === chosen.trip } || !KavPlan.owns(chosen.trip)) return@LaunchedEffect
+        var known = openLive?.takeIf { it.first === chosen.trip }?.second ?: chosen.resolved
+        lifecycle.repeatOnLifecycle(androidx.lifecycle.Lifecycle.State.STARTED) {
+            while (true) {
+                known = withContext(Dispatchers.IO) { KavPlan.live(listOf(chosen.trip), known) }
+                openLive = chosen.trip to known
+                kotlinx.coroutines.delay(known.pollSecs.coerceIn(15, 120) * 1000L)
             }
         }
     }
@@ -441,7 +456,14 @@ fun DirectionsOnline(model: KavModel) {
         if (chosen != null) {
             val active = model.activeJourney?.takeIf { it.trip === chosen.trip }
             val detailResolved = active?.resolved
-                ?: if (!chosen.resume && raw.any { it === chosen.trip }) resolved else chosen.resolved
+                ?: if (!chosen.resume && raw.any { it === chosen.trip }) resolved
+                else openLive?.takeIf { it.first === chosen.trip }?.second ?: chosen.resolved
+            LaunchedEffect(chosen.trip) {
+                withContext(Dispatchers.IO) {
+                    uk.noammm.kav.data.RecentRoutes.saveLatest(ctx,
+                        ActiveJourney(chosen.trip, detailResolved, chosen.fromLabel, chosen.toLabel, stopovers = chosen.stopovers))
+                }
+            }
             TripDetailScreen(
                 model,
                 chosen.trip, detailResolved,
@@ -454,7 +476,7 @@ fun DirectionsOnline(model: KavModel) {
                         model.journeyStep = 0
                         model.activeJourney = ActiveJourney(
                             chosen.trip, detailResolved, chosen.fromLabel, chosen.toLabel,
-                            fromHere = startsHere(chosen.trip, model, fromIsHere),
+                            fromHere = startsHere(chosen.trip, model, fromIsHere), stopovers = chosen.stopovers,
                         )
                     }
                 },
@@ -473,9 +495,9 @@ fun DirectionsOnline(model: KavModel) {
         HomeScreen(
             model = model,
             recentTrips = Prefs.trips(ctx),
-            onSearch = { hereOrigin = null; stopovers = emptyList(); saved = null; linkError = null; fromPlace = null; departAt = 0L; timeType = Transit.TIME_DEPARTURE; picking = "to" },
+            onSearch = { hereOrigin = null; stopovers = emptyList(); linkError = null; fromPlace = null; departAt = 0L; timeType = Transit.TIME_DEPARTURE; picking = "to" },
             onFavourite = { p ->
-                hereOrigin = null; stopovers = emptyList(); saved = null; linkError = null; fromPlace = null; toPlace = p
+                hereOrigin = null; stopovers = emptyList(); linkError = null; fromPlace = null; toPlace = p
                 departAt = 0L; timeType = Transit.TIME_DEPARTURE
                 showResults = true
             },
@@ -483,15 +505,29 @@ fun DirectionsOnline(model: KavModel) {
             onTrip = { t ->
                 hereOrigin = null; stopovers = t.stopovers; linkError = null; fromPlace = t.from; toPlace = t.to
                 departAt = 0L; timeType = Transit.TIME_DEPARTURE
-                saved = SavedTrip(t, listOf(t.from?.let { it.lat to it.lon }, t.to.lat to t.to.lon, 0L,
-                    Transit.TIME_DEPARTURE, filters, t.stopovers, planner))
+                linkTrip = null; lastLink = null
+                planAgain++
                 showResults = true
             },
             onResume = {
                 model.activeJourney?.let { journey ->
-                    open = OpenTrip(
-                        journey.trip, journey.resolved, journey.fromLabel, journey.toLabel, resume = true,
-                    )
+                    open = OpenTrip(journey.trip, journey.resolved, journey.fromLabel, journey.toLabel, resume = true, stopovers = journey.stopovers)
+                }
+            },
+            onLatest = { journey ->
+                val start = journey.trip.legs.firstOrNull { it.shape.isNotEmpty() }?.shape?.firstOrNull()
+                val end = journey.trip.legs.lastOrNull { it.shape.isNotEmpty() }?.shape?.lastOrNull()
+                if (!departed(journey.trip) || start == null || end == null) {
+                    open = OpenTrip(journey.trip, journey.resolved, journey.fromLabel, journey.toLabel, backHome = true, stopovers = journey.stopovers)
+                } else {
+                    // Its first bus has left: the route as it can be ridden now, through the same stops on the way. A route
+                    // from where the rider was is planned from where they are.
+                    hereOrigin = null; stopovers = journey.stopovers; linkTrip = null
+                    fromPlace = if (journey.fromLabel in HERE) null else Place(journey.fromLabel, "", start.first, start.second)
+                    toPlace = Place(journey.toLabel, "", end.first, end.second)
+                    departAt = 0L; timeType = Transit.TIME_DEPARTURE
+                    againTrip = journey.trip.rides.map { TripLink.Ride(it.lineId, it.tripId, it.dep) }
+                    showResults = true
                 }
             },
         )
@@ -533,6 +569,8 @@ fun DirectionsOnline(model: KavModel) {
                     onFrom = { picking = "from" },
                     onTo = { picking = "to" },
                     stops = stopovers.map { it.name },
+                    stays = stopovers.map { it.stayMin },
+                    onStay = { i, minutes -> stopovers = stopovers.mapIndexed { j, s -> if (j == i) s.staying(minutes) else s } },
                     onAddStop = { picking = "stop" },
                     onStop = { i -> picking = "stop:$i" },
                     onRemoveStop = { i -> stopovers = stopovers.filterIndexed { j, _ -> j != i } },
@@ -602,45 +640,45 @@ fun DirectionsOnline(model: KavModel) {
             // or empty answer too, so another can be picked.
             fun androidx.compose.foundation.lazy.LazyListScope.tabsRow() {
                 if (tabs.size > 1) item(key = "planners") {
-                    PlannerTabs(tabs, planner, { tab = it }, Modifier.padding(horizontal = K.gap4, vertical = K.gap2))
+                    PlannerTabs(tabs, planner, { tab = it }, listMotion().padding(horizontal = K.gap4, vertical = K.gap2))
                 }
             }
             when {
-                error == TOO_CLOSE -> item {
+                error == TOO_CLOSE -> item(key = "too-close") {
                     NoteCard(
                         T(
                             "You're too close to your destination to plan a route.",
                             "אתם קרובים מדי ליעד כדי לתכנן מסלול.",
                         ),
-                        Modifier.padding(K.gap4),
+                        listMotion().padding(K.gap4),
                     )
                 }
                 error != null -> {
                     tabsRow()
-                    item {
-                        Column(Modifier.padding(K.gap4)) {
+                    item(key = "error") {
+                        Column(listMotion().padding(K.gap4)) {
                             Note(error.orEmpty())
                             Text(T("Try again", "נסו שוב"), color = K.accentInk,
                                 modifier = Modifier.clickable { planAgain++ }.padding(vertical = K.gap3))
                         }
                     }
                 }
-                toLL == null -> item {
+                toLL == null -> item(key = "no-destination") {
                     NoteCard(
                         if (fromLL == null) T(
                             "Choose where you are starting from, and where you are going.",
                             "בחרו מהיכן אתם יוצאים ולאן אתם רוצים להגיע.",
                         )
                         else T("Where do you want to go?", "לאן תרצו להגיע?"),
-                        Modifier.padding(K.gap4),
+                        listMotion().padding(K.gap4),
                     )
                 }
                 fromLL == null && !findHereFailed -> item(key = "finding") { LoadingBlock(T("Finding routes", "מחפשים מסלולים"), Modifier.animateItem(
                     fadeInSpec = androidx.compose.animation.core.tween(200, delayMillis = 60),
                     fadeOutSpec = androidx.compose.animation.core.tween(120), placementSpec = null,
                 ).fillParentMaxHeight(.6f)) }
-                fromLL == null -> item {
-                    Column(Modifier.padding(K.gap4)) {
+                fromLL == null -> item(key = "no-start") {
+                    Column(listMotion().padding(K.gap4)) {
                         if (findHereFailed) Note(T("Couldn't get an accurate location. Try again or choose a start.",
                             "לא התקבל מיקום מדויק. נסו שוב או בחרו נקודת התחלה."))
                         else NoteCard(T("Choose a start to find routes.", "בחרו נקודת התחלה כדי למצוא מסלולים."))
@@ -658,28 +696,26 @@ fun DirectionsOnline(model: KavModel) {
                 }
                 shown.isEmpty() -> {
                     tabsRow()
-                    item {
+                    item(key = "empty") {
                         NoteCard(
                             if (raw.isEmpty() && nothingOnShabbat) SHABBAT_NOTHING
                             else if (raw.isEmpty()) T("No routes found for this trip.", "לא נמצאו מסלולים לנסיעה הזו.")
                             else T("Every route found is switched off in your filters.", "כל המסלולים שנמצאו הוסתרו על ידי המסננים שלכם."),
-                            Modifier.padding(K.gap4),
+                            listMotion().padding(K.gap4),
                         )
                     }
                 }
                 else -> {
                     if (timeType != Transit.TIME_LAST) shiftRow(firstTime ?: shiftTime)
                     tabsRow()
-                    // Late at night or on Shabbat there may only be walking and cycling; routes the planner found
-                    // after Shabbat or a holiday ends come under a line that says so.
+                    // Late at night or on Shabbat there may only be walking and cycling. Routes the planner found after
+                    // Shabbat or a holiday ends say so on their own cards.
                     if (raw.none { t -> t.legs.any { it.kind == Transit.LegKind.RIDE } }) item(key = "no-transit") {
                         NoteCard(
                             if (nothingOnShabbat) SHABBAT_NOTHING
                             else T("No public transport found for this time.", "לא נמצאה תחבורה ציבורית לשעה הזו."),
-                            Modifier.padding(horizontal = K.gap4, vertical = K.gap2),
+                            listMotion().padding(horizontal = K.gap4, vertical = K.gap2),
                         )
-                    } else shown.first().after?.let { day ->
-                        item(key = "shabbat") { NoteCard(afterDayOff(day), Modifier.padding(horizontal = K.gap4, vertical = K.gap2)) }
                     }
                     // Israel Railways' own trains for the first route that takes the train.
                     railPair(shown, resolved)?.takeIf { sort == Sort.RECOMMENDED }?.let { rail ->
@@ -707,10 +743,13 @@ fun DirectionsOnline(model: KavModel) {
                             }
                         }
                     }
+                    // Gett is another app: a favourite goes to it as the place itself.
+                    val pickupName = fromPlace?.let { model.favourites.realName(it.name, it.lat to it.lon) }
+                    val dropoffName = toPlace?.let { model.favourites.realName(it.name, it.lat to it.lon) }
                     // A plain Taxi row where the plan brought no taxi card, in the taxi section's place: Gett for the
                     // search's own From and To.
                     val taxiLink = if (sort == Sort.RECOMMENDED && ResultFilter.TAXI in filters && shown.none(plan::isTaxiCard)) {
-                        fromLL?.let { f -> toLL?.let { t -> gettLink(f, t, fromPlace?.name, toPlace?.name) } }
+                        fromLL?.let { f -> toLL?.let { t -> gettLink(f, t, pickupName, dropoffName) } }
                     } else null
                     val taxiAt = if (taxiLink != null) taxiSlot(plan, shown) else -1
                     // Each route keeps its row through live updates, and a row that moves glides to its new place.
@@ -727,32 +766,49 @@ fun DirectionsOnline(model: KavModel) {
                             ).graphicsLayer { if (raw !== mine) translationY = leaving.value * 16.dp.toPx() }
                                 .padding(horizontal = K.gap4),
                         ) {
-                            if (i == taxiAt && taxiLink != null) {
-                                TaxiRow(taxiLink)
-                                Spacer(Modifier.height(K.gap3))
+                            // The taxi row and a section's header come and go with the order and the plan, opening in
+                            // their place rather than pushing the card down in one jump.
+                            var taxiShown by remember { mutableStateOf(taxiLink) }
+                            if (taxiLink != null) taxiShown = taxiLink
+                            AnimatedVisibility(
+                                i == taxiAt && taxiLink != null,
+                                enter = androidx.compose.animation.expandVertically(androidx.compose.animation.core.spring(dampingRatio = 1f, stiffness = 500f), expandFrom = androidx.compose.ui.Alignment.Top) +
+                                    androidx.compose.animation.fadeIn(androidx.compose.animation.core.tween(200, delayMillis = 60)),
+                                exit = androidx.compose.animation.shrinkVertically(androidx.compose.animation.core.spring(dampingRatio = 1f, stiffness = 500f), shrinkTowards = androidx.compose.ui.Alignment.Top) +
+                                    androidx.compose.animation.fadeOut(androidx.compose.animation.core.tween(120)),
+                            ) {
+                                Column {
+                                    taxiShown?.let { TaxiRow(it) }
+                                    Spacer(Modifier.height(K.gap3))
+                                }
                             }
                             val heading = plan.heading(shown[i])
-                            if (sort == Sort.RECOMMENDED && heading.isNotBlank() &&
-                                (i == 0 || plan.heading(shown[i - 1]) != heading)
-                            ) {
-                                SectionHeader(sentenceCase(heading))
-                            }
+                            var headed by remember { mutableStateOf(heading) }
+                            val heads = sort == Sort.RECOMMENDED && heading.isNotBlank() && (i == 0 || plan.heading(shown[i - 1]) != heading)
+                            if (heads) headed = heading
+                            AnimatedVisibility(
+                                heads,
+                                enter = androidx.compose.animation.expandVertically(androidx.compose.animation.core.spring(dampingRatio = 1f, stiffness = 500f), expandFrom = androidx.compose.ui.Alignment.Top) +
+                                    androidx.compose.animation.fadeIn(androidx.compose.animation.core.tween(200, delayMillis = 60)),
+                                exit = androidx.compose.animation.shrinkVertically(androidx.compose.animation.core.spring(dampingRatio = 1f, stiffness = 500f), shrinkTowards = androidx.compose.ui.Alignment.Top) +
+                                    androidx.compose.animation.fadeOut(androidx.compose.animation.core.tween(120)),
+                            ) { SectionHeader(sentenceCase(headed)) }
                             // The taxi card orders its ride with Gett, between the search's own From and To.
                             val taxi = shown[i].legs.firstOrNull { it.kind == Transit.LegKind.TAXI }?.takeIf { plan.isTaxiCard(shown[i]) }
                             Box(Modifier.popIn(i, raw to sort)) {
                                 ItineraryCard(shown[i], resolved, footer = taxi?.let { leg ->
-                                    { OrderGett(gettLink(leg, fromPlace?.name, toPlace?.name), Modifier.fillMaxWidth()) }
+                                    { OrderGett(gettLink(leg, pickupName, dropoffName), Modifier.fillMaxWidth()) }
                                 }) {
                                     open = OpenTrip(
                                         shown[i], resolved, fromPlace?.name ?: T("Current location", "המיקום הנוכחי"),
-                                        toPlace?.name ?: T("Destination", "יעד"),
+                                        toPlace?.name ?: T("Destination", "יעד"), stopovers = stopovers,
                                     )
                                 }
                             }
                         }
                     }
                     if (taxiLink != null && taxiAt == shown.size) item(key = "taxi") {
-                        Column(Modifier.padding(horizontal = K.gap4)) { TaxiRow(taxiLink) }
+                        Column(listMotion().padding(horizontal = K.gap4)) { TaxiRow(taxiLink) }
                     }
                 }
             }
@@ -794,7 +850,7 @@ fun DirectionsOnline(model: KavModel) {
             onPick = { p ->
                 if (which.startsWith("stop:")) {
                     val i = which.substringAfter(':').toIntOrNull()
-                    stopovers = stopovers.mapIndexed { j, s -> if (j == i) p else s }
+                    stopovers = stopovers.mapIndexed { j, s -> if (j == i) p.staying(s.stayMin) else s }
                     picking = null; model.placeQuery = ""
                     return@PlacePicker
                 }

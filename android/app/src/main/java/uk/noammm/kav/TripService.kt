@@ -24,6 +24,8 @@ import uk.noammm.kav.ui.Payer
 import uk.noammm.kav.ui.T
 import uk.noammm.kav.ui.buildSteps
 import uk.noammm.kav.ui.journeyProgress
+import uk.noammm.kav.ui.arrivedAtEnd
+import uk.noammm.kav.ui.ARRIVED_END_S
 import androidx.core.location.LocationRequestCompat
 import uk.noammm.kav.ui.Step
 import uk.noammm.kav.ui.boardingChoice
@@ -70,6 +72,7 @@ class TripService : Service() {
         uk.noammm.kav.ui.Shown.twelveHour = Prefs.twelveHour(this)
         ensureChannel(this)
         Payer.init(this)
+        if (Prefs.spokenAlerts(this) || Prefs.spokenTurns(this)) Speaker.warm(this)
         running = this
     }
 
@@ -218,7 +221,8 @@ class TripService : Service() {
         fired.add(due.key)
         sent.edit().clear().putString(trip, fired.joinToString(",")).apply()
         alert(this, due.title, due.text)
-        if (Prefs.spokenAlerts(this) && Speaker.mayTalk(this)) Speaker.say(this, due.spoken)
+        val spoken = if (due.turn) Prefs.spokenTurns(this) else Prefs.spokenAlerts(this)
+        if (spoken && Speaker.mayTalk(this)) Speaker.sayAfterSound(this, due.spoken)
     }
 
     // This trip's ticket whose free transfer lasts longest, with the leg it paid for: one bought from the trip's own cards,
@@ -230,15 +234,25 @@ class TripService : Service() {
         return bus.filter { it.boughtUtc >= (journey.trip.dep - 1_800) * 1000 }.maxByOrNull { it.transferUntilUtc } to null
     }
 
+    private var arrivedAt = 0L
+
     private fun advance() {
         if (TripBridge.journey != null) return
         val (journey, step) = journey() ?: return
         val steps = buildSteps(journey.trip, journey.fromLabel, journey.toLabel)
-        val moved = journeyProgress(
-            steps, step, journey.resolved, journey.chosen, System.currentTimeMillis() / 1000,
-            listOfNotNull(fix, rough).maxByOrNull { it.at }, canLocate(this), Prefs.beginTripsImmediately(this),
+        val now = System.currentTimeMillis() / 1000
+        val latest = listOfNotNull(fix, rough).maxByOrNull { it.at }
+        var moved = journeyProgress(
+            steps, step, journey.resolved, journey.chosen, now,
+            latest, canLocate(this), Prefs.beginTripsImmediately(this),
             journey.fromHere,
         )
+        // There, as in the app: the trip shows it's arrived, and ends a little later.
+        if (arrivedAtEnd(steps, moved, journey.resolved, journey.chosen, now, latest, journey.trip.arr)) {
+            if (arrivedAt == 0L) arrivedAt = now
+            else if (now - arrivedAt >= ARRIVED_END_S) { arrivedAt = 0L; end(); return }
+            moved = steps.lastIndex
+        } else arrivedAt = 0L
         if (moved == step) return
         JourneyFile.save(this, journey, moved)
         cached = journey to moved
@@ -283,7 +297,7 @@ class TripService : Service() {
         if (n == shown) return
         shown = n
         postedAt = System.currentTimeMillis()
-        runCatching { NotificationManagerCompat.from(this).notify(ID, build(this, n)) }
+        try { NotificationManagerCompat.from(this).notify(ID, build(this, n)) } catch (_: SecurityException) {}
     }
 
     private fun end() {

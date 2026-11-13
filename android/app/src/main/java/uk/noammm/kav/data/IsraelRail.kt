@@ -102,7 +102,7 @@ object IsraelRail {
         val ask = JSONObject().put("fromStation", from.toString()).put("toStation", to.toString()).put("date", day)
             .put("hour", hour).put("scheduleType", "ByDeparture").put("systemType", "2")
             .put("languageId", if (uk.noammm.kav.ui.T.rtl) "Hebrew" else "English")
-        val c = (URL(SEARCH).openConnection() as HttpURLConnection).apply {
+        val c = (RiderProxy.open(URL(SEARCH)) as HttpURLConnection).apply {
             connectTimeout = 10_000; readTimeout = 15_000
             requestMethod = "POST"; doOutput = true
             setRequestProperty("Content-Type", "application/json")

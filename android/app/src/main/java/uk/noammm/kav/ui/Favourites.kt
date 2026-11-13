@@ -124,6 +124,13 @@ val Favourite.label: String get() = if (id == Favourite.HOME) T("Home", "בית"
 fun Favourite.named(p: Transit.Place): Transit.Place =
     if (label.isBlank() || label == p.name) p else Transit.Place(label, p.name, p.lat, p.lon, p.type, p.mode)
 
+// A trip's end as other apps get it. A favourite's own name ("Grandma") is the rider's alone and finds nothing in another
+// app, so an end under it, near where that favourite is, goes by the place it was saved at: its name or address, else
+// its coordinates.
+fun List<Favourite>.realName(name: String, at: Pair<Double, Double>?): String =
+    firstOrNull { f -> f.label == name && f.place != null && (at == null || metres(at.first, at.second, f.place.lat, f.place.lon) <= 500) }
+        ?.place?.let { p -> p.name.takeIf { it.isNotBlank() } ?: "%.5f, %.5f".format(java.util.Locale.US, p.lat, p.lon) } ?: name
+
 // The narrowest a column may get: a tile and the gap beside it.
 private val SLOT = 72.dp + K.gap2
 
@@ -377,7 +384,11 @@ private fun PlaceLine(f: Favourite, onChange: () -> Unit) {
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(K.gap2),
     ) {
-        Icon(Icons.Rounded.Place, contentDescription = null, tint = K.muted, modifier = Modifier.size(18.dp))
+        // A saved place shows its favourite's own icon, never a photo of it.
+        if (p != null) FavouriteTile(f.icon, 32.dp)
+        else Box(Modifier.size(32.dp).clip(RoundedCornerShape(K.rTile)).background(K.fill), contentAlignment = Alignment.Center) {
+            Icon(Icons.Rounded.Place, contentDescription = null, tint = K.muted, modifier = Modifier.size(18.dp))
+        }
         Column(Modifier.weight(1f)) {
             Text(
                 p?.name?.takeIf { it.isNotBlank() } ?: T("Not set yet", "עדיין לא נקבע"),
@@ -447,14 +458,18 @@ fun FavouriteEditor(
             ) {
                 items(FavouriteIcons, key = { it.first }) { (key, vector) ->
                     val on = key == icon
+                    // The picked tile eases to the accent as the one before eases back.
+                    val fill by androidx.compose.animation.animateColorAsState(if (on) K.accent.copy(alpha = .18f) else K.plate, androidx.compose.animation.core.tween(200), label = "iconFill")
+                    val edge by androidx.compose.animation.animateColorAsState(if (on) K.accent else K.border, androidx.compose.animation.core.tween(200), label = "iconEdge")
+                    val ink by androidx.compose.animation.animateColorAsState(if (on) K.accentInk else K.muted, androidx.compose.animation.core.tween(200), label = "iconInk")
                     Box(
                         Modifier.size(52.dp).clip(RoundedCornerShape(K.rTile))
-                            .background(if (on) K.accent.copy(alpha = .18f) else K.plate)
-                            .border(1.dp, if (on) K.accent else K.border, RoundedCornerShape(K.rTile))
+                            .background(fill)
+                            .border(1.dp, edge, RoundedCornerShape(K.rTile))
                             .clickable(role = Role.RadioButton) { icon = key },
                         contentAlignment = Alignment.Center,
                     ) {
-                        Icon(vector, contentDescription = key, tint = if (on) K.accentInk else K.muted, modifier = Modifier.size(26.dp))
+                        Icon(vector, contentDescription = key, tint = ink, modifier = Modifier.size(26.dp))
                     }
                 }
             }

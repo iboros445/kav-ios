@@ -62,6 +62,9 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.semantics.text
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
@@ -98,22 +101,23 @@ fun KavButton(
     val source = remember { MutableInteractionSource() }
     val pressed by source.collectIsPressedAsState()
     val press by animateFloatAsState(if (pressed) .97f else 1f, tween(100), label = "press")
-    val fill = when (style) {
+    // Turning on or off, the button eases to its colours.
+    val fill by animateColorAsState(when (style) {
         ButtonStyle.Primary -> if (enabled) K.accent else K.fill
         ButtonStyle.Secondary, ButtonStyle.Destructive -> K.fill
         ButtonStyle.Plain -> Color.Transparent
-    }
-    val ink = when {
+    }, tween(200), label = "buttonFill")
+    val ink by animateColorAsState(when {
         !enabled -> K.textTertiary
         style == ButtonStyle.Primary -> K.onAccent
         style == ButtonStyle.Secondary -> K.text
         style == ButtonStyle.Plain -> K.accentInk
         else -> K.critical
-    }
+    }, tween(200), label = "buttonInk")
     Row(
         modifier
             .then(if (wide) Modifier.fillMaxWidth() else Modifier)
-            .heightIn(min = if (style == ButtonStyle.Primary) 52.dp else 48.dp)
+            .heightIn(min = animateDpAsState(if (style == ButtonStyle.Primary) 52.dp else 48.dp, spring(dampingRatio = 1f, stiffness = 500f), label = "buttonHeight").value)
             .graphicsLayer { scaleX = press; scaleY = press }
             .clip(K.capsule)
             .background(fill)
@@ -122,12 +126,26 @@ fun KavButton(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.Center,
     ) {
-        if (busy) {
-            Spinner(16.dp, track = ink.copy(alpha = .25f), arc = ink)
-            Spacer(Modifier.width(K.gap2))
-        } else if (icon != null) {
-            Icon(icon, contentDescription = null, tint = ink, modifier = Modifier.size(20.dp))
-            Spacer(Modifier.width(K.gap2))
+        // The spinner opens beside the label and closes again (in the icon's place), so the label slides over.
+        androidx.compose.animation.AnimatedVisibility(
+            busy,
+            enter = fadeIn(tween(150)) + androidx.compose.animation.expandHorizontally(spring(dampingRatio = 1f, stiffness = 500f)),
+            exit = fadeOut(tween(120)) + androidx.compose.animation.shrinkHorizontally(spring(dampingRatio = 1f, stiffness = 500f)),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Spinner(16.dp, track = ink.copy(alpha = .25f), arc = ink)
+                Spacer(Modifier.width(K.gap2))
+            }
+        }
+        if (icon != null) androidx.compose.animation.AnimatedVisibility(
+            !busy,
+            enter = fadeIn(tween(150)) + androidx.compose.animation.expandHorizontally(spring(dampingRatio = 1f, stiffness = 500f)),
+            exit = fadeOut(tween(120)) + androidx.compose.animation.shrinkHorizontally(spring(dampingRatio = 1f, stiffness = 500f)),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(icon, contentDescription = null, tint = ink, modifier = Modifier.size(20.dp))
+                Spacer(Modifier.width(K.gap2))
+            }
         }
         // A label that changes (Show, Hide) fades from one to the other while the button eases to its new width.
         ChangingText(label) { Text(it, style = K.type.bodyStrong, color = ink, maxLines = 1, overflow = TextOverflow.Ellipsis) }
@@ -292,11 +310,21 @@ fun KavSegmented(
                     )
                     // A label too long for its segment (five of them, in Hebrew) steps down in size until it fits.
                     var size by remember(option) { mutableStateOf(K.type.subhead.fontSize) }
-                    Text(
-                        option, style = K.type.subhead.copy(fontSize = size), maxLines = 1, color = ink,
-                        fontWeight = if (i == selected) FontWeight.Medium else null,
-                        onTextLayout = { if (it.hasVisualOverflow && size > 10.sp) size *= .92f },
-                    )
+                    // The picked label's weight fades in as the thumb slides to it, and out as it leaves: the regular and
+                    // the medium label are drawn over each other. The medium one is the one fitted, so the size holds.
+                    val bold by animateFloatAsState(if (i == selected) 1f else 0f, tween(150), label = "segmentWeight")
+                    // Read once, as one label: the two drawn over each other aren't, as one of them is always clear.
+                    Box(Modifier.clearAndSetSemantics { text = androidx.compose.ui.text.AnnotatedString(option) }, contentAlignment = Alignment.Center) {
+                        Text(
+                            option, style = K.type.subhead.copy(fontSize = size), maxLines = 1, color = ink,
+                            modifier = Modifier.graphicsLayer { alpha = 1f - bold },
+                        )
+                        Text(
+                            option, style = K.type.subhead.copy(fontSize = size), maxLines = 1, color = ink,
+                            fontWeight = FontWeight.Medium, modifier = Modifier.graphicsLayer { alpha = bold },
+                            onTextLayout = { if (it.hasVisualOverflow && size > 10.sp) size *= .92f },
+                        )
+                    }
                 }
             }
         }
@@ -377,6 +405,7 @@ fun ListRow(
     onClick: (() -> Unit)? = null,
     chevron: Boolean = onClick != null,
     titleColor: Color = K.text,
+    subtitleMaxLines: Int = 1,
 ) {
     Row(
         modifier
@@ -390,9 +419,16 @@ fun ListRow(
         leading?.invoke()
         Column(Modifier.weight(1f)) {
             Text(title, style = K.type.body, color = titleColor, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            subtitle?.let { Text(it, style = K.type.subhead, maxLines = 1, overflow = TextOverflow.Ellipsis) }
+            subtitle?.let { Text(it, style = K.type.subhead, maxLines = subtitleMaxLines, overflow = TextOverflow.Ellipsis) }
         }
-        value?.let { Text(it, style = K.type.subhead.tabular, maxLines = 1, softWrap = false) }
+        // A value that comes later (a distance once you're found) fades in, and a new one rolls over the old.
+        var kept by remember { mutableStateOf(value) }
+        if (value != null) kept = value
+        androidx.compose.animation.AnimatedVisibility(
+            value != null,
+            enter = fadeIn(tween(220, delayMillis = 60)) + androidx.compose.animation.expandHorizontally(spring(dampingRatio = 1f, stiffness = 500f)),
+            exit = fadeOut(tween(150)) + androidx.compose.animation.shrinkHorizontally(spring(dampingRatio = 1f, stiffness = 500f)),
+        ) { LiveText(kept.orEmpty(), style = K.type.subhead.tabular, maxLines = 1) }
         trailing?.invoke()
         if (chevron) {
             Icon(
@@ -489,7 +525,9 @@ fun KavSwitch(on: Boolean, modifier: Modifier = Modifier) {
 
 // A line's number on its plate: the mode's glyph and the number, on the mode's or operator's colour (linePlate) or
 // Kav's quiet fill. 44 dp wide at least, so plates in a column line up; dense: the smaller one, in a line of text;
-// look: the badges' look, Settings' own unless a preview shows one going.
+// look: the badges' look, Settings' own unless a preview shows one going. The strip look, for buses: a grey plate over a
+// strip of the operator's colour. A change of look morphs one into the other where the plate stands: the grey comes
+// over the colour, the strip rises under it, and the number moves up into the grey.
 @Composable
 fun LinePlateBadge(
     number: String?,
@@ -501,51 +539,53 @@ fun LinePlateBadge(
     look: LineBadgeAppearance = K.lineBadgeAppearance,
 ) {
     val shape = RoundedCornerShape(K.rBadge)
-    val ink = plate?.ink ?: K.text
     val mark = if (dense) 12.dp else 14.dp
-    // The strip look, for buses when chosen in Settings: a grey plate over a strip of the operator's colour.
-    if (look == LineBadgeAppearance.STRIP && mode == Mode.BUS) Column(
+    val strip by animateFloatAsState(
+        if (look == LineBadgeAppearance.STRIP && mode == Mode.BUS) 1f else 0f, tween(300), label = "badgeLook",
+    )
+    val text = Ink.text
+    val ink = lerp(plate?.ink ?: text, text, strip)
+    val glyphInk = lerp(plate?.ink ?: Ink.textSecondary, Ink.textSecondary, strip)
+    val badgePlate = Ink.badgePlate
+    Column(
         modifier
             .widthIn(min = 44.dp)
             .width(IntrinsicSize.Max)
             .height(if (dense) 24.dp else 28.dp)
             .clip(shape)
-            .background(plate?.fill ?: K.fill)
-            .border(1.dp, K.borderStrong, shape),
+            .background(plate?.fill ?: Ink.fill)
+            .border(1.dp, lerp(plate?.edge ?: Color.Transparent, Ink.borderStrong, strip), shape),
     ) {
         Row(
-            Modifier.fillMaxWidth().weight(1f).background(K.badgePlate).padding(horizontal = 6.dp),
+            Modifier.fillMaxWidth().weight(1f).background(badgePlate.copy(alpha = badgePlate.alpha * strip))
+                .padding(horizontal = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(4.dp, Alignment.CenterHorizontally),
         ) {
-            if (glyph != null) glyph(K.textSecondary, mark) else ModeGlyph(mode, K.textSecondary, mark)
+            if (glyph != null) glyph(glyphInk, mark) else ModeGlyph(mode, glyphInk, mark)
             if (!number.isNullOrBlank()) {
                 Text(
-                    number, style = (if (dense) K.type.subhead else K.type.bodyStrong).tabular, color = K.text,
+                    number, style = (if (dense) K.type.subhead else K.type.bodyStrong).tabular, color = ink,
                     fontWeight = FontWeight.Medium, maxLines = 1,
                 )
             }
         }
-        Spacer(Modifier.height(4.dp))
-    } else Row(
-        modifier
-            .widthIn(min = 44.dp)
-            .height(if (dense) 24.dp else 28.dp)
-            .clip(shape)
-            .background(plate?.fill ?: K.fill)
-            .then(if (plate != null) Modifier.border(1.dp, plate.edge, shape) else Modifier)
-            .padding(horizontal = 6.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(4.dp, Alignment.CenterHorizontally),
-    ) {
-        if (glyph != null) glyph(plate?.ink ?: K.textSecondary, mark) else ModeGlyph(mode, plate?.ink ?: K.textSecondary, mark)
-        if (!number.isNullOrBlank()) {
-            Text(
-                number, style = (if (dense) K.type.subhead else K.type.bodyStrong).tabular, color = ink,
-                fontWeight = FontWeight.Medium, maxLines = 1,
-            )
-        }
+        Spacer(Modifier.height(4.dp * strip))
     }
+}
+
+// A badge drawn its own way in Kav's look and as a strip-look LinePlateBadge: a change of look in Settings fades the one
+// into the other while the room it takes eases.
+@Composable
+fun BadgeLookSwitch(strip: Boolean, modifier: Modifier = Modifier, content: @Composable (strip: Boolean) -> Unit) {
+    AnimatedContent(
+        strip, modifier,
+        transitionSpec = {
+            (fadeIn(tween(220, delayMillis = 60)) togetherWith fadeOut(tween(150)))
+                .using(SizeTransform(clip = false) { _, _ -> spring(dampingRatio = 1f, stiffness = 500f) })
+        },
+        label = "badgeLook",
+    ) { content(it) }
 }
 
 // The width a LinePlateBadge takes for a number, for lining plates up in a column.

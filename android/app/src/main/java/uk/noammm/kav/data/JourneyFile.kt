@@ -62,6 +62,11 @@ object JourneyFile {
         .put("chosen", JSONObject().apply { journey.chosen.forEach { (leg, opt) -> put(leg.toString(), opt) } })
         .put("paid", JSONObject().apply { journey.paid.forEach { (leg, key) -> put(leg.toString(), key) } })
         .put("fromHere", journey.fromHere)
+        .put("stopovers", JSONArray().apply {
+            journey.stopovers.forEach {
+                put(JSONObject().put("name", it.name).put("detail", it.detail).put("lat", it.lat).put("lon", it.lon).put("stay", it.stayMin))
+            }
+        })
         .put("trip", json(journey.trip))
         .put("lines", JSONObject().apply { journey.resolved.lines.forEach { (id, l) -> put(id.toString(), json(l)) } })
         .put("stops", JSONObject().apply { journey.resolved.stops.forEach { (id, s) -> put(id.toString(), json(s)) } })
@@ -83,6 +88,12 @@ object JourneyFile {
             paid = o.optJSONObject("paid")?.let { p -> p.keys().asSequence().associate { it.toInt() to p.getString(it) } }
                 ?: emptyMap(),
             fromHere = o.optBoolean("fromHere", true),
+            stopovers = o.optJSONArray("stopovers")?.let { a ->
+                (0 until a.length()).mapNotNull { i -> a.optJSONObject(i) }.map {
+                    Transit.Place(it.optString("name"), it.optString("detail"), it.optDouble("lat"), it.optDouble("lon"),
+                        stayMin = it.optInt("stay"))
+                }
+            }.orEmpty(),
         )
         journey to o.optInt("step")
     } catch (e: Exception) { null }
@@ -133,7 +144,9 @@ object JourneyFile {
         co2g = o.optInt("co2", -1), accessible = o.optBoolean("acc"),
         tags = strings(o.optJSONArray("tags")).mapNotNull(KavPlan::tagOf),
         section = o.optString("sec"), sectionId = o.optInt("secId", -1),
-        original = o.optString("original"),
+        // HopOn's original, which only a trip Kav's own parser made carries: one kept from a provider this Kav no longer
+        // has leaves its own behind.
+        original = o.optString("original").takeIf { o.optString("guid").startsWith("kav-") }.orEmpty(),
     )
 
     private fun json(l: Transit.Leg): JSONObject {
@@ -152,6 +165,10 @@ object JourneyFile {
             .put("alts", JSONArray().apply { l.alternatives.forEach { put(json(it)) } })
             .put("altLines", JSONArray(l.alternativeLineIds))
             .put("shared", l.shared).put("sharedBy", l.sharedBy)
+        if (l.turns.isNotEmpty()) o.put("turns", JSONArray().apply {
+            l.turns.forEach { put(JSONArray().put(it.way).put(it.street).put(it.metres).put(it.lat).put(it.lon)) }
+        })
+        l.visit?.let { o.put("visit", JSONObject().put("place", it.place).put("from", it.from).put("until", it.until).put("stay", it.stay)) }
         l.taxiPickup?.let { o.put("pickup", coords(listOf(it))) }
         l.taxiDropoff?.let { o.put("dropoff", coords(listOf(it))) }
         return o
@@ -175,6 +192,10 @@ object JourneyFile {
         alternatives = objects(o.optJSONArray("alts")).map { leg(it) },
         alternativeLineIds = ints(o.optJSONArray("altLines")),
         shared = o.optInt("shared"), sharedBy = o.optString("sharedBy"),
+        turns = KavPlan.turnsOf(o.optJSONArray("turns")),
+        visit = o.optJSONObject("visit")?.let {
+            Transit.Visit(it.optString("place"), it.optLong("from"), it.optLong("until"), it.optBoolean("stay"))
+        },
     )
 
     private fun json(d: Transit.Departure): JSONObject = JSONObject()

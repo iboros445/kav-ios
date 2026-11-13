@@ -17,6 +17,18 @@ import android.webkit.WebViewClient
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.SizeTransform
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.VisibilityThreshold
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.togetherWith
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -162,7 +174,7 @@ internal object PayFix {
             } catch (e: IllegalArgumentException) {
             }
         }
-        return if (any) ({ runCatching { LocationManagerCompat.removeUpdates(lm, listener) } }) else ({})
+        return if (any) ({ try { LocationManagerCompat.removeUpdates(lm, listener) } catch (_: SecurityException) {} }) else ({})
     }
 }
 
@@ -212,10 +224,10 @@ object Payer {
 
     // Asshole mode: a bus ride kept until it is paid or dropped. qr is the bus's code, the ride its line's run (routeId,
     // officeLineId) from the stop `from` to the stop `to` as HopOn priced it, and guests the others riding along. leg
-    // and journey identify the trip ride it was for.
+    // and journey identify the trip ride it was for; related the account's own passengers paid for with it.
     class Pending(
         val line: String, val qr: String, val routeId: String, val officeLineId: String?, val from: String, val to: String,
-        val guests: Int, val leg: Int?, val journey: String? = null,
+        val guests: Int, val leg: Int?, val journey: String? = null, val related: List<String> = emptyList(),
     )
     var pending by mutableStateOf<Pending?>(null)
         private set
@@ -253,7 +265,8 @@ object Payer {
                 val o = JSONObject(json)
                 Pending(o.getString("line"), o.getString("qr"), o.getString("route"), o.optString("office").ifBlank { null },
                     o.getString("from"), o.getString("to"), o.optInt("guests"), o.optInt("leg", -1).takeIf { it >= 0 },
-                    o.optString("journey").ifBlank { null })
+                    o.optString("journey").ifBlank { null },
+                    o.optJSONArray("related")?.let { a -> (0 until a.length()).map { a.getString(it) } }.orEmpty())
             }.getOrNull()
         }
         s.getString("tickets", null)?.let(Seal::open)?.let { json ->
@@ -368,6 +381,13 @@ object Payer {
 
     fun forgetPaidBus() { store?.edit()?.remove("again_agency")?.remove("again_until")?.apply() }
 
+    // The account's own passengers a train entrance was paid for with, so its exit pays for them too, whenever that is,
+    // and forgotten once it has, as HopOn's app does.
+    fun relatedFor(ticket: Long): List<String> =
+        store?.getString("related_$ticket", null)?.split(',')?.filter { it.isNotBlank() }.orEmpty()
+    fun keepRelated(ticket: Long, ids: List<String>) { if (ids.isNotEmpty()) store?.edit()?.putString("related_$ticket", ids.joinToString(","))?.apply() }
+    fun forgetRelated(ticket: Long) { store?.edit()?.remove("related_$ticket")?.apply() }
+
     fun hold(p: Pending) { if (payingLater || purchasing) return; pending = p; laterError = null; keepPending() }
 
     fun dropPending() { if (payingLater) return; pending = null; laterError = null; keepPending() }
@@ -379,6 +399,7 @@ object Payer {
         else edit.putString("pending", Seal.close(JSONObject()
             .put("line", p.line).put("qr", p.qr).put("route", p.routeId).put("office", p.officeLineId)
             .put("from", p.from).put("to", p.to).put("guests", p.guests).put("leg", p.leg ?: -1).put("journey", p.journey)
+            .put("related", org.json.JSONArray(p.related))
             .toString()))
         edit.apply()
     }
@@ -400,8 +421,8 @@ object Payer {
                     bus = scanned.with(RavPass.Suggestion(p.line, p.routeId, p.officeLineId,
                         RavPass.Stop(p.from, "", Double.NaN, Double.NaN, -1), to, "", ""))
                     asOccasional = occasional()
-                    call { RavPass.quote(it, bus, to, p.guests) }
-                }) { call { RavPass.buy(it, bus.qr, p.guests, asOccasional) } }
+                    call { RavPass.quote(it, bus, to, p.guests, p.related) }
+                }) { call { RavPass.buy(it, bus.qr, p.guests, asOccasional, p.related) } }
                 paidBus(bus.agencyId)
                 if (pending === p) { pending = null; keepPending() }
                 val key = t.id.toString()
@@ -433,7 +454,10 @@ fun PayScreen(model: KavModel, onClose: () -> Unit) {
     androidx.activity.compose.BackHandler(onBack = onClose)
     Column(Modifier.fillMaxSize().background(K.bg)) {
         ScreenHeader(T("Pay", "תשלום"), T("for a ride", "על נסיעה"), back = onClose)
-        if (Payer.signedIn) Ready(model) else Connect()
+        // Signing in carries on to paying, and signing out goes back, as pages do.
+        AnimatedContent(Payer.signedIn, Modifier.fillMaxSize(), transitionSpec = { if (targetState) forward() else backward() }, label = "signedIn") { on ->
+            Column(Modifier.fillMaxSize()) { if (on) Ready(model) else Connect() }
+        }
     }
 }
 
@@ -562,15 +586,19 @@ internal fun failure(e: Throwable): String = when (e) {
 @Composable
 private fun PayButton(text: String, busy: Boolean, modifier: Modifier = Modifier, enabled: Boolean = true, onClick: () -> Unit) {
     val waiting = busy || Payer.purchasing || Payer.payingLater
+    // Waiting, it eases to grey and its words fade to One moment, and back.
+    val fill by animateColorAsState(if (waiting || !enabled) K.fill else K.accent, tween(200), label = "payFill")
+    val ink by animateColorAsState(if (waiting || !enabled) K.textTertiary else K.onAccent, tween(200), label = "payInk")
     Box(
         modifier.fillMaxWidth().heightIn(min = 52.dp).clip(K.capsule)
-            .background(if (waiting || !enabled) K.fill else K.accent)
+            .background(fill)
             .clickable(enabled = !waiting && enabled, role = Role.Button, onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
-        Text(if (waiting) T("One moment…", "רגע…") else text, style = K.type.bodyStrong,
-            color = if (waiting || !enabled) K.textTertiary else K.onAccent, textAlign = TextAlign.Center,
-            modifier = Modifier.padding(horizontal = K.gap5, vertical = K.gap2))
+        ChangingText(if (waiting) T("One moment…", "רגע…") else text) {
+            Text(it, style = K.type.bodyStrong, color = ink, textAlign = TextAlign.Center,
+                modifier = Modifier.padding(horizontal = K.gap5, vertical = K.gap2))
+        }
     }
 }
 
@@ -646,7 +674,10 @@ private fun SignIn() {
             .padding(bottom = K.gap6 + LocalBottomBarInset.current),
         verticalArrangement = Arrangement.spacedBy(K.gap4),
     ) {
-        when (val s = step) {
+        // The phone step gives way to the code step and back, the page easing to its new height.
+        AnimatedContent(step, transitionSpec = { swap() }, label = "signInStep") { s ->
+        Column(verticalArrangement = Arrangement.spacedBy(K.gap4)) {
+        when (s) {
             SignInStep.Phone -> {
                 Text(T("Sign in or sign up", "התחברות או הרשמה"), style = K.type.headline)
                 NoteCard(T("Rav-Pass sends a code by SMS to this number. A number without an account gets a new one.",
@@ -659,8 +690,9 @@ private fun SignIn() {
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
                     ) {
-                        Text(flagOf(region), fontSize = 16.sp)
-                        LtrText("+$country", 16.sp, K.text)
+                        // A picked country's flag and code fade in over the last.
+                        ChangingText(flagOf(region)) { Text(it, fontSize = 16.sp) }
+                        ChangingText("+$country") { LtrText(it, 16.sp, K.text) }
                         Icon(Icons.Rounded.ExpandMore, contentDescription = null, tint = K.textTertiary, modifier = Modifier.size(18.dp))
                     }
                     KavField(phone, { v ->
@@ -706,7 +738,9 @@ private fun SignIn() {
                 }
             }
         }
-        w.error?.let { Note(it, color = K.critical) }
+        }
+        }
+        Said(w.error)
     }
     if (confirming) RavPass.phoneParts(phone, country)?.let { (calling, number) ->
         PayDialog(T("Is this your number?", "זה המספר שלך?"), T.ltr(shownNumber(calling, number)), T("Correct", "זה המספר"),
@@ -737,8 +771,10 @@ private fun CountryPicker(onDismiss: () -> Unit, onPick: (String) -> Unit) {
             androidx.compose.foundation.lazy.LazyColumn(Modifier.fillMaxWidth().heightIn(max = 420.dp)) {
                 items(shown.size, key = { shown[it].first }) { i ->
                     val (region, code, name) = shown[i]
+                    // Countries come, go and close up with a fade and a glide as the search is typed.
                     Row(
-                        Modifier.fillMaxWidth().clip(RoundedCornerShape(K.rTile))
+                        Modifier.animateItem(fadeInSpec = tween(120), fadeOutSpec = tween(120), placementSpec = spring(dampingRatio = 1f, stiffness = 500f, visibilityThreshold = androidx.compose.ui.unit.IntOffset.VisibilityThreshold))
+                            .fillMaxWidth().clip(RoundedCornerShape(K.rTile))
                             .clickable(role = Role.Button) { onPick(region) }
                             .padding(horizontal = K.gap2, vertical = 11.dp),
                         verticalAlignment = Alignment.CenterVertically,
@@ -759,25 +795,43 @@ private fun CountryPicker(onDismiss: () -> Unit, onPick: (String) -> Unit) {
 private fun TermsAgreement(agreed: Boolean, links: RavPass.Settings?, onChange: (Boolean) -> Unit) {
     val ctx = LocalContext.current
     Row(verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(K.gap3)) {
+        // The box fills as the tick springs in, and empties as it fades.
+        val fill by animateColorAsState(if (agreed) K.accent else K.surface4, tween(160), label = "termsFill")
+        val edge by animateColorAsState(if (agreed) K.accent else K.border, tween(160), label = "termsEdge")
+        val tick = animateFloatAsState(if (agreed) 1f else 0f, spring(dampingRatio = .6f, stiffness = 600f), label = "termsTick")
         Box(
             Modifier.padding(top = 2.dp).size(22.dp).clip(RoundedCornerShape(6.dp))
-                .background(if (agreed) K.accent else K.surface4).border(1.dp, if (agreed) K.accent else K.border, RoundedCornerShape(6.dp))
+                .background(fill).border(1.dp, edge, RoundedCornerShape(6.dp))
                 .clickable(role = Role.Checkbox) { onChange(!agreed) },
             contentAlignment = Alignment.Center,
-        ) { if (agreed) Icon(Icons.Rounded.Check, contentDescription = null, tint = K.onAccent, modifier = Modifier.size(16.dp)) }
+        ) {
+            Icon(Icons.Rounded.Check, contentDescription = null, tint = K.onAccent, modifier = Modifier.size(16.dp).graphicsLayer {
+                val t = tick.value
+                alpha = t.coerceIn(0f, 1f); scaleX = .5f + .5f * t; scaleY = .5f + .5f * t
+            })
+        }
         Column(verticalArrangement = Arrangement.spacedBy(K.gap1)) {
             Note(T("By signing up, you agree to Rav-Pass's terms of service and privacy policy",
                 "השימוש בשירות מותנה בהסכמתך לתנאי השימוש ומדיניות הפרטיות של רב-פס"),
                 Modifier.clickable(role = Role.Checkbox) { onChange(!agreed) }, color = K.muted)
+            // The links open under the note when Rav-Pass's settings answer.
+            var kept by remember { mutableStateOf(links) }
+            if (links != null) kept = links
+            AnimatedVisibility(
+                links != null,
+                enter = fadeIn(tween(220, delayMillis = 60)) + expandVertically(spring(dampingRatio = 1f, stiffness = 500f), expandFrom = Alignment.Top),
+                exit = fadeOut(tween(150)) + shrinkVertically(spring(dampingRatio = 1f, stiffness = 500f), shrinkTowards = Alignment.Top),
+            ) {
             Row(horizontalArrangement = Arrangement.spacedBy(K.gap4)) {
-                links?.termsUrl?.let { url ->
+                kept?.termsUrl?.let { url ->
                     Text(T("Terms of service", "תנאי השימוש"), fontSize = 14.sp, color = K.accentInk,
                         modifier = Modifier.clickable(role = Role.Button) { openLink(ctx, url) }.padding(vertical = K.gap1))
                 }
-                links?.privacyUrl?.let { url ->
+                kept?.privacyUrl?.let { url ->
                     Text(T("Privacy policy", "מדיניות הפרטיות"), fontSize = 14.sp, color = K.accentInk,
                         modifier = Modifier.clickable(role = Role.Button) { openLink(ctx, url) }.padding(vertical = K.gap1))
                 }
+            }
             }
         }
     }
@@ -795,19 +849,29 @@ private fun Ready(model: KavModel) {
         }
     }
     val missing = Payer.missing
-    when {
-        missing == null && error != null -> PayStep {
-            Note(error.orEmpty(), color = K.critical)
-            PayButton(T("Try again", "ניסיון נוסף"), false) { attempt++ }
+    // Asking Rav-Pass gives way to the step it needs, or to paying, each fading in as the last fades out.
+    val stage = when {
+        missing == null && error != null -> "error"
+        missing == null -> "asking"
+        missing.isNotEmpty() -> missing.first().name
+        Payer.addingCard -> "card"
+        else -> "paying"
+    }
+    AnimatedContent(stage, Modifier.fillMaxSize(), transitionSpec = { fadeIn(tween(220, delayMillis = 60)) togetherWith fadeOut(tween(150)) }, label = "payStage") { st ->
+        Column(Modifier.fillMaxSize()) {
+            when (st) {
+                "error" -> PayStep {
+                    Note(error.orEmpty(), color = K.critical)
+                    PayButton(T("Try again", "ניסיון נוסף"), false) { attempt++ }
+                }
+                "asking" -> LoadingBlock(T("Asking Rav-Pass", "שואלים את רב-פס"), labelAbove = true)
+                Payer.Setup.TERMS.name -> TermsStep()
+                Payer.Setup.DETAILS.name -> DetailsStep()
+                Payer.Setup.CARD.name -> CardStep(canSkip = true)
+                "card" -> CardStep(canSkip = false)
+                else -> Paying(model)
+            }
         }
-        missing == null -> LoadingBlock(T("Asking Rav-Pass", "שואלים את רב-פס"), labelAbove = true)
-        missing.isNotEmpty() -> when (missing.first()) {
-            Payer.Setup.TERMS -> TermsStep()
-            Payer.Setup.DETAILS -> DetailsStep()
-            Payer.Setup.CARD -> CardStep(canSkip = true)
-        }
-        Payer.addingCard -> CardStep(canSkip = false)
-        else -> Paying(model)
     }
 }
 
@@ -907,9 +971,12 @@ private fun CardStep(canSkip: Boolean) {
         notYet = true
     }
 
-    val url = page
-    if (url != null) {
-        CardPage(url, onClose = { page = null }) { end ->
+    // CreditGuard's page fades in over the step, and out again when it ends.
+    var shownPage by remember { mutableStateOf(page) }
+    page?.let { shownPage = it }
+    AnimatedContent(page != null, Modifier.fillMaxSize(), transitionSpec = { fadeIn(tween(220, delayMillis = 60)) togetherWith fadeOut(tween(150)) }, label = "cardPage") { onPage ->
+    if (onPage) {
+        CardPage(shownPage.orEmpty(), onClose = { page = null }) { end ->
             page = null
             when (end) {
                 RavPass.CardEnd.ADDED -> added()
@@ -919,10 +986,11 @@ private fun CardStep(canSkip: Boolean) {
                 RavPass.CardEnd.CANCELLED -> {}
             }
         }
-        return
-    }
-    PayStep {
-        if (askCode) {
+    } else PayStep {
+        // Adding a card and typing its code fade into each other.
+        AnimatedContent(askCode, transitionSpec = { swap() }, label = "cardCode") { asking ->
+        Column(verticalArrangement = Arrangement.spacedBy(K.gap4)) {
+        if (asking) {
             AboutCard(T("Enter the 4-digit code", "מה קוד האימות שקיבלת?")) {
                 Note(T("We have requested the credit card issuer to send an SMS with a 4 digits code to the owner of the card",
                     "לצורך אימות הפרטים ביקשנו מחברת האשראי לשלוח קוד בן 4 ספרות לבעל.ת הכרטיס"), color = K.muted)
@@ -950,21 +1018,23 @@ private fun CardStep(canSkip: Boolean) {
             }
             PayButton(T("Add a card", "הוספת כרטיס"), w.busy) { w.run { page = Payer.call { RavPass.cardPage(it) } } }
         }
+        }
+        }
         if (notYet) Note(if (Payer.cards.isEmpty())
             T("Rav-Pass doesn't list the card yet. If you finished adding it, try again in a moment.",
                 "רב-פס עוד לא מציגה את הכרטיס. אם סיימתם להוסיף אותו, נסו שוב בעוד רגע.")
             else T("Rav-Pass lists the card but can't charge it yet. Try again in a moment, or add another card.",
                 "רב-פס מציגה את הכרטיס אבל עוד לא יכולה לחייב אותו. נסו שוב בעוד רגע, או הוסיפו כרטיס אחר."),
             color = K.problem)
-        w.error?.let { Note(it, color = K.critical) }
+        Said(w.error)
         // The code can come after the page closed; and a card waiting for one can be added again for a new code.
-        Text(if (askCode) T("Add the card again", "הוספת הכרטיס מחדש") else T("Got a code from your card company? Enter it",
-            "קיבלתם קוד מחברת האשראי? הזינו אותו"), fontSize = 14.sp, color = K.accentInk,
-            modifier = Modifier.clickable(enabled = !w.busy, role = Role.Button) { w.error = null; askCode = !askCode; code = "" }
-                .padding(vertical = K.gap2))
+        ChangingText(if (askCode) T("Add the card again", "הוספת הכרטיס מחדש") else T("Got a code from your card company? Enter it",
+            "קיבלתם קוד מחברת האשראי? הזינו אותו"), Modifier.clickable(enabled = !w.busy, role = Role.Button) { w.error = null; askCode = !askCode; code = "" }
+                .padding(vertical = K.gap2)) { Text(it, fontSize = 14.sp, color = K.accentInk) }
         if (canSkip) Text(T("Skip for now", "דילוג בינתיים"), fontSize = 14.sp, color = K.muted,
             modifier = Modifier.clickable(role = Role.Button) { Payer.skipCard() }.padding(vertical = K.gap2))
         else CancelLink { Payer.addingCard = false }
+    }
     }
 }
 
@@ -992,6 +1062,10 @@ private fun CardPage(url: String, onClose: () -> Unit, onEnd: (RavPass.CardEnd) 
                     settings.javaScriptEnabled = true
                     settings.domStorageEnabled = true
                     webViewClient = object : WebViewClient() {
+                        // The rider's proxy asking for its login (RiderProxy).
+                        override fun onReceivedHttpAuthRequest(view: android.webkit.WebView, handler: android.webkit.HttpAuthHandler, host: String?, realm: String?) {
+                            if (!uk.noammm.kav.data.RiderProxy.answer(handler, host)) super.onReceivedHttpAuthRequest(view, handler, host, realm)
+                        }
                         private var finished = false
                         private fun end(u: String?): Boolean {
                             val how = u?.let(RavPass::cardEnd) ?: return false
@@ -1029,7 +1103,8 @@ internal fun PaymentsSection(model: KavModel) {
         Modifier.padding(horizontal = K.gap3).fillMaxWidth().panel(K.rCard).padding(K.gap4).animateContentSize(),
         verticalArrangement = Arrangement.spacedBy(K.gap2),
     ) {
-        Text(a?.name?.ifBlank { null } ?: T("Your Rav-Pass account", "חשבון רב-פס שלכם"), style = K.type.body)
+        // The holder's name fades in over the placeholder once the account answers.
+        ChangingText(a?.name?.ifBlank { null } ?: T("Your Rav-Pass account", "חשבון רב-פס שלכם")) { Text(it, style = K.type.body) }
         a?.phone?.takeIf { it.isNotBlank() }?.let { LtrText(it, 14.sp, K.dim) }
         if (card != null) LtrText(listOf(card.brand, "•••• ${card.last4}").filter { it.isNotBlank() }.joinToString(" "), 14.sp, K.dim)
         else if (a != null) Text(T("No card on the account yet", "עוד אין כרטיס בחשבון"), style = K.type.subhead, color = K.problem)
@@ -1041,8 +1116,10 @@ internal fun PaymentsSection(model: KavModel) {
         Row(horizontalArrangement = Arrangement.spacedBy(K.gap4)) {
             Text(T("Payment history", "היסטוריית תשלומים"), fontSize = 14.sp, color = K.accentInk,
                 modifier = Modifier.clickable(role = Role.Button) { model.payHistoryOpen = true }.padding(vertical = K.gap1))
-            Text(if (card == null) T("Add a card", "הוספת כרטיס") else T("Change card", "החלפת כרטיס"), fontSize = 14.sp, color = K.accentInk,
-                modifier = Modifier.clickable(role = Role.Button) { Payer.addingCard = true; model.payOpen = true }.padding(vertical = K.gap1))
+            ChangingText(if (card == null) T("Add a card", "הוספת כרטיס") else T("Change card", "החלפת כרטיס"),
+                Modifier.clickable(role = Role.Button) { Payer.addingCard = true; model.payOpen = true }.padding(vertical = K.gap1)) {
+                Text(it, fontSize = 14.sp, color = K.accentInk)
+            }
             Text(T("Sign out", "התנתקות"), fontSize = 14.sp, color = K.muted,
                 modifier = Modifier.clickable(enabled = !Payer.purchasing && !Payer.payingLater, role = Role.Button) { leaving = true }
                     .padding(vertical = K.gap1))
@@ -1060,6 +1137,7 @@ internal fun PaymentsSection(model: KavModel) {
 private enum class PayStage { HOME, BUS, STATION, EXIT, RIDE }
 
 @Composable
+@android.annotation.SuppressLint("ProduceStateDoesNotAssignValue")
 private fun Paying(model: KavModel) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -1079,6 +1157,13 @@ private fun Paying(model: KavModel) {
     var fixedEnd by remember { mutableStateOf(false) }
     var guests by remember { mutableIntStateOf(0) }
     var guestsBlocked by remember { mutableStateOf(false) }
+    // The account's own passengers in Rav-Pass (a child, say), and those picked to ride along. HopOn's app offers them
+    // only when its settings let others ride along as occasional passengers.
+    val offersLinked = Payer.settings?.occasional == true
+    val linked by produceState(emptyList<RavPass.Linked>(), offersLinked) {
+        value = if (!offersLinked) emptyList() else runCatching { Payer.call { RavPass.linked(it) } }.getOrDefault(emptyList())
+    }
+    var related by remember { mutableStateOf(emptyList<String>()) }
     var quote by remember { mutableStateOf<RavPass.Quote?>(null) }
     var priceError by remember { mutableStateOf<String?>(null) }
     // HopOn's suggested rides when the code alone doesn't place the rider on a line, then the company's lines around
@@ -1092,6 +1177,9 @@ private fun Paying(model: KavModel) {
     // The fare's reach: 15 km unless the rider picks more. Kav turns it into the stop
     // HopOn prices the ride to.
     var band by remember { mutableIntStateOf(15) }
+    // The stop the ride ends at, picked by the rider or, paid from a trip's card, where that ride gets off (GitHub #72):
+    // the fare that reaches it is the one picked (bandTo). Null: where the fare picked reaches.
+    var getOff by remember { mutableStateOf<String?>(null) }
     // Paying at a station: the mode, the station HopOn placed the rider at, and the list to choose it from when HopOn
     // asks.
     var stationMode by remember { mutableStateOf<StationMode?>(null) }
@@ -1116,6 +1204,7 @@ private fun Paying(model: KavModel) {
         val journey = tripKey
         tripLeg = null
         tripKey = null
+        getOff = null
         model.activeJourney?.takeIf { it.paymentKey == journey }
             ?.let { model.activeJourney = it.copy(paid = it.paid + (leg to key)) }
         if (journey != null) TripTickets.bought["$journey/$leg"] = key
@@ -1149,7 +1238,7 @@ private fun Paying(model: KavModel) {
     }
 
     fun clearRide() {
-        runs = null; runIndex = 0; to = null; fixedEnd = false; guests = 0; guestsBlocked = false; quote = null; priceError = null
+        runs = null; runIndex = 0; to = null; fixedEnd = false; guests = 0; related = emptyList(); guestsBlocked = false; quote = null; priceError = null
         suggestions = null; lines = null; lineQuery = ""; found = null; again = null; band = 15
     }
 
@@ -1300,11 +1389,13 @@ private fun Paying(model: KavModel) {
     fun clearBus() {
         fetching?.cancel(); fetching = null
         bus = null; clearRide()
+        // A stop picked for one bus isn't another's; a trip's own stays for its ride.
+        if (tripLeg == null) getOff = null
     }
 
     fun clearStation() {
         fetching?.cancel(); fetching = null
-        stationMode = null; station = null; choosing = false; quote = null; guests = 0; guestsBlocked = false
+        stationMode = null; station = null; choosing = false; quote = null; guests = 0; related = emptyList(); guestsBlocked = false
         exiting = null; exitStation = null; confirmExit = false
     }
 
@@ -1324,18 +1415,19 @@ private fun Paying(model: KavModel) {
     fun startStation(m: StationMode, at: Pair<Double, Double>? = null) {
         if (busy) return
         clearBus(); clearStation()
-        stationMode = m; guests = 0
+        stationMode = m; guests = 0; related = emptyList()
         stationAtPosition(m, at)
     }
 
     // The exit station the same way: HopOn finds it from the phone's fix, else it's chosen from the list.
     fun exitAtPosition(picked: Pair<Double, Double>?) = look {
         choosing = false; exitStation = null; quote = null
-        if (picked != null) { exitStation = Payer.call { RavPass.checkout(it, RavPass.spot(picked)) }; return@look }
+        val with = exiting?.let { Payer.relatedFor(it.id) }.orEmpty()
+        if (picked != null) { exitStation = Payer.call { RavPass.checkout(it, RavPass.spot(picked), with) }; return@look }
         val fix = PayFix.now(ctx)
         if (fix == null) { choosing = true; return@look }
         lastFix = fix.lat to fix.lon
-        try { exitStation = Payer.call { RavPass.checkout(it, fix) } }
+        try { exitStation = Payer.call { RavPass.checkout(it, fix, with) } }
         catch (e: RavPass.Refused) { if (e.code == RavPass.NO_STATION || e.code == RavPass.CHOOSE_STATION) choosing = true else throw e }
     }
 
@@ -1365,7 +1457,7 @@ private fun Paying(model: KavModel) {
         val e = exitStation ?: return@LaunchedEffect
         val t = exiting ?: return@LaunchedEffect
         quote = null
-        quote = runCatching { Payer.call { RavPass.exitQuote(it, e, t) } }.getOrNull()
+        quote = runCatching { Payer.call { RavPass.exitQuote(it, e, t, Payer.relatedFor(t.id)) } }.getOrNull()
     }
 
     // Before a new ride, as HopOn's app does: a train entrance still open is ended first.
@@ -1380,14 +1472,14 @@ private fun Paying(model: KavModel) {
         val ride = exiting?.id?.toString()
         scanFailed = false; clearBus(); clearStation()
         shownKey = ride
-        if (ride == null && returnOnClose) { tripLeg = null; leave() }
+        if (ride == null && returnOnClose) { tripLeg = null; getOff = null; leave() }
     }
 
     // A trip card's pay row: straight to that ride's way of paying, and the ticket goes back to that ride's card.
     LaunchedEffect(model.payFor) {
         val p = model.payFor ?: return@LaunchedEffect
         model.payFor = null
-        tripLeg = p.leg; tripKey = p.journey; returnOnClose = true
+        tripLeg = p.leg; tripKey = p.journey; getOff = p.getOff; returnOnClose = true
         beforeNew { val m = p.station; if (m == null) scan() else startStation(m, p.at) }
     }
 
@@ -1399,20 +1491,20 @@ private fun Paying(model: KavModel) {
     }
 
     // HopOn's price for the ride and the others riding along, which its app has before it offers to pay.
-    LaunchedEffect(bus, to, guests) {
+    LaunchedEffect(bus, to, guests, related) {
         val b = bus ?: return@LaunchedEffect
         quote = null; priceError = null
         val end = to ?: return@LaunchedEffect
         if (b.from == null || b.routeId == null) return@LaunchedEffect
-        try { quote = Payer.call { RavPass.quote(it, b, end, guests) } }
+        try { quote = Payer.call { RavPass.quote(it, b, end, guests, related) } }
         catch (e: CancellationException) { throw e } catch (e: Exception) { priceError = failure(e) }
     }
     // And at a station, for the rider and the others riding along.
-    LaunchedEffect(station, guests) {
+    LaunchedEffect(station, guests, related) {
         val st = station ?: return@LaunchedEffect
         val m = stationMode ?: return@LaunchedEffect
         quote = null
-        quote = runCatching { Payer.call { RavPass.stationQuote(it, m.kind, st, null, guests) } }.getOrNull()
+        quote = runCatching { Payer.call { RavPass.stationQuote(it, m.kind, st, null, guests, related) } }.getOrNull()
     }
     // With every price, HopOn's app checks the account's payment methods and takes the others riding along off when one
     // of them blocks them: on a bus with the ride's price, at a light rail or Carmelit station with 1.
@@ -1421,7 +1513,8 @@ private fun Paying(model: KavModel) {
         val b = bus
         val st = station?.takeIf { stationMode?.kind == RavPass.Kind.OTHER && exiting == null }
         val qr = b?.qr ?: st?.qr ?: return@LaunchedEffect
-        val allowed = runCatching { Payer.call { RavPass.guestsAllowed(it, qr, if (b != null) q.total else null) } }.getOrDefault(true)
+        val allowed = runCatching { Payer.call { RavPass.guestsAllowed(it, qr, if (b != null) q.total else null, q, related) } }
+            .getOrDefault(true)
         guestsBlocked = !allowed
         if (!allowed && guests > 0) guests = 0
     }
@@ -1433,12 +1526,13 @@ private fun Paying(model: KavModel) {
         val end = to ?: return
         if (quote?.total == null) return
         val count = guests
+        val with = related
         run {
             var asOccasional = false
             val t = Payer.purchase(b.qr, prepare = {
                 asOccasional = Payer.occasional()
-                if (count > 0) Payer.call { RavPass.quote(it, b, end, count) }
-            }) { Payer.call { RavPass.buy(it, b.qr, count, asOccasional) } }
+                if (count > 0 || with.isNotEmpty()) Payer.call { RavPass.quote(it, b, end, count, with) }
+            }) { Payer.call { RavPass.buy(it, b.qr, count, asOccasional, with) } }
             Payer.paidBus(b.agencyId)
             val key = t.id.toString()
             shownKey = key
@@ -1451,12 +1545,14 @@ private fun Paying(model: KavModel) {
         val st = station ?: return
         val m = stationMode ?: return
         val count = if (m.kind == RavPass.Kind.OTHER) guests else 0
+        val with = related
         run {
             val t = Payer.purchase(st.qr, prepare = {
                 // HopOn's app prices the train ride, and other rides with others along, right before paying.
-                if (m.kind == RavPass.Kind.TRAIN || count > 0)
-                    Payer.call { RavPass.stationQuote(it, m.kind, st, null, count) }
-            }) { Payer.call { RavPass.enter(it, m.kind, st, count) } }
+                if (m.kind == RavPass.Kind.TRAIN || count > 0 || with.isNotEmpty())
+                    Payer.call { RavPass.stationQuote(it, m.kind, st, null, count, with) }
+            }) { Payer.call { RavPass.enter(it, m.kind, st, count, with) } }
+            Payer.keepRelated(t.id, with)
             val key = t.id.toString()
             shownKey = key
             forTrip(key)
@@ -1478,8 +1574,11 @@ private fun Paying(model: KavModel) {
     androidx.activity.compose.BackHandler(enabled = stage == PayStage.BUS || stage == PayStage.STATION || stage == PayStage.EXIT) { backOut() }
 
     Column(Modifier.fillMaxSize()) {
+        // Kept while it closes, and a new error fades over the old.
+        var keptError by remember { mutableStateOf(error) }
+        error?.let { keptError = it }
         androidx.compose.animation.AnimatedVisibility(error != null && stage != PayStage.RIDE) {
-            error?.let { Note(it, Modifier.padding(horizontal = K.gap4).padding(bottom = K.gap3), color = K.critical) }
+            ChangingText(keptError.orEmpty()) { Note(it, Modifier.padding(horizontal = K.gap4).padding(bottom = K.gap3), color = K.critical) }
         }
         androidx.compose.animation.AnimatedContent(
             targetState = stage,
@@ -1532,8 +1631,20 @@ private fun Paying(model: KavModel) {
                             if ((runs?.size ?: 0) > 1) Text(T("Other direction", "לכיוון השני"), fontSize = 14.sp, color = K.accentInk,
                                 modifier = Modifier.clickable(role = Role.Button) { switchRun() }.padding(vertical = K.gap1))
                             val choices = if (fixedEnd || run == null) emptyList() else b.from?.let { bandsFor(b.bands, run.stops, it.code) }.orEmpty()
-                            if (choices.isNotEmpty()) BandDropdown(choices, band) { band = it }
+                            val from = b.from?.code
+                            // The stops past the boarding one, to say where the ride ends instead of how far.
+                            val onwards = if (choices.isEmpty() || run == null || from == null) emptyList()
+                                else run.stops.firstOrNull { it.code == from }?.let { start -> ahead(run.stops, start).filter { it.code != from } }.orEmpty()
+                            val ends = onwards.firstOrNull { it.code == getOff }
+                                ?: if (from != null && run != null) reach(run.stops, from, band) else null
+                            val planned = getOff?.let { off -> from?.let { bandTo(choices, run?.stops.orEmpty(), it, off) } }
+                            LaunchedEffect(planned) { if (planned != null) band = planned }
+                            if (choices.isNotEmpty()) {
+                                StopDropdown(T("Getting off at", "תחנת ירידה"), onwards, ends) { getOff = it.code }
+                                BandDropdown(choices, band) { band = it; getOff = null }
+                            }
                             Passengers(guests, if (guestsBlocked) 0 else Payer.settings?.guestsMax ?: 10) { guests = it }
+                            LinkedPassengers(linked, related) { related = it }
                             FareNotes(quote)
                         }) {
                             PriceLine(quote, to != null, priceError)
@@ -1549,8 +1660,8 @@ private fun Paying(model: KavModel) {
                                 if (quote?.total == null) return@AddButton
                                 // Kept during a trip, it's that trip's ride, and ends with it.
                                 Payer.hold(Payer.Pending(b.line, b.qr, route, b.officeLineId, from.code, end.code, guests, tripLeg,
-                                    tripKey ?: model.activeJourney?.paymentKey))
-                                clearBus(); tripLeg = null
+                                    tripKey ?: model.activeJourney?.paymentKey, related))
+                                clearBus(); tripLeg = null; getOff = null
                                 leave()
                             }
                             CancelLink { backOut() }
@@ -1573,6 +1684,7 @@ private fun Paying(model: KavModel) {
                             Text(T("Not this station? Choose it", "לא התחנה הזו? בחרו אותה"), fontSize = 14.sp, color = K.accentInk,
                                 modifier = Modifier.clickable(role = Role.Button) { choosing = true }.padding(vertical = K.gap1))
                             if (m.kind == RavPass.Kind.OTHER) Passengers(guests, if (guestsBlocked) 0 else Payer.settings?.guestsMax ?: 10) { guests = it }
+                            LinkedPassengers(linked, related) { related = it }
                             FareNotes(quote)
                         }) {
                             StationPrice(m, st, quote)
@@ -1651,11 +1763,20 @@ private fun Paying(model: KavModel) {
                             StationMode.entries.forEach { m -> KavButton(m.label, { beforeNew { startStation(m) } }, style = ButtonStyle.Secondary) }
                         }
                     }
-                    if (!located) Column(verticalArrangement = Arrangement.spacedBy(K.gap2)) {
-                        NoteCard(T("Kav needs your location to pay. HopOn gets it only at the moment you scan or pay, as in its own app.",
-                            "Kav צריכה את המיקום שלכם כדי לשלם. הופ-און מקבלת אותו רק ברגע הסריקה או התשלום, כמו באפליקציה שלה."),
-                            color = K.problem)
-                        AddButton(T("Allow location", "אישור גישה למיקום")) { askLocation.launch(LOCATION_PERMISSIONS) }
+                    // Folds away once location is allowed.
+                    androidx.compose.animation.AnimatedVisibility(
+                        !located,
+                        enter = androidx.compose.animation.expandVertically(spring(dampingRatio = 1f, stiffness = 500f)) +
+                            androidx.compose.animation.fadeIn(tween(200, delayMillis = 60)),
+                        exit = androidx.compose.animation.shrinkVertically(spring(dampingRatio = 1f, stiffness = 500f)) +
+                            androidx.compose.animation.fadeOut(tween(120)),
+                    ) {
+                        Column(verticalArrangement = Arrangement.spacedBy(K.gap2)) {
+                            NoteCard(T("Kav needs your location to pay. HopOn gets it only at the moment you scan or pay, as in its own app.",
+                                "Kav צריכה את המיקום שלכם כדי לשלם. הופ-און מקבלת אותו רק ברגע הסריקה או התשלום, כמו באפליקציה שלה."),
+                                color = K.problem)
+                            AddButton(T("Allow location", "אישור גישה למיקום")) { askLocation.launch(LOCATION_PERMISSIONS) }
+                        }
                     }
                 }
             }
@@ -1702,7 +1823,9 @@ private fun Paying(model: KavModel) {
         val t = exiting
         val e = exitStation
         if (t != null && e != null) run {
-            val out = Payer.purchase(e.qr, prepare = { Payer.call { RavPass.exitQuote(it, e, t) } }) { Payer.call { RavPass.exit(it, e, t.id) } }
+            val with = Payer.relatedFor(t.id)
+            val out = Payer.purchase(e.qr, prepare = { Payer.call { RavPass.exitQuote(it, e, t, with) } }) { Payer.call { RavPass.exit(it, e, t.id, with) } }
+            Payer.forgetRelated(t.id)
             shownKey = out.id.toString()
             clearStation()
         }
@@ -1817,7 +1940,7 @@ private fun BandDropdown(bands: List<RavPass.Band>, chosen: Int, onChoose: (Int)
         ) {
             Column(Modifier.weight(1f)) {
                 Text(T("Fare", "תעריף"), fontSize = 12.sp, color = K.dim)
-                Text(T("Up to ${current.km} km", "עד ${current.km} ק\"מ"), style = K.type.body)
+                ChangingText(T("Up to ${current.km} km", "עד ${current.km} ק\"מ")) { Text(it, style = K.type.body) }
             }
             LtrText(current.price.text, 16.sp, K.text, FontWeight.Medium)
             Canvas(Modifier.size(14.dp).graphicsLayer { rotationZ = turn }) {
@@ -1881,8 +2004,9 @@ private fun StopDropdown(label: String, stops: List<RavPass.Stop>, chosen: RavPa
         ) {
             Column(Modifier.weight(1f)) {
                 Text(label, fontSize = 12.sp, color = K.dim)
-                Text(chosen?.name ?: T("Choose your stop", "בחרו את התחנה שלכם"), style = K.type.body,
-                    color = if (chosen == null) K.accentInk else K.text)
+                ChangingText(chosen?.name ?: T("Choose your stop", "בחרו את התחנה שלכם")) {
+                    Text(it, style = K.type.body, color = if (chosen == null) K.accentInk else K.text)
+                }
             }
             Canvas(Modifier.size(14.dp).graphicsLayer { rotationZ = turn }) {
                 val w = size.width
@@ -1916,8 +2040,45 @@ private fun Passengers(guests: Int, max: Int, onChange: (Int) -> Unit) {
             androidx.compose.animation.AnimatedContent(guests + 1, label = "passengers") { Text("$it", fontSize = 16.sp, color = K.text) }
             if (max > 0) KavIconButton(Icons.Rounded.Add, T("One more", "אחד יותר"), { if (guests < max) onChange(guests + 1) }, size = 40.dp)
         }
-        if (guests > 0) NoteCard(T("Occasional passengers pay full price, according to the Ministry of Transportation",
-            "נוסעים מזדמנים משלמים מחיר מלא, בהתאם להנחיית משרד התחבורה"))
+        // Comes with the first passenger added and goes with the last taken off, easing in and out as Settings' notes do.
+        androidx.compose.animation.AnimatedVisibility(
+            guests > 0,
+            enter = androidx.compose.animation.expandVertically(spring(dampingRatio = 1f, stiffness = 500f)) +
+                androidx.compose.animation.fadeIn(tween(200, delayMillis = 60)),
+            exit = androidx.compose.animation.shrinkVertically(spring(dampingRatio = 1f, stiffness = 500f)) +
+                androidx.compose.animation.fadeOut(tween(120)),
+        ) {
+            NoteCard(T("Occasional passengers pay full price, according to the Ministry of Transportation",
+                "נוסעים מזדמנים משלמים מחיר מלא, בהתאם להנחיית משרד התחבורה"))
+        }
+    }
+}
+
+// The account's own passengers in Rav-Pass, each paid for along with the rider at their own fare when picked, as
+// HopOn's app lists them. One in debt or blacklisted shows greyed out and can't be picked.
+@Composable
+private fun LinkedPassengers(linked: List<RavPass.Linked>, picked: List<String>, onChange: (List<String>) -> Unit) {
+    if (linked.isEmpty()) return
+    Column(Modifier.fillMaxWidth().panel(K.rCard).padding(vertical = K.gap1)) {
+        Text(T("Your passengers", "הנוסעים שלכם"), style = K.type.subhead, color = K.textSecondary,
+            modifier = Modifier.padding(horizontal = K.gap4, vertical = K.gap2))
+        linked.forEach { p ->
+            val on = p.id in picked
+            Row(
+                Modifier.fillMaxWidth()
+                    .clickable(enabled = !p.blocked, role = Role.Checkbox) { onChange(if (on) picked - p.id else picked + p.id) }
+                    .padding(horizontal = K.gap4, vertical = K.gap2),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(K.gap3),
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text(p.name, style = K.type.body, color = if (p.blocked) K.textTertiary else K.text)
+                    val note = if (p.blocked) T("In debt", "בחוב") else p.profiles
+                    if (note.isNotBlank()) Text(note, style = K.type.caption, color = K.textSecondary)
+                }
+                androidx.compose.material3.Checkbox(on, null, enabled = !p.blocked)
+            }
+        }
     }
 }
 
@@ -1929,10 +2090,15 @@ private fun PriceLine(q: RavPass.Quote?, chosen: Boolean, failed: String? = null
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(K.gap1)) {
         if (failed != null && q == null) Note(failed, color = K.critical)
         else Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(K.gap2)) {
-            Text(q?.km?.let { T("Up to $it km ride price", "מחיר לנסיעה עד $it ק\"מ") }
+            // What the price is for rolls as it's worked out, and the price fades in beside it.
+            LiveText(q?.km?.let { T("Up to $it km ride price", "מחיר לנסיעה עד $it ק\"מ") }
                 ?: if (chosen) T("Pricing…", "מחשבים מחיר…") else T("Choose your stop to see the price", "בחרו תחנה כדי לראות את המחיר"),
                 style = K.type.body, color = K.muted, modifier = Modifier.weight(1f))
-            q?.total?.let { LtrText(it.text, 22.sp, K.text, FontWeight.Medium) }
+            var price by remember { mutableStateOf(q?.total?.text) }
+            q?.total?.let { price = it.text }
+            androidx.compose.animation.AnimatedVisibility(q?.total != null, enter = fadeIn(tween(220, delayMillis = 60)), exit = fadeOut(tween(150))) {
+                ChangingText(price.orEmpty()) { LtrText(it, 22.sp, K.text, FontWeight.Medium) }
+            }
         }
         Payer.settings?.pricesUrl?.let { url ->
             Text(T("How is the price calculated?", "כיצד המחיר מחושב?"), style = K.type.subhead, color = K.accentInk,
@@ -2008,6 +2174,7 @@ internal fun LtrText(
 
 // The time, every second, while its screen shows: a tab behind another, or Kav away, doesn't tick.
 @Composable
+@android.annotation.SuppressLint("ProduceStateDoesNotAssignValue")
 internal fun rememberNow(): Long {
     val lifecycle = androidx.lifecycle.compose.LocalLifecycleOwner.current.lifecycle
     return produceState(System.currentTimeMillis(), lifecycle) {
@@ -2027,6 +2194,8 @@ private fun TransferLine(until: Long) {
 @Composable
 private fun TicketRow(t: RavPass.Ticket, now: Long, inset: Dp = K.gap4, onClick: () -> Unit) {
     val valid = t.valid(now)
+    // A ticket that runs out while it's shown eases to grey, and its status rolls.
+    val name by animateColorAsState(if (valid) K.text else K.dim, tween(300), label = "ticketName")
     Row(
         Modifier.fillMaxWidth().heightIn(min = 60.dp).clickable(role = Role.Button, onClick = onClick)
             .padding(horizontal = inset, vertical = K.gap3),
@@ -2036,10 +2205,10 @@ private fun TicketRow(t: RavPass.Ticket, now: Long, inset: Dp = K.gap4, onClick:
         Canvas(Modifier.size(20.dp)) { drawQr() }
         Column(Modifier.weight(1f)) {
             Text(ticketName(t) + if (t.guests > 0) "  ×${t.guests + 1}" else "", style = K.type.body,
-                color = if (valid) K.text else K.dim, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                color = name, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Text(T("Bought ", "נקנה ב-") + clockOf(t.boughtUtc), style = K.type.subhead)
         }
-        Text(ticketStatus(t, now), style = K.type.subhead, color = if (valid) good else K.dim, maxLines = 1)
+        LiveText(ticketStatus(t, now), style = K.type.subhead, color = if (valid) good else K.dim, maxLines = 1)
     }
 }
 
@@ -2116,18 +2285,20 @@ internal fun PendingFloat(model: KavModel, modifier: Modifier = Modifier) {
                         Text(it, style = K.type.caption, color = K.critical,
                             maxLines = 4, overflow = TextOverflow.Ellipsis)
                     }
+                    // Paying, it eases to grey and its words fade to Paying, and back.
+                    val quickFill by animateColorAsState(if (Payer.payingLater) K.surface4 else K.accent, tween(200), label = "quickFill")
+                    val quickInk by animateColorAsState(if (Payer.payingLater) K.muted else K.onAccent, tween(200), label = "quickInk")
                     Box(
                         Modifier.fillMaxWidth().heightIn(min = 36.dp).clip(K.capsule)
-                            .background(if (Payer.payingLater) K.surface4 else K.accent)
+                            .background(quickFill)
                             .clickable(enabled = !Payer.payingLater, role = Role.Button) {
                                 Payer.payLater(ctx, { key, leg, journey -> TripService.notePaid(ctx, key, leg, journey) })
                             },
                         contentAlignment = Alignment.Center,
                     ) {
-                        Text(if (Payer.payingLater) T("Paying…", "משלמים…")
-                            else T("QUICK PAY", "תשלום מהיר!"),
-                            style = K.type.subhead, color = if (Payer.payingLater) K.muted else K.onAccent, fontWeight = FontWeight.Medium,
-                            maxLines = 1)
+                        ChangingText(if (Payer.payingLater) T("Paying…", "משלמים…") else T("QUICK PAY", "תשלום מהיר!")) {
+                            Text(it, style = K.type.subhead, color = quickInk, fontWeight = FontWeight.Medium, maxLines = 1)
+                        }
                     }
                 }
                 Box(
@@ -2154,7 +2325,7 @@ internal fun PendingFloat(model: KavModel, modifier: Modifier = Modifier) {
 
 // What a trip card's pay row asks Pay for: its leg, so the ticket goes back to that ride's card; the station mode (none
 // for a bus, paid by its code); and the trip's own boarding station, sent by its own position.
-internal class PayFor(val leg: Int, val station: StationMode?, val at: Pair<Double, Double>?, val journey: String?)
+internal class PayFor(val leg: Int, val station: StationMode?, val at: Pair<Double, Double>?, val journey: String?, val getOff: String? = null)
 
 // The key a trip's tickets go by, the same before and after it starts.
 internal val Transit.Itinerary.paymentKey get() = "$guid:$dep"
@@ -2195,7 +2366,7 @@ internal fun TripPay(model: KavModel, legIndex: Int, ride: Transit.Leg, r: Trans
         if (bought == null || (!bought.valid(now) && !bought.needsExit)) Row(
             Modifier.fillMaxWidth()
                 .clickable(role = Role.Button) {
-                    model.payFor = PayFor(legIndex, station, if (station != null) board?.point else null, journey)
+                    model.payFor = PayFor(legIndex, station, if (station != null) board?.point else null, journey, r.stop(ride.toStop)?.code)
                     model.payOpen = true
                 }
                 // The title's font keeps room above its capitals, so half a dp less on top centres the text you see.
@@ -2247,6 +2418,7 @@ private fun stationsOf(net: Net, m: StationMode, near: Pair<Double, Double>?): L
 
 // Choosing the station by hand. Its own position goes to HopOn, which names it back.
 @Composable
+@android.annotation.SuppressLint("ProduceStateDoesNotAssignValue")
 private fun StationList(m: StationMode, near: Pair<Double, Double>?, onPick: (Pair<Double, Double>) -> Unit) {
     val ctx = LocalContext.current
     var query by remember { mutableStateOf("") }
@@ -2257,10 +2429,11 @@ private fun StationList(m: StationMode, near: Pair<Double, Double>?, onPick: (Pa
     KavField(query, { query = it }, T("Search stations", "חיפוש תחנות"))
     val shown = all?.filter { query.isBlank() || it.name.contains(query.trim(), ignoreCase = true) }
     if (shown == null) Note(T("Loading…", "טוען…"))
-    else Column(Modifier.fillMaxWidth().panel(K.rCard)) {
-        shown.forEach { s ->
+    // As the search is typed the stations that stay glide to their places and the card eases to its new height.
+    else Column(Modifier.fillMaxWidth().panel(K.rCard).animateContentSize(spring(dampingRatio = 1f, stiffness = 500f))) {
+        shown.forEach { s -> key(s.name, s.lat, s.lon) {
             Row(
-                Modifier.fillMaxWidth().clickable(role = Role.Button) { onPick(s.lat to s.lon) }
+                Modifier.glide().fillMaxWidth().clickable(role = Role.Button) { onPick(s.lat to s.lon) }
                     .padding(horizontal = K.gap4, vertical = K.gap3),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(K.gap3),
@@ -2268,7 +2441,7 @@ private fun StationList(m: StationMode, near: Pair<Double, Double>?, onPick: (Pa
                 Text(s.name, style = K.type.body, modifier = Modifier.weight(1f))
                 s.metres?.let { LtrText(distanceLabel(it), 14.sp, K.dim) }
             }
-        }
+        } }
     }
 }
 
@@ -2281,15 +2454,18 @@ private fun LinePicks(
     Text(T("Which line are you on?", "באיזה קו אתם?"), style = K.type.headline)
     KavField(query, onQuery, T("Line number", "מספר קו"), keyboard = KeyboardType.Number)
     val shown = if (query.isBlank()) around else found
-    when {
-        shown == null -> Note(T("Searching…", "מחפשים…"))
-        shown.isEmpty() && query.isBlank() -> NoteCard(T("HopOn has no lines around you right now. Search for yours by its number.",
+    // Searching, nothing found and the lines fade into each other.
+    val kind = when { shown == null -> 0; shown.isEmpty() && query.isBlank() -> 1; shown.isEmpty() -> 2; else -> 3 }
+    androidx.compose.animation.Crossfade(kind, animationSpec = tween(200), label = "linePicks") { k ->
+    when (k) {
+        0 -> Note(T("Searching…", "מחפשים…"))
+        1 -> NoteCard(T("HopOn has no lines around you right now. Search for yours by its number.",
             "להופ-און אין עכשיו קווים סביבכם. חפשו את הקו שלכם לפי המספר."))
-        shown.isEmpty() -> NoteCard(T("HopOn has no line by that number.", "להופ-און אין קו במספר הזה."))
-        else -> Column(Modifier.fillMaxWidth().panel(K.rCard)) {
-            shown.forEach { n ->
+        2 -> NoteCard(T("HopOn has no line by that number.", "להופ-און אין קו במספר הזה."))
+        else -> Column(Modifier.fillMaxWidth().panel(K.rCard).animateContentSize(spring(dampingRatio = 1f, stiffness = 500f))) {
+            shown.orEmpty().forEach { n -> key(n.line, n.from, n.to) {
                 Row(
-                    Modifier.fillMaxWidth().clickable(role = Role.Button) { onPick(n) }.padding(horizontal = K.gap4, vertical = K.gap3),
+                    Modifier.glide().fillMaxWidth().clickable(role = Role.Button) { onPick(n) }.padding(horizontal = K.gap4, vertical = K.gap3),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(K.gap3),
                 ) {
@@ -2299,8 +2475,9 @@ private fun LinePicks(
                         if (n.to.isNotBlank()) Text("→ " + n.to, style = K.type.subhead, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     }
                 }
-            }
+            } }
         }
+    }
     }
 }
 
@@ -2339,6 +2516,20 @@ internal fun reach(
     val beyond = stops.indexOfFirst { dist(start, it) >= km * 1000.0 }
     if (beyond < 0) return run.lastOrNull()
     return stops.take(beyond).lastOrNull { it.code != start.code } ?: stops[beyond]
+}
+
+// The fare a trip's ride needs to get off where it was planned to (GitHub #72): the first of the fares offered whose ride
+// reaches that stop by HopOn's rule (reach). Null when the stop isn't on the run ahead, and the rider picks as before.
+internal fun bandTo(
+    choices: List<RavPass.Band>, run: List<RavPass.Stop>, from: String, getOff: String,
+    dist: (RavPass.Stop, RavPass.Stop) -> Double = ::crow,
+): Int? {
+    val start = run.firstOrNull { it.code == from } ?: return null
+    val stops = ahead(run, start)
+    val at = stops.indexOfFirst { it.code == getOff }.takeIf { it > 0 } ?: return null
+    // Beyond every fare offered: the farthest of them, the most HopOn sells from this stop.
+    return choices.firstOrNull { band -> reach(run, from, band.km, dist)?.let { stops.indexOf(it) >= at } == true }?.km
+        ?: choices.lastOrNull()?.km
 }
 
 // A ticket for the inspector, as HopOn's app shows it: each passenger's code, one a page, with its reference under it,
@@ -2388,7 +2579,7 @@ private fun TicketView(t: RavPass.Ticket, onExit: () -> Unit, onAgain: () -> Uni
                 Text(T("This ticket is no longer valid", "הכרטיס הזה כבר לא בתוקף"), fontSize = 16.sp, color = K.dim)
             }
         }
-        if (t.codes.size > 1) LtrText("${pager.currentPage + 1} / ${t.codes.size}", 14.sp, K.muted)
+        if (t.codes.size > 1) RollingText("${pager.currentPage + 1} / ${t.codes.size}", style = androidx.compose.ui.text.TextStyle(fontSize = 14.sp, color = K.muted, textDirection = androidx.compose.ui.text.style.TextDirection.Ltr))
         if (t.utn.isNotBlank()) LtrText(t.utn, 14.sp, K.muted)
         Text(ticketName(t), style = K.type.title, textAlign = TextAlign.Center)
         Text(ticketStatus(t, now), fontSize = 16.sp, color = if (valid) good else K.dim, fontWeight = FontWeight.Medium)
@@ -2433,4 +2624,21 @@ internal object Seal {
         val c = Cipher.getInstance("AES/GCM/NoPadding").apply { init(Cipher.DECRYPT_MODE, key(), GCMParameterSpec(128, b, 0, 12)) }
         String(c.doFinal(b, 12, b.size - 12), Charsets.UTF_8)
     }.getOrNull()
+}
+
+// One state of a Pay page fading into the next while the space it takes eases.
+private fun <S> androidx.compose.animation.AnimatedContentTransitionScope<S>.swap() =
+    (fadeIn(tween(220, delayMillis = 60)) togetherWith fadeOut(tween(150)))
+        .using(SizeTransform(clip = false) { _, _ -> spring(dampingRatio = 1f, stiffness = 500f) })
+
+// An error under a step: it opens when it comes and closes when it's gone, kept while it closes; a new one fades in.
+@Composable
+private fun Said(error: String?) {
+    var kept by remember { mutableStateOf(error) }
+    if (error != null) kept = error
+    AnimatedVisibility(
+        error != null,
+        enter = fadeIn(tween(220, delayMillis = 60)) + expandVertically(spring(dampingRatio = 1f, stiffness = 500f), expandFrom = Alignment.Top),
+        exit = fadeOut(tween(150)) + shrinkVertically(spring(dampingRatio = 1f, stiffness = 500f), shrinkTowards = Alignment.Top),
+    ) { ChangingText(kept.orEmpty()) { Note(it, color = K.critical) } }
 }

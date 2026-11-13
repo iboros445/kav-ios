@@ -9,12 +9,18 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.animation.core.VisibilityThreshold
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextStyle
@@ -29,6 +35,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import uk.noammm.kav.data.KavLive
 import uk.noammm.kav.data.Transit
@@ -55,7 +62,7 @@ fun StationsScreen(model: KavModel) {
 @Composable
 private fun StationsBody(model: KavModel, net: Net) {
     androidx.activity.compose.BackHandler(model.stationStop >= 0) { model.backFromStation() }
-    val list = remember(net) { StationListState() }
+    val list = remember(net) { stationListFor(net) }
     androidx.compose.animation.AnimatedContent(
         targetState = model.stationStop,
         modifier = Modifier.fillMaxSize(),
@@ -71,7 +78,25 @@ private fun StationsBody(model: KavModel, net: Net) {
 private class StationListState {
     val scroll = LazyListState()
     var hits by mutableStateOf(emptyList<Int>())
+    // The words the hits were found for.
+    var hitsFor by mutableStateOf("")
     var near by mutableStateOf(emptyList<Pair<Int, Double>>())
+    // Where near was found for.
+    var nearFor by mutableStateOf<Pair<Double, Double>?>(null)
+}
+
+// Kept with its timetable, and Nearby found as soon as the timetable loads, so the list is there the moment Stops opens.
+private var keptStations: Pair<Net, StationListState>? = null
+
+private fun stationListFor(net: Net): StationListState =
+    keptStations?.takeIf { it.first === net }?.second ?: StationListState().also { keptStations = net to it }
+
+suspend fun warmStops(net: Net, here: Pair<Double, Double>?) {
+    if (here == null) return
+    val list = stationListFor(net)
+    if (list.nearFor == here) return
+    val near = withContext(Dispatchers.Default) { net.nearestStops(here.first, here.second) }
+    list.near = near; list.nearFor = here
 }
 
 @Composable
@@ -84,15 +109,7 @@ private fun StationList(model: KavModel, net: Net, list: StationListState) {
         if (granted.values.any { it }) { locating = true; requestLocationOnce(ctx, onFail = { locating = false }) { model.locate(it.first, it.second); locating = false } }
     }
     var onMap by remember { mutableStateOf(false) }
-    if (onMap) {
-        StopMapPicker(
-            net, model.here,
-            onPick = {}, onDismiss = { onMap = false },
-            onLocate = { model.locate(it.first, it.second) },
-            onStop = { s -> onMap = false; model.stationStop = s },
-        )
-        return
-    }
+    val under by underSearch(onMap)
 
     // The stops saved, and those with line alerts, each with its next departures, live where they can be.
     val yours = remember(net, model.savedStops, model.lineAlerts) {
@@ -138,20 +155,32 @@ private fun StationList(model: KavModel, net: Net, list: StationListState) {
     }
 
     var hits by list::hits
+    var hitsFor by list::hitsFor
     LaunchedEffect(net, q) {
         hits = withContext(Dispatchers.Default) { net.searchStops(q).toList() }
+        hitsFor = q
     }
     val here = model.here
     var near by list::near
     LaunchedEffect(net, here) {
+        if (here != null && list.nearFor == here) return@LaunchedEffect
         near = withContext(Dispatchers.Default) {
             if (here == null) emptyList() else net.nearestStops(here.first, here.second)
         }
+        list.nearFor = here
+    }
+    // The two nearest stops' days are asked ahead too, one after the other once the list has settled, so the one opened
+    // next has its provider's times already. Each is asked once a day, answered or not, to spare the provider.
+    val ahead = remember(near, yours) { near.asSequence().map { it.first }.filter { it !in yours }.take(2).toList() }
+    LaunchedEffect(ahead, listing, Schedules.source, today) {
+        if (!listing || !Schedules.boards || ahead.isEmpty()) return@LaunchedEffect
+        delay(2_000)
+        BoardsAhead.stops(ctx, ahead.map { net.code.getOrElse(it) { 0 } }, 2)
     }
 
     // Nearby, a stop's town is named only where it isn't the nearest town's.
     val homeTown = near.firstNotNullOfOrNull { net.cityName(it.first).ifBlank { null } }
-    Column(Modifier.fillMaxSize()) {
+    Column(Modifier.fillMaxSize().graphicsLayer { alpha = under }) {
         ScreenHeader(T("Stops", "תחנות"))
         Box(Modifier.fillMaxSize()) {
         LazyColumn(Modifier.fillMaxSize(), state = listState, contentPadding = PaddingValues(
@@ -165,28 +194,32 @@ private fun StationList(model: KavModel, net: Net, list: StationListState) {
                     SelectOnMapRow(0.dp, framed = false) { onMap = true }
                 }
             }
+            // Every row comes, goes and moves with a fade and a glide: hits as the name is typed, stops as you move.
             if (q.isNotBlank()) {
-                if (hits.isEmpty()) item {
-                    NoteCard(T("No stop by that name or code.", "אין תחנה בשם או במספר הזה."), Modifier.padding(vertical = K.gap4))
-                } else item { Spacer(Modifier.height(K.gap2)) }
+                // Nothing found is said once the search for these words is done, not for a moment while it runs.
+                if (hits.isEmpty() && hitsFor == q) item(key = "no-hits") {
+                    NoteCard(T("No stop by that name or code.", "אין תחנה בשם או במספר הזה."), listMotion(quick = true).padding(vertical = K.gap4))
+                } else if (hits.isNotEmpty()) item(key = "hits-gap") { Spacer(listMotion(quick = true).height(K.gap2)) }
                 itemsIndexed(hits, key = { _, s -> s }) { i, s ->
-                    StopListRow(net, s, null, town = true, first = i == 0, last = i == hits.lastIndex) { model.stationStop = s }
+                    Box(listMotion(quick = true)) { StopListRow(net, s, null, town = true, first = i == 0, last = i == hits.lastIndex) { model.stationStop = s } }
                 }
             } else {
                 if (yours.isNotEmpty()) {
-                    item(key = "saved") { SectionHeader(T("Saved", "שמורות")) }
+                    item(key = "saved") { SectionHeader(T("Saved", "שמורות"), listMotion(quick = true)) }
                     itemsIndexed(yours, key = { _, s -> "saved-$s" }) { i, s ->
-                        SavedStopRow(
-                            net, s, yoursLive[s].orEmpty(), shownAt, model.lineAlerts.filter { it.stop == net.stopKey(s) },
-                            first = i == 0, last = i == yours.lastIndex, day = yoursDays[s],
-                            asking = Schedules.boards && net.code.getOrElse(s) { 0 } > 0,
-                        ) { model.stationStop = s }
+                        Box(listMotion(quick = true)) {
+                            SavedStopRow(
+                                net, s, yoursLive[s].orEmpty(), shownAt, model.lineAlerts.filter { it.stop == net.stopKey(s) },
+                                first = i == 0, last = i == yours.lastIndex, day = yoursDays[s],
+                                asking = Schedules.boards && net.code.getOrElse(s) { 0 } > 0,
+                            ) { model.stationStop = s }
+                        }
                     }
                 }
-                item(key = "nearby") { SectionHeader(T("Nearby", "בסביבה")) }
+                item(key = "nearby") { SectionHeader(T("Nearby", "בסביבה"), listMotion(quick = true)) }
                 when {
-                    here == null -> item {
-                        Column {
+                    here == null -> item(key = "where") {
+                        Column(listMotion(quick = true)) {
                             NoteCard(if (locating) T("Waiting for a fix…", "ממתינים למיקום…") else T("Kav doesn't know where you are yet.", "Kav עדיין לא יודע איפה אתם."))
                             Spacer(Modifier.height(K.gap3))
                             KavButton(
@@ -210,15 +243,18 @@ private fun StationList(model: KavModel, net: Net, list: StationListState) {
                             )
                         }
                     }
-                    near.isEmpty() -> item {
+                    // Said once Nearby is found for here, not for a moment before.
+                    near.isEmpty() -> if (list.nearFor == here) item(key = "none-near") {
                         NoteCard(
                             T("No stops within 2.5 km of you.", "אין תחנות במרחק של 2.5 ק״מ מכם."),
-                            Modifier.padding(vertical = K.gap2),
+                            listMotion(quick = true).padding(vertical = K.gap2),
                         )
                     }
                     else -> itemsIndexed(near, key = { _, it -> it.first }) { i, (s, d) ->
-                        StopListRow(net, s, distanceLabel(d), town = net.cityName(s) != homeTown, first = i == 0, last = i == near.lastIndex) {
-                            model.stationStop = s
+                        Box(listMotion(quick = true)) {
+                            StopListRow(net, s, distanceLabel(d), town = net.cityName(s) != homeTown, first = i == 0, last = i == near.lastIndex) {
+                                model.stationStop = s
+                            }
                         }
                     }
                 }
@@ -227,6 +263,12 @@ private fun StationList(model: KavModel, net: Net, list: StationListState) {
         ScrollEdge(listState.canScrollBackward)
         }
     }
+    StopMapPicker(
+        onMap, net, model.here,
+        onPick = {}, onDismiss = { onMap = false },
+        onLocate = { model.locate(it.first, it.second) },
+        onStop = { s -> onMap = false; model.stationStop = s },
+    )
 }
 
 @Composable
@@ -260,17 +302,17 @@ private fun DepartureBoard(model: KavModel, net: Net, stop: Int, onBack: () -> U
     val today = Schedules.today()
     var day by remember(stop, Schedules.source, today) { mutableStateOf<ScheduleDay?>(null) }
     LaunchedEffect(stop, Schedules.source, today) { if (asking) day = scheduleDay(ctx, code) }
+    // Until the provider's day comes, the week on the phone stands in, so the board opens with its rows; the provider's
+    // then take their places, the same departures keeping theirs.
+    val standIn = asking && day == null
     val rows = remember(stop, shownAt, live, day, asking) {
         val provided = day?.departures
-        when {
-            provided != null -> scheduleRows(provided, day!!.midnight, shownAt, live, 60)
-            asking && day == null -> emptyList()
-            else -> boardRows(net, stop, shownAt, live, 60)
-        }
+        if (provided != null) scheduleRows(provided, day!!.midnight, shownAt, live, 60)
+        else boardRows(net, stop, shownAt, live, 60)
     }
 
     var alerting by remember(stop) { mutableStateOf(false) }
-    val alertable = remember(stop) { net.linesAt(stop).isNotEmpty() || net.endsAt(stop).isNotEmpty() }
+    val alertable = remember(stop) { alertable(net, stop) }
     Box(Modifier.fillMaxSize()) {
     Column(Modifier.fillMaxSize().background(K.bg)) {
         ScreenHeader(T("Departures", "יציאות"), back = onBack)
@@ -321,18 +363,31 @@ private fun DepartureBoard(model: KavModel, net: Net, stop: Int, onBack: () -> U
         }
         Spacer(Modifier.height(K.gap3))
         val provider = sourceName(Schedules.source)
-        when {
-            asking && day == null ->
-                NoteCard(T("Loading the times from $provider", "טוענים את הזמנים מ$provider"), Modifier.padding(horizontal = K.gap4, vertical = K.gap2))
-            asking && day?.departures == null -> NoteCard(T(
+        // The board's notes fade from one to the next, and open and close in their place.
+        val note = when {
+            standIn -> null
+            asking && day?.departures == null -> T(
                 "$provider isn't answering. These times are from the timetable on your phone.",
                 "$provider לא עונה. הזמנים האלה מלוח הזמנים שבטלפון.",
-            ), Modifier.padding(horizontal = K.gap4, vertical = K.gap2))
+            )
+            rows.isEmpty() -> T("Nothing more today or tomorrow.", "אין עוד יציאות היום או מחר.")
+            else -> null
         }
-        if (rows.isEmpty() && !(asking && day == null)) {
-            NoteCard(T("Nothing more today or tomorrow.", "אין עוד יציאות היום או מחר."), Modifier.padding(horizontal = K.gap4, vertical = K.gap4))
+        androidx.compose.animation.AnimatedContent(
+            note,
+            transitionSpec = {
+                (androidx.compose.animation.fadeIn(androidx.compose.animation.core.tween(220, delayMillis = 60)) togetherWith
+                    androidx.compose.animation.fadeOut(androidx.compose.animation.core.tween(150)))
+                    .using(androidx.compose.animation.SizeTransform(clip = false) { _, _ -> androidx.compose.animation.core.spring(dampingRatio = 1f, stiffness = 500f) })
+            },
+            label = "boardNote",
+        ) { said ->
+            if (said != null) NoteCard(said, Modifier.padding(horizontal = K.gap4, vertical = K.gap2))
         }
-        val lines = remember(rows, trains, T.lang) { rows.map { boardLine(net, it, live, trains, shownAt) } }
+        val lines = remember(rows, trains, T.lang) { rows.map { boardLine(net, it, live, trains, shownAt, shared = asking) } }
+        // The lines of its next departures asked ahead, so the line page a row opens has its provider's ways already.
+        val aheadLines = remember(lines) { lines.mapNotNull { it.line }.distinctBy { it.id }.take(6) }
+        LaunchedEffect(aheadLines) { if (aheadLines.isNotEmpty()) { delay(1_500); BoardsAhead.lines(aheadLines, 6) } }
         val columns = boardColumns(net, lines)
         // Each departure keeps its row as the live times come: one that moves glides to its new place, one that's gone
         // fades out as the rest move up, and one that's new fades in.
@@ -350,6 +405,16 @@ private fun DepartureBoard(model: KavModel, net: Net, stop: Int, onBack: () -> U
         LazyColumn(Modifier.fillMaxSize(), state = boardState, contentPadding = PaddingValues(
             start = K.gap1, end = K.gap1, bottom = LocalBottomBarInset.current + K.gap4,
         )) {
+            // A stop the week on the phone has nothing for, the first time its provider is asked: the board's rows as
+            // shapes, until its times fill them in.
+            if (standIn && lines.isEmpty()) items(5, key = { "skeleton-$it" }) { i ->
+                BoardSkeletonRow(
+                    Modifier.animateItem(boardFadeIn, boardGlide, boardFadeOut).then(
+                        if (i == 0) Modifier.semantics { contentDescription = T("Loading the times from $provider", "טוענים את הזמנים מ$provider") }
+                        else Modifier.clearAndSetSemantics {},
+                    ),
+                )
+            }
             lines.forEachIndexed { i, l ->
                 if (l.tomorrow && (i == 0 || !lines[i - 1].tomorrow)) item(key = "tomorrow") {
                     Text(
@@ -374,6 +439,30 @@ private fun DepartureBoard(model: KavModel, net: Net, stop: Int, onBack: () -> U
     }
 }
 
+// A board row's shapes, glowing softly, while its first times are on their way.
+@Composable
+private fun BoardSkeletonRow(modifier: Modifier) {
+    val glow by androidx.compose.animation.core.rememberInfiniteTransition(label = "boardSkeleton").animateFloat(
+        .5f, 1f,
+        androidx.compose.animation.core.infiniteRepeatable(
+            androidx.compose.animation.core.tween(900, easing = androidx.compose.animation.core.FastOutSlowInEasing),
+            androidx.compose.animation.core.RepeatMode.Reverse,
+        ),
+        label = "boardSkeletonGlow",
+    )
+    Row(
+        modifier.fillMaxWidth().graphicsLayer {
+            alpha = glow; compositingStrategy = androidx.compose.ui.graphics.CompositingStrategy.ModulateAlpha
+        }.padding(horizontal = K.gap3, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(K.gap3),
+    ) {
+        Box(Modifier.size(44.dp, 26.dp).clip(RoundedCornerShape(K.rBadge)).background(K.fill))
+        Box(Modifier.weight(1f).height(14.dp).clip(K.capsule).background(K.fill))
+        Box(Modifier.size(52.dp, 14.dp).clip(K.capsule).background(K.fill))
+    }
+}
+
 // A board row as it's shown, worked out before it's drawn so every row can share one width per column. own (a live bus
 // or train the timetable has no trip for, as Kav's server names it) opens no line. note: why a train isn't coming.
 // line: the provider's line a provider's departure opens.
@@ -383,7 +472,9 @@ private class BoardLine(
     val opens: Boolean, val key: String, val line: Schedules.Line? = null,
 )
 
-private fun boardLine(net: Net, row: BoardRow, live: List<LiveAt>, trains: TrainsToday, t0: Int): BoardLine {
+// shared: rows of the week standing in for a provider's are keyed as the provider's are, by line and time, so the same
+// departure keeps its row when the provider's day comes.
+private fun boardLine(net: Net, row: BoardRow, live: List<LiveAt>, trains: TrainsToday, t0: Int, shared: Boolean = false): BoardLine {
     val (c, dep, shown, own) = row
     val soon = relative(shown, t0)
     val time = soon ?: hhmm(shown)
@@ -392,7 +483,7 @@ private fun boardLine(net: Net, row: BoardRow, live: List<LiveAt>, trains: Train
         val at = row.liveAt
         return BoardLine(
             -1, d.number, d.line.type, -1, net.shown(at?.to ?: d.to), at?.platform?.ifEmpty { null } ?: d.platform, time,
-            at?.dep, null, false, tomorrow, opens = true, key = "sched:${d.line.id}:${d.number}:${d.at}", line = d.line,
+            at?.dep, null, false, tomorrow, opens = true, key = "dep:${d.number}:${row.dep}", line = d.line,
         )
     }
     // Beside a provider's departures, also a live bus on the week's trip that none of them is.
@@ -400,7 +491,7 @@ private fun boardLine(net: Net, row: BoardRow, live: List<LiveAt>, trains: Train
         -1, own.number, own.type, own.agency, net.shown(own.to ?: own.trip.takeIf { it >= 0 }?.let { net.name[net.tripLast(it)] }.orEmpty()),
         own.platform, time, own.dep, null, false, tomorrow, opens = false, key = "own:${own.number}:${own.dep.tripId}:${own.static}",
     )
-    val t = net.tripOf(net.cST[c])
+    val t = net.tripOf(c)
     val route = net.tripRoute[t]
     val at = live.at(net, t, dep)
     val train = if (net.rType[route] == 2) at?.let { TrainName.of(it.number, it.platform) } ?: trains.named[t] else null
@@ -412,8 +503,18 @@ private fun boardLine(net: Net, row: BoardRow, live: List<LiveAt>, trains: Train
         net.shown(at?.to ?: trains.ends[t] ?: net.name[net.tripLast(t)]), if (gone) "" else train?.platform.orEmpty(),
         time, at?.dep,
         if (!gone) null else if (cancelled) T("Canceled", "בוטלה") else T("Not running today", "לא פועלת היום"),
-        cancelled, tomorrow, opens = true, key = "$c:$dep",
+        cancelled, tomorrow, opens = true, key = if (shared) "dep:${net.rShort.getOrElse(route) { "" }}:$dep" else "$c:$dep",
     )
+}
+
+// Whether the stop has lines or train ends to alert for: linesAt or endsAt not empty, told at the first departure that
+// has one rather than by listing the week's.
+private fun alertable(net: Net, stop: Int): Boolean {
+    for (i in net.dStart[stop] until net.dStart[stop + 1]) {
+        val t = net.tripOf(net.dConn[i])
+        if (net.rShort[net.tripRoute[t]].isNotBlank() || net.name[net.tripLast(t)] != net.name[stop]) return true
+    }
+    return false
 }
 
 // The board's column widths, each its widest row's: the line plates, the platforms and the times.
@@ -421,18 +522,17 @@ private class BoardColumns(val plate: Dp, val platform: Dp, val time: Dp)
 
 @Composable
 private fun boardColumns(net: Net, lines: List<BoardLine>): BoardColumns {
-    val measurer = rememberTextMeasurer()
+    // Big enough for a whole board, so a plate or time is measured once, and a refresh measures only what's new.
+    val measurer = rememberTextMeasurer(cacheSize = 256)
     val density = LocalDensity.current
     val widths = remember(lines, density) {
         fun width(text: String, style: TextStyle): Dp = with(density) { measurer.measure(text, style).size.width.toDp() }
-        val plate = lines.maxOfOrNull { l ->
-            val n = l.label?.ifBlank { null } ?: net.rShort.getOrElse(l.route) { "" }
-            linePlateWidth(if (n.isBlank()) 0.dp else width(n, K.type.bodyStrong.tabular)) + 2.dp
+        val plate = lines.mapTo(LinkedHashSet()) { l -> l.label?.ifBlank { null } ?: net.rShort.getOrElse(l.route) { "" } }
+            .maxOfOrNull { n -> linePlateWidth(if (n.isBlank()) 0.dp else width(n, K.type.bodyStrong.tabular)) + 2.dp } ?: 0.dp
+        val platform = lines.filter { it.platform.isNotEmpty() }.mapTo(LinkedHashSet()) { it.platform }.maxOfOrNull {
+            width(platformLabel(it), K.type.caption) + 14.dp
         } ?: 0.dp
-        val platform = lines.filter { it.platform.isNotEmpty() }.maxOfOrNull {
-            width(platformLabel(it.platform), K.type.caption) + 14.dp
-        } ?: 0.dp
-        val time = lines.maxOfOrNull { l -> width(l.time, K.type.bodyStrong.tabular) + 2.dp + if (l.live != null) 16.dp else 0.dp } ?: 0.dp
+        val time = lines.mapTo(LinkedHashSet()) { it.time }.maxOfOrNull { t -> width(t, K.type.bodyStrong.tabular) + 2.dp + 16.dp } ?: 0.dp
         BoardColumns(plate, platform, time)
     }
     // A column that has to widen or narrow for a new time eases there, with everything in its rows.
@@ -448,9 +548,6 @@ private val boardGlide = androidx.compose.animation.core.spring(
 )
 private val boardFadeIn = androidx.compose.animation.core.tween<Float>(220, delayMillis = 60)
 private val boardFadeOut = androidx.compose.animation.core.tween<Float>(150)
-private val boardGlideIn = androidx.compose.animation.core.spring(
-    dampingRatio = 1f, stiffness = 500f, visibilityThreshold = androidx.compose.ui.unit.IntSize.VisibilityThreshold,
-)
 
 private fun platformLabel(platform: String) = T("Platform $platform", "רציף $platform")
 
@@ -482,21 +579,14 @@ private fun BoardLineRow(net: Net, l: BoardLine, columns: BoardColumns, modifier
                 .padding(horizontal = 6.dp, vertical = 4.dp),
         )
         Row(Modifier.width(columns.time), horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
-            // The live mark opens beside the time when a live one comes, and the time rolls to it.
+            // Every time has its mark before it, in the room the column keeps for it: the live mark when a live one comes,
+            // else the signal struck through, grey, fading into each other as the time rolls.
             var marked by remember { mutableStateOf(l.live) }
             if (l.live != null) marked = l.live
-            androidx.compose.animation.AnimatedVisibility(
-                l.live != null,
-                enter = androidx.compose.animation.fadeIn(boardFadeIn) +
-                    androidx.compose.animation.expandHorizontally(boardGlideIn, expandFrom = Alignment.End),
-                exit = androidx.compose.animation.fadeOut(boardFadeOut) +
-                    androidx.compose.animation.shrinkHorizontally(boardGlideIn, shrinkTowards = Alignment.End),
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    marked?.let { DepMarkGlyph(it, 12.dp) }
-                    Spacer(Modifier.width(4.dp))
-                }
+            androidx.compose.animation.Crossfade(l.live != null, Modifier.size(12.dp), animationSpec = androidx.compose.animation.core.tween(220), label = "liveMark") { on ->
+                if (on) marked?.let { DepMarkGlyph(it, 12.dp) } else LiveOffGlyph(K.scheduled, 12.dp)
             }
+            Spacer(Modifier.width(4.dp))
             LiveText(
                 l.time, style = K.type.bodyStrong.tabular, maxLines = 1,
                 color = when { l.note != null -> K.textTertiary; l.live != null -> depColour(l.live); else -> K.scheduled },
@@ -544,7 +634,7 @@ private fun List<LiveAt>.at(net: Net, trip: Int, dep: Int): LiveAt? = firstOrNul
     else it.number == net.rShort[net.tripRoute[trip]] && kotlin.math.abs(it.static - dep) <= 120
 }
 
-// A row of a stop's board: the timetable's connection c, its own time and the time shown, the live one where there is
+// A row of a stop's board: the timetable's stop time c, its own time and the time shown, the live one where there is
 // one; or (own) a live bus or train the timetable has no trip for, c -1, at its live time; or (sched) a departure from
 // the timetable's provider, c -1, with the live time of the bus it is (liveAt).
 private data class BoardRow(
@@ -556,16 +646,56 @@ private data class BoardRow(
 private fun boardRows(net: Net, stop: Int, t0: Int, live: List<LiveAt>, limit: Int): List<BoardRow> {
     val today = java.util.Calendar.getInstance(ISRAEL).get(java.util.Calendar.DAY_OF_WEEK) - 1
     return (net.departuresAt(stop, t0 - 1800, today, limit = 120)
-        .map { (c, dep) -> BoardRow(c, dep, live.at(net, net.tripOf(net.cST[c]), dep)?.rt ?: dep) } +
+        .map { (c, dep) -> BoardRow(c, dep, live.at(net, net.tripOf(c), dep)?.rt ?: dep) } +
         live.filter { it.own }.map { BoardRow(-1, it.rt, it.rt, it) })
         .filter { it.shown >= t0 }.sortedBy { it.shown }.take(limit)
 }
 
+// Stops' provider days and lines' ways asked ahead of a likely tap (the nearest stops, a trip's stops, a line page's,
+// the lines on a board), so what opens next has the provider's times already. Two at a time, in the order given, each
+// once a day whether answered or not, so a provider isn't asked again and again; and only while the page that asked is
+// open, as its effect's cancelling stops the rest.
+internal object BoardsAhead {
+    private val asked = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
+    private suspend fun <T> twoAtATime(items: List<T>, key: (T) -> String, ask: suspend (T) -> Unit) = kotlinx.coroutines.coroutineScope {
+        val next = java.util.concurrent.atomic.AtomicInteger()
+        repeat(2) {
+            launch {
+                while (true) {
+                    val item = items.getOrNull(next.getAndIncrement()) ?: break
+                    if (asked.add(key(item))) ask(item)
+                }
+            }
+        }
+    }
+
+    private val ahead get() = Schedules.boards
+
+    // By the stops' public codes, the likeliest first; at most `most` of them.
+    suspend fun stops(ctx: android.content.Context, codes: List<Int>, most: Int) {
+        if (!ahead) return
+        val day = "${Schedules.source.key}/${Schedules.today()}"
+        val todo = codes.filter { it > 0 }.distinct().filter { "$day/stop/$it" !in asked }.take(most)
+        twoAtATime(todo, { "$day/stop/$it" }) { scheduleDay(ctx, it) }
+    }
+
+    // A provider's lines, for their pages.
+    suspend fun lines(lines: List<Schedules.Line>, most: Int) {
+        if (!ahead) return
+        val day = "${Schedules.source.key}/${Schedules.today()}"
+        val todo = lines.distinctBy { it.id }.filter { "$day/line/${it.id}" !in asked }.take(most)
+        twoAtATime(todo, { "$day/line/${it.id}" }) { l ->
+            runCatching { withContext(Dispatchers.IO) { Schedules.ways(l) } }
+        }
+    }
+}
+
 // Today's and tomorrow's departures at a stop from the timetable's provider (Schedules), from midnight today;
 // departures null when it couldn't be asked.
-private class ScheduleDay(val departures: List<Schedules.Departure>?, val midnight: Long)
+internal class ScheduleDay(val departures: List<Schedules.Departure>?, val midnight: Long)
 
-private suspend fun scheduleDay(ctx: android.content.Context, code: Int): ScheduleDay {
+internal suspend fun scheduleDay(ctx: android.content.Context, code: Int): ScheduleDay {
     val today = Schedules.today()
     val departures = try {
         withContext(Dispatchers.IO) { Schedules.departures(ctx, code, today) + Schedules.departures(ctx, code, today.plusDays(1)) }
@@ -574,7 +704,7 @@ private suspend fun scheduleDay(ctx: android.content.Context, code: Int): Schedu
     } catch (e: Exception) {
         null
     }
-    return ScheduleDay(departures, Schedules.start(today))
+    return ScheduleDay(departures, Schedules.base(today))
 }
 
 // A stop's next departures from its provider's day, as boardRows has the week's: each with the live time of the same
@@ -617,13 +747,19 @@ private fun SavedStopRow(
             }
         }
         Spacer(Modifier.height(K.gap2))
-        if (asking && day == null) Text(T("Checking times…", "בודקים זמנים…"), style = K.type.subhead)
+        // Until the provider's day comes the week's next departures stand in, the same ones keeping their place after.
+        if (asking && day == null && rows.isEmpty()) Text(T("Checking times…", "בודקים זמנים…"), style = K.type.subhead)
         else if (rows.isEmpty()) Text(T("Nothing more today or tomorrow", "אין עוד יציאות היום או מחר"), style = K.type.subhead)
         else FlowRow(horizontalArrangement = Arrangement.spacedBy(K.gap3), verticalArrangement = Arrangement.spacedBy(K.gap1)) {
             // Each departure keeps its place as the times change: its time rolls, and when one ahead of it goes, it
             // glides along.
             rows.forEach { row -> val (c, dep, shown, own) = row; val d = row.sched
-                key(if (d != null) "sched:${d.line.id}:${d.number}:${d.at}" else if (own != null) "own:${own.number}:${own.dep.tripId}" else "$c:$dep") {
+                key(when {
+                    d != null -> "dep:${d.number}:$dep"
+                    own != null -> "own:${own.number}:${own.dep.tripId}"
+                    asking -> "dep:${net.rShort.getOrElse(net.tripRoute[net.tripOf(c)]) { "" }}:$dep"
+                    else -> "$c:$dep"
+                }) {
                 if (d != null) {
                     Row(Modifier.glide(), verticalAlignment = Alignment.CenterVertically) {
                         LineBadge(net, -1, label = d.number, type = d.line.type, operator = d.line.operator, dense = true)
@@ -640,7 +776,7 @@ private fun SavedStopRow(
                         LiveText(relative(shown, t0) ?: hhmm(shown), style = K.type.subhead.tabular, color = depColour(own.dep), maxLines = 1)
                     }
                 } else {
-                    val t = net.tripOf(net.cST[c])
+                    val t = net.tripOf(c)
                     val at = live.at(net, t, dep)
                     Row(Modifier.glide(), verticalAlignment = Alignment.CenterVertically) {
                         val train = if (net.rType[net.tripRoute[t]] == 2) at?.let { TrainName.of(it.number, it.platform) } else null
@@ -690,4 +826,3 @@ internal fun placeOf(net: Net, stop: Int) = uk.noammm.kav.data.Transit.Place(
     type = 1,
     mode = net.stopType[stop],
 )
-

@@ -29,6 +29,7 @@ import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.core.spring
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
@@ -165,7 +166,22 @@ internal class ReportFor(
     // An Israel Railways train: line is then its number, origin and destination the stations ridden between, and stops
     // its stations, by the ministry's codes for them.
     val train: Boolean = false,
+    // The form's kind of train: "1" Israel Railways, "2" Jerusalem's light rail, "3" Gush Dan's (Dankal). A light rail
+    // is a train with its line in line, and its stations found on the form by name.
+    val trainType: String = "1",
 )
+
+internal val ReportFor.lightRail get() = train && trainType != "1"
+
+// A light rail's kind on the form, by where it runs: Jerusalem's, else Gush Dan's.
+internal fun lightRailType(at: Pair<Double, Double>?): String = if (at != null && at.first < 31.9) "2" else "3"
+
+// The railway's name, as the form's choices name it.
+internal fun railName(r: ReportFor, hebrew: Boolean = false): String = when (r.trainType) {
+    "2" -> if (hebrew) "הרכבת הקלה בירושלים" else T("Jerusalem Light Rail", "הרכבת הקלה בירושלים")
+    "3" -> if (hebrew) "הרכבת הקלה בגוש דן" else T("Gush Dan Light Rail", "הרכבת הקלה בגוש דן")
+    else -> if (hebrew) "רכבת ישראל" else T("Israel Railways", "רכבת ישראל")
+}
 
 // The direction and alternative at the end of a line's name in the ministry's data, "...-2#" being ("2", "#").
 internal fun ministryDirection(name: String): Pair<String, String>? {
@@ -396,7 +412,8 @@ internal fun nearestTestimony(at: Pair<Double, Double>?): String {
 }
 
 private fun reportFacts(issue: ReportIssue, r: ReportFor, ride: Ride, inspector: String): String = if (r.train) listOfNotNull(
-    "רכבת ישראל" + (formTrain(ride.line)?.let { " מספר $it" } ?: "") + ".",
+    railName(r, hebrew = true) + ((if (r.lightRail) formText(ride.line).ifBlank { null }?.let { " קו $it" }
+        else formTrain(ride.line)?.let { " מספר $it" }) ?: "") + ".",
     ride.from?.name?.let(::formText)?.ifBlank { null }?.let { from ->
         "עליתי בתחנת $from" + (ride.to?.name?.let(::formText)?.ifBlank { null }?.let { " ונסעתי אל $it" } ?: "") + "."
     },
@@ -437,9 +454,10 @@ internal fun reportJson(
     .put("subject", issue.subject).put("second", issue.second).put("location", if (issue.onBus && !r.train) "1" else "")
     .put("date", israel("dd/MM/yyyy", ride.at)).put("time", israel("HH:mm", ride.at))
     .put("line", if (r.train) "" else formLine(ride.line).orEmpty()).put("operator", formOperator(r.agency))
-    .put("train", r.train).put("trainNumber", if (r.train) formTrain(ride.line).orEmpty() else "")
-    .put("boarding", if (r.train) formStation(ride.from) else "").put("boardingName", if (r.train) ride.from?.name.orEmpty() else "")
-    .put("destination", if (r.train) formStation(ride.to) else "").put("destinationName", if (r.train) ride.to?.name.orEmpty() else "")
+    .put("train", r.train).put("trainType", r.trainType)
+    .put("trainNumber", if (r.train && !r.lightRail) formTrain(ride.line).orEmpty() else "")
+    .put("boarding", if (r.train && !r.lightRail) formStation(ride.from) else "").put("boardingName", if (r.train) ride.from?.name.orEmpty() else "")
+    .put("destination", if (r.train && !r.lightRail) formStation(ride.to) else "").put("destinationName", if (r.train) ride.to?.name.orEmpty() else "")
     .put("stationEvent", if (r.train && issue.atStop) "1" else "")
     .put("from", r.towns?.first?.ifBlank { null } ?: r.origin).put("to", r.towns?.second?.ifBlank { null } ?: r.destination)
     .put("operatorId", r.operatorId?.toString().orEmpty())
@@ -477,7 +495,8 @@ internal fun paidWith(r: ReportFor, tickets: List<RavPass.Ticket>): Long? {
 internal fun rideReport(ride: Transit.Leg, r: Transit.Resolved, bus: Transit.Arrival?, at: Long): ReportFor? {
     val line = r.line(ride.lineId)
     val stops = ride.stops.map { id -> r.stop(id).let { ReportStop(id, it?.name.orEmpty(), it?.code?.ifBlank { null }) } }
-    if (legMode(ride, r) == Mode.TRAIN) return ReportFor(
+    val mode = legMode(ride, r)
+    if (mode == Mode.TRAIN || mode == Mode.TRAM || mode == Mode.SUBWAY) return ReportFor(
         line = ride.shortName.ifBlank { line?.number.orEmpty() }.ifBlank { return null },
         agency = r.agencyName(line?.agencyId ?: -1).orEmpty(),
         origin = r.stopName(ride.fromStop).orEmpty(), destination = r.stopName(ride.toStop).orEmpty(),
@@ -485,8 +504,9 @@ internal fun rideReport(ride: Transit.Leg, r: Transit.Resolved, bus: Transit.Arr
         boarded = stops.indexOfFirst { it.id == ride.fromStop }.takeIf { it >= 0 } ?: if (stops.isEmpty()) -1 else 0,
         alighted = stops.indexOfLast { it.id == ride.toStop }.takeIf { it >= 0 } ?: stops.lastIndex,
         at = at, train = true,
+        trainType = if (mode == Mode.TRAIN) "1" else lightRailType(r.stop(ride.fromStop)?.point ?: ride.shape.firstOrNull()),
     )
-    if (legMode(ride, r) != Mode.BUS) return null
+    if (mode != Mode.BUS) return null
     val from = r.stop(ride.fromStop)
     return ReportFor(
         line = ride.shortName.ifBlank { line?.number.orEmpty() }.ifBlank { return null },
@@ -711,8 +731,8 @@ internal fun ReportScreen(report: ReportFor, onClose: () -> Unit) {
 @Composable
 private fun AboutStep(d: Draft) = StepPage(
     T("What do you want to report?", "על מה תרצו לדווח?"),
-    if (d.report.train) T("Kav fills in the National Public Transport Authority's form for you. It takes Israel Railways' trains.",
-        "Kav ממלאת בשבילכם את הטופס של הרשות הארצית לתחבורה ציבורית. הוא מקבל את הרכבות של רכבת ישראל.")
+    if (d.report.train) T("Kav fills in the National Public Transport Authority's form for you. It takes Israel Railways' trains and both light rails.",
+        "Kav ממלאת בשבילכם את הטופס של הרשות הארצית לתחבורה ציבורית. הוא מקבל את הרכבות של רכבת ישראל ואת שתי הרכבות הקלות.")
     else T("Kav fills in the National Public Transport Authority's form for you. It takes every bus company's lines.",
         "Kav ממלאת בשבילכם את הטופס של הרשות הארצית לתחבורה ציבורית. הוא מקבל את הקווים של כל חברות האוטובוסים."),
 ) {
@@ -745,14 +765,15 @@ private fun RideStep(d: Draft, named: (ReportStop) -> ReportStop) {
     StepPage(
         T("The ride", "הנסיעה"),
         if (d.report.boarded >= 0) T("Kav filled this in from your ride. Change anything that's wrong.", "Kav מילאה את זה מהנסיעה שלכם. שנו כל מה שלא נכון.")
+        else if (d.report.train) T("Kav filled in what it knows about this train. Add the stations you rode between if you know them.", "Kav מילאה את מה שהיא יודעת על הרכבת. הוסיפו בין אילו תחנות נסעתם, אם אתם יודעים.")
         else T("Kav filled in what it knows about this bus. Add where you got on if you know it.", "Kav מילאה את מה שהיא יודעת על האוטובוס. הוסיפו איפה עליתם, אם אתם יודעים."),
         action = T("Next", "הבא"), errors = d.errors,
         onAction = { d.next { d.go(ReportStep.MORE) } },
     ) {
-        if (d.report.train) Field(T("Train number", "מספר רכבת"), d.line, { d.line = it.filter(Char::isDigit).take(5) },
+        if (d.report.train && !d.report.lightRail) Field(T("Train number", "מספר רכבת"), d.line, { d.line = it.filter(Char::isDigit).take(5) },
             helper = T("On the ticket or the train's screens, if you know it", "על הכרטיס או על המסכים ברכבת, אם אתם יודעים"),
             keyboard = KeyboardType.Number)
-        else Field(T("Line", "קו"), d.line, { d.line = it.take(6) }, error = d.errors["line"])
+        else Field(T("Line", "קו"), d.line, { d.line = it.take(6) }, error = d.errors["line"].takeIf { !d.report.train })
         if (issue.atStop && !d.report.train) {
             StopField(T("Stop where it happened", "התחנה שבה זה קרה"), d.report.stops, d.boardedAt, d.boardedTyped, named,
                 onPick = { d.boardedAt = it }, onType = { d.boardedTyped = it })
@@ -993,7 +1014,8 @@ private fun BusCard(r: ReportFor) {
     Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(K.rTile)).background(K.plateStrong)
         .padding(horizontal = K.gap4, vertical = K.gap3), verticalArrangement = Arrangement.spacedBy(2.dp)) {
         Text(
-            if (r.train) T("Israel Railways, train ${r.line}", "רכבת ישראל, רכבת ${r.line}")
+            if (r.lightRail) railName(r) + (r.line.ifBlank { null }?.let { T(", line $it", ", קו $it") } ?: "")
+            else if (r.train) r.line.ifBlank { null }?.let { T("Israel Railways, train $it", "רכבת ישראל, רכבת $it") } ?: T("Israel Railways", "רכבת ישראל")
             else listOf(T("Line ${r.line}", "קו ${r.line}"), formOperator(r.agency)).filter { it.isNotBlank() }.joinToString(" · "),
             fontSize = 16.sp, color = K.text, fontWeight = FontWeight.Medium)
         r.destination.ifBlank { null }?.let { Text(T("to $it", "לכיוון $it"), style = K.type.subhead) }
@@ -1029,8 +1051,23 @@ private fun Heading(text: String) {
 
 @Composable
 private fun Label(text: String, error: Boolean) {
-    Text(text, style = K.type.subhead, color = if (error) K.critical else K.muted)
+    Text(text, style = K.type.subhead, color = animateColorAsState(if (error) K.critical else K.muted, tween(200), label = "label").value)
 }
+
+// What's wrong with a choice, opening under it when Next finds it and closing once it's fixed, kept while it closes.
+@Composable
+private fun ErrorUnder(error: String?) {
+    var said by remember { mutableStateOf(error) }
+    if (error != null) said = error
+    AnimatedVisibility(
+        error != null,
+        enter = expandVertically(expandFrom = Alignment.Top) + fadeIn(), exit = shrinkVertically(shrinkTowards = Alignment.Top) + fadeOut(),
+    ) { Under(said, null) }
+}
+
+// A field's edge, red while it has an error, easing in and out.
+@Composable
+private fun errorEdge(error: Boolean): Color = animateColorAsState(if (error) K.critical else Color.Transparent, tween(200), label = "edge").value
 
 // Under a field: what's wrong with it, else a word on what goes there.
 @Composable
@@ -1048,7 +1085,7 @@ private fun Field(
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Label(label, error != null)
         KavField(value, onValue, placeholder,
-            if (error != null) Modifier.border(1.dp, K.critical, K.capsule) else Modifier,
+            Modifier.border(1.dp, errorEdge(error != null), K.capsule),
             keyboard = keyboard, ime = ime)
         Under(error, helper)
     }
@@ -1077,13 +1114,15 @@ private fun <V> Dropdown(
         Box {
             Row(
                 Modifier.fillMaxWidth().heightIn(min = 52.dp).onSizeChanged { width = it.width }.clip(K.capsule).background(K.fill)
-                    .then(if (error != null) Modifier.border(1.dp, K.critical, K.capsule) else Modifier)
+                    .border(1.dp, errorEdge(error != null), K.capsule)
                     .clickable(role = Role.DropdownList) { open = true }.padding(horizontal = K.gap4, vertical = 12.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(K.gap3),
             ) {
-                Text(value ?: placeholder, style = K.type.body, color = if (value == null) K.dim else K.text,
-                    maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                // The picked value fades in over the placeholder.
+                ChangingText(value ?: placeholder, Modifier.weight(1f)) {
+                    Text(it, style = K.type.body, color = if (value == null) K.dim else K.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
                 Chevron(open)
             }
             DropdownMenu(
@@ -1101,7 +1140,7 @@ private fun <V> Dropdown(
                 }
             }
         }
-        error?.let { Under(it, null) }
+        ErrorUnder(error)
     }
 }
 
@@ -1125,7 +1164,7 @@ private fun StopField(
 @Composable
 private fun YesNo(question: String, value: String, error: String?, onPick: (String) -> Unit) {
     Column(verticalArrangement = Arrangement.spacedBy(K.gap2)) {
-        Text(question, style = K.type.body, color = if (error != null) K.critical else K.text)
+        Text(question, style = K.type.body, color = animateColorAsState(if (error != null) K.critical else K.text, tween(200), label = "question").value)
         Row(
             Modifier.fillMaxWidth().height(48.dp).clip(K.capsule).background(K.fill).padding(4.dp),
             horizontalArrangement = Arrangement.spacedBy(4.dp),
@@ -1141,7 +1180,7 @@ private fun YesNo(question: String, value: String, error: String?, onPick: (Stri
                 ) { Text(text, style = K.type.bodyStrong, color = ink) }
             }
         }
-        error?.let { Under(it, null) }
+        ErrorUnder(error)
     }
 }
 
@@ -1155,6 +1194,7 @@ private fun Hint(shown: Boolean, text: String) {
 @Composable
 private fun Check(checked: Boolean, text: String, error: String? = null, onChange: (Boolean) -> Unit) {
     val fill by animateColorAsState(if (checked) K.accent else K.surface4, tween(160), label = "check")
+    val edge by animateColorAsState(if (checked) K.accent else if (error != null) K.critical else K.border, tween(160), label = "checkEdge")
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Row(
             Modifier.fillMaxWidth().clickable(role = Role.Checkbox) { onChange(!checked) }.padding(vertical = K.gap1),
@@ -1162,12 +1202,19 @@ private fun Check(checked: Boolean, text: String, error: String? = null, onChang
         ) {
             Box(
                 Modifier.padding(top = 1.dp).size(22.dp).clip(RoundedCornerShape(6.dp)).background(fill)
-                    .border(1.dp, if (checked) K.accent else if (error != null) K.critical else K.border, RoundedCornerShape(6.dp)),
+                    .border(1.dp, edge, RoundedCornerShape(6.dp)),
                 contentAlignment = Alignment.Center,
-            ) { if (checked) Icon(Icons.Rounded.Check, contentDescription = null, tint = K.onAccent, modifier = Modifier.size(16.dp)) }
+            ) {
+                // The tick springs in with the fill and fades out with it.
+                val tick = animateFloatAsState(if (checked) 1f else 0f, spring(dampingRatio = .6f, stiffness = 600f), label = "tick")
+                Icon(Icons.Rounded.Check, contentDescription = null, tint = K.onAccent, modifier = Modifier.size(16.dp).graphicsLayer {
+                    val t = tick.value
+                    alpha = t.coerceIn(0f, 1f); scaleX = .5f + .5f * t; scaleY = .5f + .5f * t
+                })
+            }
             Text(text, fontSize = 14.sp, lineHeight = 20.sp, color = K.text, modifier = Modifier.weight(1f))
         }
-        error?.let { Under(it, null) }
+        ErrorUnder(error)
     }
 }
 
@@ -1227,7 +1274,10 @@ private fun MomentSheet(
         val picked = momentOf(back, hour, minute)
         if (withDay) Row(Modifier.fillMaxWidth().clip(K.capsule).background(K.fill), verticalAlignment = Alignment.CenterVertically) {
             DayArrow(true, back < MAX_DAYS_BACK, T("Earlier day", "יום קודם")) { back++ }
-            Text(dayName(back, picked), style = K.type.body, textAlign = TextAlign.Center, modifier = Modifier.weight(1f))
+            // The day slides in from the side of the arrow tapped.
+            AnimatedContent(back, Modifier.weight(1f), transitionSpec = { sideways(targetState < initialState).using(androidx.compose.animation.SizeTransform(clip = false)) }, label = "day") { b ->
+                Text(dayName(b, momentOf(b, hour, minute)), style = K.type.body, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth())
+            }
             DayArrow(false, back > 0, T("Later day", "יום אחרי")) { back-- }
         }
         val future = picked > now
@@ -1249,7 +1299,7 @@ private fun DayArrow(back: Boolean, enabled: Boolean, description: String, onCli
     ) {
         Icon(
             if (back) Icons.AutoMirrored.Rounded.KeyboardArrowLeft else Icons.AutoMirrored.Rounded.KeyboardArrowRight,
-            contentDescription = null, tint = if (enabled) K.text else K.textTertiary, modifier = Modifier.size(24.dp),
+            contentDescription = null, tint = animateColorAsState(if (enabled) K.text else K.textTertiary, tween(200), label = "dayArrow").value, modifier = Modifier.size(24.dp),
         )
     }
 }
@@ -1273,8 +1323,9 @@ private fun Photos(d: Draft) {
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Label(T("Photos", "תמונות"), false)
         Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(K.gap2)) {
+            // A photo rises in as it's added, and the others glide over as one comes or goes.
             d.photos.forEach { p ->
-                Box(Modifier.size(76.dp)) {
+                key(p.file.path) { Box(Modifier.glide().popIn(0, p.file.path).size(76.dp)) {
                     Image(p.thumb, contentDescription = T("Photo", "תמונה"), contentScale = ContentScale.Crop,
                         modifier = Modifier.fillMaxSize().clip(RoundedCornerShape(K.rTile)))
                     Box(
@@ -1282,7 +1333,7 @@ private fun Photos(d: Draft) {
                             .clickable(role = Role.Button, onClickLabel = T("Remove", "הסרה")) { d.photos = d.photos - p; p.file.delete() },
                         contentAlignment = Alignment.Center,
                     ) { Icon(Icons.Rounded.Close, contentDescription = null, tint = K.text, modifier = Modifier.size(16.dp)) }
-                }
+                } }
             }
             repeat(working) {
                 Box(Modifier.size(76.dp).panel(K.rTile), contentAlignment = Alignment.Center) {
@@ -1290,7 +1341,7 @@ private fun Photos(d: Draft) {
                 }
             }
             if (d.photos.size + working < MAX_PHOTOS) Box(
-                Modifier.size(76.dp).panel(12.dp)
+                Modifier.glide().size(76.dp).panel(12.dp)
                     .clickable(role = Role.Button, onClickLabel = T("Add photos", "הוספת תמונות")) {
                         pick.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
                     },
@@ -1402,6 +1453,10 @@ private fun MinistryForm(filling: Filling, onBack: () -> Unit, onDone: () -> Uni
             // Google's reCAPTCHA on the form runs from its own domain.
             CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
             webViewClient = object : WebViewClient() {
+                // The rider's proxy asking for its login (RiderProxy).
+                override fun onReceivedHttpAuthRequest(view: android.webkit.WebView, handler: android.webkit.HttpAuthHandler, host: String?, realm: String?) {
+                    if (!uk.noammm.kav.data.RiderProxy.answer(handler, host)) super.onReceivedHttpAuthRequest(view, handler, host, realm)
+                }
                 override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
                     val scheme = request.url.scheme
                     return scheme != "http" && scheme != "https"
@@ -1480,15 +1535,19 @@ private fun MinistryForm(filling: Filling, onBack: () -> Unit, onDone: () -> Uni
                         Text(text, style = K.type.subhead, color = colour)
                     }
                 }
-                if (failed) Text(T("Try again", "ניסיון חוזר"), style = K.type.body, color = K.accentInk,
-                    modifier = Modifier.clickable(role = Role.Button) {
-                        failed = false
-                        progress = Progress()
-                        page.loadUrl(FORM)
-                    }.padding(K.gap2))
-                Text(if (progress.sent) T("Done", "סיום") else T("Cancel", "ביטול"), style = K.type.body,
-                    color = if (progress.sent) K.accentInk else K.muted,
-                    modifier = Modifier.clickable(role = Role.Button) { if (progress.sent) onDone() else onBack() }.padding(K.gap2))
+                AnimatedVisibility(failed, enter = fadeIn(), exit = fadeOut()) {
+                    Text(T("Try again", "ניסיון חוזר"), style = K.type.body, color = K.accentInk,
+                        modifier = Modifier.clickable(role = Role.Button) {
+                            failed = false
+                            progress = Progress()
+                            page.loadUrl(FORM)
+                        }.padding(K.gap2))
+                }
+                // Cancel turns into Done once the form is sent.
+                ChangingText(if (progress.sent) T("Done", "סיום") else T("Cancel", "ביטול"),
+                    Modifier.clickable(role = Role.Button) { if (progress.sent) onDone() else onBack() }.padding(K.gap2)) {
+                    Text(it, style = K.type.body, color = animateColorAsState(if (progress.sent) K.accentInk else K.muted, tween(200), label = "formDone").value)
+                }
             }
             AndroidView(
                 factory = { page },

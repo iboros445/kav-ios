@@ -82,15 +82,15 @@ fun GettPill(leg: Transit.Leg) {
     val context = LocalContext.current
     val link = gettLink(leg)
     Row(
-        Modifier.height(28.dp).clip(K.capsule).background(K.fill)
+        Modifier.height(28.dp).clip(K.capsule).background(Ink.fill)
             .then(if (link != null) Modifier.clickable(role = Role.Button, onClickLabel = T("Order with Gett", "הזמנה ב-Gett")) { openGett(context, link) } else Modifier)
             .padding(horizontal = K.gap2),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(K.gap1),
     ) {
-        ModeGlyph(Mode.TAXI, K.textSecondary, 18.dp)
-        Text("Gett", style = K.type.subhead, color = K.text, fontWeight = FontWeight.Medium)
-        if (link != null) Icon(Icons.Rounded.OpenInNew, contentDescription = null, tint = K.textTertiary, modifier = Modifier.size(14.dp))
+        ModeGlyph(Mode.TAXI, Ink.textSecondary, 18.dp)
+        Text("Gett", style = K.type.subhead, color = Ink.text, fontWeight = FontWeight.Medium)
+        if (link != null) Icon(Icons.Rounded.OpenInNew, contentDescription = null, tint = Ink.textTertiary, modifier = Modifier.size(14.dp))
     }
 }
 

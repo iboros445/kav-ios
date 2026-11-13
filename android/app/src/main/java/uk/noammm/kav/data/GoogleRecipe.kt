@@ -18,6 +18,10 @@ internal class GoogleRecipe private constructor(
     private val suggestEndpoint: String,
     val suggestPb: String,
     private val suggestPaths: Map<String, IntArray>,
+    // A place's gallery of photos as Google Maps shows it when the place is opened: where to ask, and the request with
+    // the place's feature id ({FID}) and how many ({COUNT}) to fill in.
+    val photosEndpoint: String,
+    val photosProto: String,
 ) {
     fun searchUrl(language: String) = local(searchEndpoint, language)
     fun suggestUrl(language: String) = local(suggestEndpoint, language)
@@ -33,7 +37,7 @@ internal class GoogleRecipe private constructor(
             "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEuz8/zxOJFhVqKco74fkmzrLlyPra4/pTEUm7lmue/Kig0T497fcs+hjhZkaSqVZAwloNrr0+0ILi7yATmU+d3g==",
         )
         private val GOOGLE = setOf("www.google.com", "google.com")
-        private val SEARCH_KEYS = listOf("results", "single", "name", "address", "lat", "lng")
+        private val SEARCH_KEYS = listOf("results", "single", "name", "address", "lat", "lng", "photos", "placeId", "featureId", "category")
         private val SUGGEST_KEYS = listOf("rows", "title", "primary", "secondary", "lat", "lng", "lat2", "lng2", "id", "kinds")
 
         // Vela's recipe at version 25, which Kav uses until Vela signs a newer one.
@@ -60,6 +64,8 @@ internal class GoogleRecipe private constructor(
             searchPaths = mapOf(
                 "results" to intArrayOf(64), "single" to intArrayOf(0, 1, 0, 14), "name" to intArrayOf(1, 11),
                 "address" to intArrayOf(1, 39), "lat" to intArrayOf(1, 9, 2), "lng" to intArrayOf(1, 9, 3),
+                "photos" to intArrayOf(1, 72, 0), "placeId" to intArrayOf(1, 78), "featureId" to intArrayOf(1, 10),
+                "category" to intArrayOf(1, 13, 0),
             ),
             suggestEndpoint = "https://www.google.com/s?tbm=map&gs_ri=maps&suggest=p&authuser=0&hl=en&gl=us",
             suggestPb = "!2i5!4m12!1m3!1d{SPAN}!2d{LNG}!3d{LAT}!2m3!1f0!2f0!3f0!3m2!1i{W}!2i{H}!4f13.1" +
@@ -70,6 +76,10 @@ internal class GoogleRecipe private constructor(
                 "lat2" to intArrayOf(13, 0, 3, 2), "lng2" to intArrayOf(13, 0, 3, 3), "id" to intArrayOf(0, 27),
                 "kinds" to intArrayOf(7, 2),
             ),
+            photosEndpoint = "https://www.google.com/maps/_/MapsWizUi/data/batchexecute?rpcids=hspqX&source-path=/maps&hl=en&_reqid=1&rt=c",
+            photosProto = "[2,null,[\"{FID}\",null,null,null,null,null,null,null,0],null,[null,[1200,1000],[null,{COUNT},null,null,1],null,null,null," +
+                "[[[1,0,3],[2,1,2],[2,0,3],[8,0,3],[10,0,3],[10,1,2],[10,0,4],[9,1,2]],1],null,0],null,null,null,null,null,null,null,null,null," +
+                "null,[null,1,null,1]]",
         )
 
         // Vela's newest recipe that verified.
@@ -115,9 +125,12 @@ internal class GoogleRecipe private constructor(
                 suggestEndpoint = o.optString("suggestEndpoint").ifBlank { base.suggestEndpoint },
                 suggestPb = o.optString("suggestPb").ifBlank { base.suggestPb },
                 suggestPaths = paths("suggestPaths", SUGGEST_KEYS, base.suggestPaths),
+                photosEndpoint = o.optString("photosEndpoint").ifBlank { base.photosEndpoint },
+                photosProto = o.optString("photosProto").ifBlank { base.photosProto },
             )
-            val google = listOf(r.searchEndpoint, r.suggestEndpoint).all { runCatching { URI(it).host }.getOrNull() in GOOGLE }
-            val slots = listOf("{QUERY}", "{LAT}", "{LNG}").all { it in r.searchPb } && listOf("{LAT}", "{LNG}").all { it in r.suggestPb }
+            val google = listOf(r.searchEndpoint, r.suggestEndpoint, r.photosEndpoint).all { runCatching { URI(it).host }.getOrNull() in GOOGLE }
+            val slots = listOf("{QUERY}", "{LAT}", "{LNG}").all { it in r.searchPb } && listOf("{LAT}", "{LNG}").all { it in r.suggestPb } &&
+                listOf("{FID}", "{COUNT}").all { it in r.photosProto }
             return r.takeIf { google && slots }
         }
 

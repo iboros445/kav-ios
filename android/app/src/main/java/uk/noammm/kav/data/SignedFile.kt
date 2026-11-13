@@ -56,7 +56,7 @@ internal class SignedFile(private val name: String, private val url: String, pri
     }.getOrDefault(false)
 
     private fun get(url: String): ByteArray? {
-        val c = (URL(url).openConnection() as HttpURLConnection).apply {
+        val c = (RiderProxy.open(URL(url)) as HttpURLConnection).apply {
             connectTimeout = 8000; readTimeout = 8000
             setRequestProperty("User-Agent", "Kav (+https://github.com/ImNoammm/kav)")
         }

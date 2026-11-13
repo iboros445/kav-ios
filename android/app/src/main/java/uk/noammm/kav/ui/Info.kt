@@ -45,9 +45,10 @@ fun InfoHeader(text: String, info: String, modifier: Modifier = Modifier) {
                     .clickable(role = Role.Button, onClickLabel = T("About $text", "על $text")) { open = !open },
                 contentAlignment = Alignment.Center,
             ) {
+                val tint by androidx.compose.animation.animateColorAsState(if (open) K.accentInk else K.textTertiary, tween(200), label = "infoTint")
                 Icon(
                     Icons.Rounded.Info, contentDescription = T("About $text", "על $text"),
-                    tint = if (open) K.accentInk else K.textTertiary, modifier = Modifier.size(18.dp),
+                    tint = tint, modifier = Modifier.size(18.dp),
                 )
             }
         }

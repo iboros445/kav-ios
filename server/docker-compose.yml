@@ -17,8 +17,15 @@ services:
       - ETA=/eta/now.json
       # The second planner, whose routes come after Kav's own; unset, it is not asked.
       - OFFICIAL_URL=http://kav-otp-official:8080/otp/gtfs/v1
+      # Line alerts for the app (alerts.py): the ministry's GTFS-Realtime feed, with the same key as its live times.
+      - ALERTS_SOURCE=gtfsrt
+      - ALERTS_URL=https://moran.mot.gov.il/Channels/HTTPChannel/DeveloperQuery/SpecialMessages?Key=${MOT_KEY}
+      # Their English, from kav-translate, each text once.
+      - TRANSLATE_URL=http://kav-translate:5000
+      - TRANSLATIONS=/history/translations.sqlite3
     volumes:
       - ./live.py:/app/live.py:ro
+      - ./alerts.py:/app/alerts.py:ro
       - ./mot-ca.pem:/app/mot-ca.pem:ro
       # When each bus passed each stop, kept ten weeks for the planner's predicted times.
       - ./history:/history
@@ -46,12 +53,16 @@ services:
     image: opentripplanner/opentripplanner:2.10.0
     container_name: kav-otp
     restart: unless-stopped
-    command: ["--load", "--serve"]
+    # Kav's linking patch (otp/patch, built by its build.sh) goes first on the classpath: a search's point is joined on
+    # foot to every street within kav.walkLinkBand meters of the nearest one, not the nearest alone (0 turns it off).
+    entrypoint: ["bash", "-c", "exec java $$JAVA_OPTS -cp /kav-patch:$$(cat /app/jib-classpath-file) $$(cat /app/jib-main-class-file) /var/opentripplanner/ --load --serve"]
+    command: []
     environment:
-      - JAVA_OPTS=-Xmx4g
+      - JAVA_OPTS=-Xmx4g -Dkav.walkLinkBand=30
     volumes:
       - ./otp/data/serve:/var/opentripplanner
       - ./otp/realtime:/var/opentripplanner/realtime:ro
+      - ./otp/patch/classes:/kav-patch:ro
     user: "1000:1000"
     mem_limit: 6g
     cpus: 4
@@ -133,6 +144,21 @@ services:
     tmpfs: [/tmp]
     mem_limit: 8g
     cpus: 4
+    logging:
+      options:
+        max-size: 1m
+        max-file: "2"
+    networks: [kav-net]
+
+  # Hebrew to English for the alerts (translate.py, OPUS-MT's model in the image), for kav-live alone. The image is the
+  # self-hosted kit's (server/selfhost/translate).
+  kav-translate:
+    image: ghcr.io/imnoammm/kav-translate:latest
+    container_name: kav-translate
+    restart: unless-stopped
+    user: "1000:1000"
+    read_only: true
+    mem_limit: 1g
     logging:
       options:
         max-size: 1m

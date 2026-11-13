@@ -33,7 +33,7 @@ object Schedules {
             picked = value
             ways.clear(); times.clear(); departures.clear(); listed = null
         }
-    val online get() = source.provider
+    val online get() = source.timetable != null
 
     // A line as its provider lists it: its id there, its number, mode (a timetable route type), operator and two ends;
     // routes: its provider's routes, both ways where it has them (both); names: the ministry's long names of those,
@@ -59,6 +59,9 @@ object Schedules {
     fun today(): LocalDate = LocalDate.now(israel)
     // A day's midnight in Israel, in epoch seconds.
     fun start(day: LocalDate): Long = day.atStartOfDay(israel).toEpochSecond()
+    // Where a day's timetable seconds count from, in epoch seconds: noon less twelve hours. That's its midnight, but
+    // for the two days a year the clocks change, when it keeps the rest of the day's times the clock's own.
+    fun base(day: LocalDate): Long = day.atTime(12, 0).atZone(israel).toEpochSecond() - 43_200
 
     // The provider's lines, kept on the phone: asked again once a day on Wi-Fi, and on mobile data only once a week, as
     // the list is a big one (HopOn's is 1.6 MB) and changes little. A provider that can't be reached leaves the copy.
@@ -71,7 +74,7 @@ object Schedules {
     fun lines(ctx: Context, s: Source = source): List<Line> {
         val freshFor = if (metered(ctx)) FRESH_METERED_MS else FRESH_MS
         listed?.takeIf { it.first == s && System.currentTimeMillis() - listedAt < freshFor }?.let { return it.second }
-        val file = File(ctx.filesDir, "schedules/${s.key}-lines${if (s.hopOn) "-grouped" else ""}.json")
+        val file = linesFile(ctx, s)
         val kept = runCatching { if (file.exists()) readLines(file.readText()) else null }.getOrNull()
         val age = System.currentTimeMillis() - file.lastModified()
         val fresh = kept != null && age < freshFor
@@ -94,11 +97,21 @@ object Schedules {
         return lines
     }
 
-    private fun fetchLines(s: Source): List<Line> = when {
-        s.hopOn -> BusNearby.lines(s)
-        s == Source.MOOVIT -> MoovitWeb.lines()
-        else -> throw IllegalStateException("${s.key} is no timetable provider")
+    // The copy on the phone however old, without asking the provider: Lines opens with it, and lines() asks when it's due.
+    @Synchronized
+    fun keptLines(ctx: Context, s: Source = source): List<Line>? {
+        listed?.takeIf { it.first == s }?.let { return it.second }
+        val file = linesFile(ctx, s)
+        val kept = runCatching { if (file.exists()) readLines(file.readText()) else null }.getOrNull() ?: return null
+        if (source == s) { listedAt = file.lastModified(); listed = s to kept }
+        return kept
     }
+
+    private fun linesFile(ctx: Context, s: Source) = File(ctx.filesDir, "schedules/${s.key}-lines${if (s.hopOn) "-grouped" else ""}.json")
+
+    private fun providerOf(s: Source) = s.timetable ?: throw IllegalStateException("${s.key} is no timetable provider")
+
+    private fun fetchLines(s: Source): List<Line> = providerOf(s).lines()
 
     // A line's ways, kept in memory for the day; the provider clients also keep their answers on disk.
     private val ways = ConcurrentHashMap<String, List<Way>>()
@@ -106,11 +119,8 @@ object Schedules {
     fun ways(line: Line): List<Way> {
         val s = source
         return ways.getOrPut("${s.key}/${line.id}/${today()}") {
-            arrange(when {
-                s.hopOn -> BusNearby.ways(line, s)
-                s == Source.MOOVIT -> MoovitWeb.ways(line, today())
-                else -> throw IllegalStateException("${s.key} is no timetable provider")
-            }, byEnd = s.hopOn && line.type == 2)
+            val p = providerOf(s)
+            arrange(p.ways(line, today()), byEnd = p.waysByEnd && line.type == 2)
         }
     }
 
@@ -142,16 +152,12 @@ object Schedules {
     fun times(line: Line, way: Way, at: Int, day: LocalDate): List<Long> {
         val s = source
         return times.getOrPut("${s.key}/${today()}/${line.id}/${way.id}/$at/$day") {
-            when {
-                s.hopOn -> BusNearby.times(line, way, at, day, s)
-                s == Source.MOOVIT -> MoovitWeb.times(line, way, at, day)
-                else -> throw IllegalStateException("${s.key} is no timetable provider")
-            }
+            providerOf(s).times(line, way, at, day)
         }
     }
 
-    // HopOn gives a stop's day directly; Moovit's comes from the schedules of the lines calling there.
-    val boards get() = source.provider
+    // HopOn gives a stop's day directly.
+    val boards get() = source.timetable != null
 
     // A stop's departures on a day, by its code, soonest first; kept for the day.
     private val departures = ConcurrentHashMap<String, List<Departure>>()
@@ -160,11 +166,7 @@ object Schedules {
         val s = source
         return departures.getOrPut("${s.key}/${today()}/$code/$day") {
             val lines = lines(ctx, s)
-            when {
-                s.hopOn -> BusNearby.departures(code, day, lines, s)
-                s == Source.MOOVIT -> MoovitWeb.departures(code, day, lines)
-                else -> throw IllegalStateException("${s.key} is no timetable provider")
-            }.sortedBy { it.at }
+            providerOf(s).departures(code, day, lines).sortedBy { it.at }
         }
     }
 

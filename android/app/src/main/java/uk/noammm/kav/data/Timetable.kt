@@ -169,7 +169,7 @@ internal object Timetable {
         val s = store(ctx)
         s.promote()
         val body = s.current() ?: return null.also { state = State.Missing }
-        return runCatching { Net.read(body.inputStream()) }.getOrElse { s.discard(); state = State.Missing; null }
+        return runCatching { Net.read(body) }.getOrElse { s.discard(); state = State.Missing; null }
     }
 
     // The first week, at setup or at a start without one, in the background, with its progress in state.
@@ -228,14 +228,14 @@ internal object Timetable {
         return true
     }
 
-    private fun metered(ctx: Context): Boolean =
+    internal fun metered(ctx: Context): Boolean =
         (ctx.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager).isActiveNetworkMetered
 
     // One file of the week: from GitHub's release, or from the rider's own server (at) as KavLive asks it. Null when it
     // didn't answer, empty when it answered without the file.
     private fun fetch(at: String?, key: String, name: String, long: Boolean = false, progress: (Float) -> Unit = {}): ByteArray? {
         val path = "/live/v1/bundle/$name"
-        val c = runCatching { URL(if (at == null) RELEASE + name else at + path).openConnection() as HttpURLConnection }.getOrNull()
+        val c = runCatching { RiderProxy.open(URL(if (at == null) RELEASE + name else at + path)) as HttpURLConnection }.getOrNull()
             ?: return null
         return try {
             c.connectTimeout = 10_000

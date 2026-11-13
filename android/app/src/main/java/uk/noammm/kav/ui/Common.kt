@@ -12,17 +12,28 @@ import androidx.compose.animation.core.spring
 import androidx.compose.foundation.gestures.draggable
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.ui.text.withLink
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.Groups
+import androidx.compose.material.icons.rounded.Place
+import androidx.compose.material.icons.rounded.Remove
+import androidx.compose.material3.Icon
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.*
+import androidx.compose.ui.unit.LayoutDirection
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
@@ -34,7 +45,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.Canvas
 import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
-import uk.noammm.kav.data.MoovitAlerts
+import uk.noammm.kav.data.RideAlerts
 import uk.noammm.kav.data.Transit
 import uk.noammm.kav.data.Net
 
@@ -54,26 +65,119 @@ internal fun bottomCover(): androidx.compose.ui.unit.Dp =
 val LocalLineOpener = staticCompositionLocalOf<((Transit.Leg, Transit.Resolved) -> Unit)?> { null }
 
 // Opens a service alert's notices, on a screen that hosts ServiceAlertSheet.
-val LocalServiceAlertOpener = staticCompositionLocalOf<(MoovitAlerts.Alert) -> Unit> { {} }
+val LocalServiceAlertOpener = staticCompositionLocalOf<(RideAlerts.Alert) -> Unit> { {} }
 
-// A ride's service alert: the one its planner gave (Moovit's plans carry them), else the line's in Moovit's list, where
-// that's switched on.
-internal fun lineAlert(r: Transit.Resolved, ride: Transit.Leg?, wait: Transit.Leg?): MoovitAlerts.Alert? {
+// A ride's service alert: the one its planner gave (a train's, from Israel Railways), else the line's from the chosen
+// alerts source (RideAlerts), where that's switched on.
+internal fun lineAlert(r: Transit.Resolved, ride: Transit.Leg?, wait: Transit.Leg?): RideAlerts.Alert? {
     val own = wait?.options?.firstOrNull { it.lineId == ride?.lineId && it.alertCategory > 0 } ?: wait
-    if (own != null && own.alertCategory >= 3 && own.alertText.isNotBlank()) {
-        return MoovitAlerts.Alert(own.alertCategory, own.alertText, own.alertIds)
-    }
-    return ride?.let { MoovitAlerts.of(r.line(it.lineId)) }?.takeIf { it.category >= 3 }
+    val listed = ride?.let { RideAlerts.of(r.line(it.lineId), it, r) }?.takeIf { it.category >= 3 }
+    val planned = own?.takeIf { it.alertCategory >= 3 && it.alertText.isNotBlank() }
+        ?.let { RideAlerts.Alert(it.alertCategory, it.alertText, it.alertIds, RideAlerts.source) }
+    return RideAlerts.combined(planned, listed)
 }
 
-// Keeps Moovit's alerts fresh while a screen with rides is open.
+// Keeps line alerts fresh while a screen with rides is open. rides: the ones a trip page shows, which Google is asked
+// about; a list of trips passes none.
 @Composable
-internal fun FreshAlerts() {
-    if (!MoovitAlerts.enabled) return
-    LaunchedEffect(T.rtl) {
+internal fun FreshAlerts(rides: List<Pair<Transit.Leg, Transit.Resolved>> = emptyList()) {
+    if (!RideAlerts.enabled) return
+    val shown by androidx.compose.runtime.rememberUpdatedState(rides)
+    LaunchedEffect(T.rtl, RideAlerts.source, RideAlerts.language) {
+        // Once the screen has come in, so the first ask doesn't share its opening's frames.
+        kotlinx.coroutines.delay(900)
         while (true) {
-            MoovitAlerts.refresh()
+            RideAlerts.refresh(shown)
             kotlinx.coroutines.delay(60_000)
+        }
+    }
+}
+
+// Keeps how busy the shown rides usually are fresh, from Google, while a trip page is open (GoogleCrowd).
+@Composable
+internal fun FreshCrowd(rides: List<Pair<Transit.Leg, Transit.Resolved>>) {
+    if (!uk.noammm.kav.data.GoogleCrowd.enabled) return
+    val shown by androidx.compose.runtime.rememberUpdatedState(rides)
+    LaunchedEffect(Unit) {
+        kotlinx.coroutines.delay(1_500)
+        while (true) {
+            uk.noammm.kav.data.GoogleCrowd.refresh(shown)
+            kotlinx.coroutines.delay(60_000)
+        }
+    }
+}
+
+// How busy the ride's next departure usually is, as Google predicts it for the line and the hour: a meter of five and
+// its words, Google's five steps in order (its scale runs from least to most; what it calls each is Kav's reading).
+// While Google is asked, the meter pulses; when asking failed, or Google has no level for it, it says so.
+@Composable
+internal fun CrowdMeter(ride: Transit.Leg, r: Transit.Resolved, dep: Transit.Departure?) {
+    val crowd = uk.noammm.kav.data.GoogleCrowd.displayed(
+        dep?.let { uk.noammm.kav.data.GoogleCrowd.of(ride, r, it) }, r.isTrain(ride),
+    )
+    var shown by remember { mutableStateOf(crowd) }
+    if (crowd != null) shown = crowd
+    androidx.compose.animation.AnimatedVisibility(
+        crowd != null,
+        enter = androidx.compose.animation.expandVertically(androidx.compose.animation.core.spring(dampingRatio = 1f, stiffness = 500f), expandFrom = Alignment.Top) +
+            androidx.compose.animation.fadeIn(tween(200, delayMillis = 60)),
+        exit = androidx.compose.animation.shrinkVertically(androidx.compose.animation.core.spring(dampingRatio = 1f, stiffness = 500f), shrinkTowards = Alignment.Top) +
+            androidx.compose.animation.fadeOut(tween(120)),
+    ) { shown?.let { CrowdLevel(it) } }
+}
+
+// The meter and its words for one state: the bars fill to a level, or wave while Google is asked, and stay empty
+// when it failed or has none. Each bar eases to its new fill and the words cross-fade, so a level coming in after the
+// wave grows out of it.
+@Composable
+internal fun CrowdLevel(crowd: uk.noammm.kav.data.GoogleCrowd.Crowd) {
+    val level = (crowd as? uk.noammm.kav.data.GoogleCrowd.Crowd.Level)?.level ?: 0
+    val words = when (crowd) {
+        is uk.noammm.kav.data.GoogleCrowd.Crowd.Level -> when (level) {
+            1 -> T("Usually not busy", "בדרך כלל לא עמוס")
+            2 -> T("Usually a little busy", "בדרך כלל עמוס מעט")
+            3 -> T("Usually busy", "בדרך כלל עמוס")
+            4 -> T("Usually very busy", "בדרך כלל עמוס מאוד")
+            else -> T("Usually full", "בדרך כלל מלא")
+        }
+        uk.noammm.kav.data.GoogleCrowd.Crowd.Asking -> T("Checking how busy…", "בודקים כמה עמוס…")
+        uk.noammm.kav.data.GoogleCrowd.Crowd.Failed -> T("Couldn't check how busy", "לא הצלחנו לבדוק כמה עמוס")
+        uk.noammm.kav.data.GoogleCrowd.Crowd.Unknown -> T("Google has no estimate for this one", "ל-Google אין הערכה לנסיעה הזו")
+    }
+    val said = if (level > 0) T("$words, $level of 5, as Google predicts", "$words, $level מתוך 5, לפי Google") else words
+    val asking = crowd == uk.noammm.kav.data.GoogleCrowd.Crowd.Asking
+    // One wave across the bars a second while asking; still otherwise, so a shown level draws nothing more.
+    val wave = if (asking) {
+        val t = androidx.compose.animation.core.rememberInfiniteTransition(label = "crowdWave")
+        t.animateFloat(0f, 1f, androidx.compose.animation.core.infiniteRepeatable(tween(1100, easing = androidx.compose.animation.core.LinearEasing)), label = "crowdWaveAt")
+    } else null
+    val crest = K.textTertiary
+    Row(
+        Modifier.padding(top = K.gap1).semantics(mergeDescendants = true) { contentDescription = said },
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(3.dp),
+    ) {
+        androidx.compose.material3.Icon(
+            Icons.Rounded.Groups, contentDescription = null,
+            tint = K.dim, modifier = Modifier.size(18.dp).padding(end = 3.dp),
+        )
+        for (i in 1..5) {
+            val fill by androidx.compose.animation.animateColorAsState(if (i <= level) K.textSecondary else K.fill, tween(260), label = "crowdBar")
+            Box(
+                Modifier.size(width = 5.dp, height = 12.dp).clip(RoundedCornerShape(2.dp))
+                    .drawBehind {
+                        drawRect(fill)
+                        // A brighter crest passing along the empty bars, left to right in either language's order.
+                        wave?.let { w ->
+                            val d = kotlin.math.abs(w.value * 6f - i)
+                            if (d < 1.5f) drawRect(crest.copy(alpha = (1f - d / 1.5f) * .9f))
+                        }
+                    },
+            )
+        }
+        androidx.compose.animation.Crossfade(words, animationSpec = tween(220), label = "crowdWords") { w ->
+            Text(w, style = K.type.subhead, color = if (crowd == uk.noammm.kav.data.GoogleCrowd.Crowd.Failed) K.textTertiary else K.dim,
+                modifier = Modifier.padding(start = K.gap1))
         }
     }
 }
@@ -84,7 +188,12 @@ val ISRAEL: TimeZone = TimeZone.getTimeZone("Asia/Jerusalem")
 // Times read "14:05", or "2:05 PM" for anyone who asked for AM/PM.
 val CLOCK get() = if (Shown.twelveHour) "h:mm a" else "HH:mm"
 
-fun clockFormat() = java.text.SimpleDateFormat(CLOCK, Locale.US).apply { timeZone = ISRAEL }
+// One per thread (a SimpleDateFormat isn't safe across them), made again only when the clock's style changes: screens
+// ask for it for each time they show.
+private val clocks = ThreadLocal<java.text.SimpleDateFormat>()
+
+fun clockFormat(): java.text.SimpleDateFormat = clocks.get()?.takeIf { it.toPattern() == CLOCK }
+    ?: java.text.SimpleDateFormat(CLOCK, Locale.US).apply { timeZone = ISRAEL }.also(clocks::set)
 
 fun hhmm(s: Int): String {
     val h = (s / 3600) % 24; val m = (s / 60) % 60
@@ -147,8 +256,8 @@ fun modeOf(type: Int): Mode = when (type) {
 
 fun isRail(routeType: Int, agencyId: Int) = routeType == 2 || agencyId == 854820
 
-// Israel Railways is paid at the station's gates, before the platform, so a train's payment comes with waiting for it
-// as well as with the ride. Light rail, buses and the rest are paid as they are ridden.
+// Israel Railways is paid at the station's gates, before the platform, so a train's payment comes with the way to its
+// station as well as with the ride. Light rail, buses and the rest are paid as they are ridden.
 internal fun paidAtEntry(ride: Transit.Leg, r: Transit.Resolved): Boolean {
     val agency = r.line(ride.lineId)?.agencyId ?: -1
     return isRail(r.routeType(agency), agency)
@@ -388,10 +497,11 @@ fun PreciseLocationNudge() {
 @Composable
 fun AlertPip(category: Int, size: androidx.compose.ui.unit.Dp = 13.dp) {
     if (category < 3) return
-    val tint = if (category >= 4) K.critical else K.problem
+    val tint = if (category >= 4) Ink.critical else Ink.problem
+    val bg = Ink.bg
     Canvas(Modifier.size(size)) {
         val w = this.size.width
-        drawCircle(K.bg, w * .5f, Offset(w * .5f, w * .5f))
+        drawCircle(bg, w * .5f, Offset(w * .5f, w * .5f))
         drawCircle(tint, w * .42f, Offset(w * .5f, w * .5f), style = Stroke(w * .13f))
         drawCircle(tint, w * .055f, Offset(w * .5f, w * .31f))
         drawLine(
@@ -402,8 +512,22 @@ fun AlertPip(category: Int, size: androidx.compose.ui.unit.Dp = 13.dp) {
 }
 
 @Composable
-fun AlertRow(alert: MoovitAlerts.Alert?) {
-    if (alert == null || alert.category < 3 || alert.label.isBlank()) return
+fun AlertRow(shown: RideAlerts.Alert?) {
+    // An alert read after the card shows opens in place, and goes the same way.
+    val raised = shown?.takeIf { it.category >= 3 && it.label.isNotBlank() }
+    var kept by remember { mutableStateOf(raised) }
+    if (raised != null) kept = raised
+    androidx.compose.animation.AnimatedVisibility(
+        raised != null,
+        enter = androidx.compose.animation.expandVertically(androidx.compose.animation.core.spring(dampingRatio = 1f, stiffness = 500f), expandFrom = androidx.compose.ui.Alignment.Top) +
+            androidx.compose.animation.fadeIn(androidx.compose.animation.core.tween(200, delayMillis = 60)),
+        exit = androidx.compose.animation.shrinkVertically(androidx.compose.animation.core.spring(dampingRatio = 1f, stiffness = 500f), shrinkTowards = androidx.compose.ui.Alignment.Top) +
+            androidx.compose.animation.fadeOut(androidx.compose.animation.core.tween(120)),
+    ) { kept?.let { AlertTile(it) } }
+}
+
+@Composable
+private fun AlertTile(alert: RideAlerts.Alert) {
     val open = LocalServiceAlertOpener.current
     val opens = alert.ids.isNotEmpty()
     // A quiet tile; the alert's colour comes with its warning glyph, and a chevron where it opens the notice.
@@ -425,27 +549,47 @@ fun AlertRow(alert: MoovitAlerts.Alert?) {
     }
 }
 
+// Any screen's alert row opens its notices here, over the whole app.
+@Composable
+fun ServiceAlerts(content: @Composable () -> Unit) {
+    var notice by remember { mutableStateOf<RideAlerts.Alert?>(null) }
+    CompositionLocalProvider(LocalServiceAlertOpener provides { notice = it }) {
+        Box(Modifier.fillMaxSize()) {
+            content()
+            notice?.let { ServiceAlertSheet(it) { notice = null } }
+        }
+    }
+}
+
 // An alert's notices in full, as the operator published them.
 @Composable
-fun ServiceAlertSheet(alert: MoovitAlerts.Alert, onDismiss: () -> Unit) {
-    var notices by remember(alert) { mutableStateOf<List<MoovitAlerts.Notice>?>(null) }
+fun ServiceAlertSheet(alert: RideAlerts.Alert, onDismiss: () -> Unit) {
+    // Kept ones open at once; others are fetched, and translated where they're read in English.
+    var notices by remember(alert, RideAlerts.language) { mutableStateOf(RideAlerts.cachedNotices(alert.ids, alert.source)?.let(RideAlerts::inLanguageKept)) }
     var failed by remember(alert) { mutableStateOf(false) }
-    LaunchedEffect(alert) {
-        runCatching { kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { MoovitAlerts.notices(alert.ids) } }
-            .onSuccess { notices = it }
-            .onFailure { failed = true }
+    var tries by remember(alert) { mutableIntStateOf(0) }
+    LaunchedEffect(alert, RideAlerts.language, tries) {
+        if (notices != null) return@LaunchedEffect
+        failed = false
+        // A second try a moment later, before saying so.
+        val found = runCatching { RideAlerts.noticesNow(alert.ids, alert.source) }.getOrNull()
+            ?: run { kotlinx.coroutines.delay(2_000); runCatching { RideAlerts.noticesNow(alert.ids, alert.source) }.getOrNull() }
+        if (found == null) failed = true else notices = RideAlerts.inLanguage(found)
     }
     BottomSheet(onDismiss) { close ->
+        // A stop or a line in the notice opens on its tab, the sheet closing first.
+        val openStop: (Int) -> Unit = { code -> close { onDismiss(); uk.noammm.kav.AlertLink.alert = alert; uk.noammm.kav.AlertLink.stop = code } }
+        val openLine: (String) -> Unit = { number -> close { onDismiss(); uk.noammm.kav.AlertLink.alert = alert; uk.noammm.kav.AlertLink.line = number } }
         SheetHeader(alert.label.ifBlank { T("Service alert", "הודעת שירות") }, { close(onDismiss) })
         Column(Modifier.heightIn(max = 480.dp).verticalScroll(rememberScrollState())) {
             val list = notices
             when {
                 list == null && !failed ->
                     LoadingPulse(T("Fetching the notice", "מביאים את ההודעה"), Modifier.fillMaxWidth().padding(top = K.gap4, bottom = K.gap2))
-                failed -> NoteCard(
-                    T("The notice couldn't be fetched. Try again in a moment.", "לא הצלחנו להביא את ההודעה. נסו שוב בעוד רגע."),
-                    Modifier.padding(top = K.gap3),
-                )
+                failed -> Column(Modifier.padding(top = K.gap3), verticalArrangement = Arrangement.spacedBy(K.gap2)) {
+                    NoteCard(T("The notice couldn't be fetched.", "לא הצלחנו להביא את ההודעה."))
+                    KavButton(T("Try again", "נסו שוב"), { tries++ }, style = ButtonStyle.Secondary)
+                }
                 list.isNullOrEmpty() -> NoteCard(
                     T("The operator published no further detail for this alert.", "המפעיל לא פרסם פרטים נוספים על הודעה זו."),
                     Modifier.padding(top = K.gap3),
@@ -456,22 +600,90 @@ fun ServiceAlertSheet(alert: MoovitAlerts.Alert, onDismiss: () -> Unit) {
                         Separator(0.dp)
                     }
                     Spacer(Modifier.height(K.gap3))
-                    a.title.takeIf { it.isNotBlank() }?.let {
-                        Text(it, style = K.type.headline)
-                        Spacer(Modifier.height(K.gap2))
+                    // A notice in Hebrew reads right to left whatever Kav's language: the operators publish most only so.
+                    // Its dates are Kav's own words, in Kav's direction.
+                    // By what most of it is written in: an English notice keeps a town's Hebrew name here and there.
+                    val hebrew = HEBREW.findAll(a.title + a.body).count() > LATIN.findAll(a.title + a.body).count()
+                    val notice = if (hebrew) LayoutDirection.Rtl else LocalLayoutDirection.current
+                    CompositionLocalProvider(LocalLayoutDirection provides notice) {
+                        a.title.takeIf { it.isNotBlank() }?.let {
+                            Text(it, style = K.type.headline, modifier = Modifier.fillMaxWidth())
+                            Spacer(Modifier.height(K.gap2))
+                        }
                     }
                     alertWindow(a)?.let {
                         Text(it, style = K.type.caption)
                         Spacer(Modifier.height(K.gap2))
                     }
-                    alertText(a)?.let { Text(it, style = K.type.body, color = K.textSecondary) }
+                    CompositionLocalProvider(LocalLayoutDirection provides notice) {
+                        Box(Modifier.fillMaxWidth()) { alertText(a)?.let { AlertBody(it, a.detour, openLine, openStop) } }
+                    }
+                    // The detour's stops the notice's own text doesn't list (a feed's, which names them by id).
+                    a.detour?.let { d ->
+                        val listed = alertText(a)?.let { t -> alertBlocks(t).flatMap { it.stops } }.orEmpty().toSet()
+                        DetourStops(RideAlerts.Detour(d.skipped - listed, d.added - listed), openStop)
+                    }
                 }
             }
         }
     }
 }
 
-private fun alertWindow(a: MoovitAlerts.Notice): String? {
+// A detour's stops by name, as Kav's timetable names them in Kav's language, each with its code.
+@Composable
+private fun DetourStops(d: RideAlerts.Detour, open: (Int) -> Unit) {
+    val net = uk.noammm.kav.Loaded.net
+    val skipped = T("Stops not served", "תחנות מבוטלות")
+    for ((title, codes) in listOf(skipped to d.skipped, T("Stops added", "תחנות חלופיות") to d.added)) {
+        if (codes.isEmpty()) continue
+        Spacer(Modifier.height(K.gap4))
+        Text(title, style = K.type.subhead.copy(fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold), color = K.text)
+        Spacer(Modifier.height(K.gap2))
+        val served = title != skipped
+        StopRows(codes, open) { served }
+    }
+}
+
+// Stops by their codes, each with its photo or mark and its name in Kav's language from the timetable, opening on the
+// Stops tab. added: a red minus where the detour skips it, a green plus where it adds it, none when neither's known.
+@Composable
+private fun StopRows(codes: List<Int>, open: (Int) -> Unit, added: (Int) -> Boolean?) {
+    val net = uk.noammm.kav.Loaded.net
+    ListGroup {
+        for (code in codes) row {
+            val stop = net?.let { uk.noammm.kav.data.KavLive.stopOfCode(it, code) }?.takeIf { it >= 0 }
+            ListRow(
+                stop?.let { net.stopName(it) } ?: T("Stop $code", "תחנה $code"),
+                subtitle = T("Stop $code", "תחנה $code"),
+                leading = { DetourStopMark(net, stop, added(code)) },
+                // A stop the timetable doesn't know has nothing to open.
+                onClick = stop?.let { { open(code) } },
+            )
+        }
+    }
+}
+
+// A detour's stop: its photo or mark as on the trip, with a red minus on its corner where it isn't served and a green
+// plus where it's added.
+@Composable
+private fun DetourStopMark(net: uk.noammm.kav.data.Net?, stop: Int?, added: Boolean?) {
+    Box {
+        if (net != null && stop != null) StopGlyphOrPhoto(net, stop, null, thumb = 40.dp)
+        else StopGlyphOrPhoto(-1, null, thumb = 40.dp)
+        if (added != null) Box(
+            Modifier.align(Alignment.BottomEnd).offset(x = 4.dp, y = 4.dp).size(18.dp).clip(CircleShape)
+                .background(K.surface).padding(2.dp).clip(CircleShape).background(if (added) K.realtime else K.critical),
+            contentAlignment = Alignment.Center,
+        ) {
+            androidx.compose.material3.Icon(
+                if (added) Icons.Rounded.Add else Icons.Rounded.Remove, contentDescription = null,
+                tint = Color.White, modifier = Modifier.size(12.dp),
+            )
+        }
+    }
+}
+
+private fun alertWindow(a: RideAlerts.Notice): String? {
     val day = java.text.SimpleDateFormat("d MMM, $CLOCK", T.locale).apply { timeZone = ISRAEL }
     fun at(t: Long) = day.format(java.util.Date(t * 1000))
     return when {
@@ -482,11 +694,172 @@ private fun alertWindow(a: MoovitAlerts.Notice): String? {
     }
 }
 
-private fun alertText(a: MoovitAlerts.Notice): String? {
+// An alert's text with its lists of line numbers (a number on each line, or several on one) as a row of line plates.
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun AlertBody(text: String, detour: RideAlerts.Detour?, openLine: (String) -> Unit, openStop: (Int) -> Unit) {
+    Column(verticalArrangement = Arrangement.spacedBy(K.gap2)) {
+        for (block in alertBlocks(text)) {
+            if (block.stops.isNotEmpty()) StopRows(block.stops, openStop) { code ->
+                when (code) { in detour?.added.orEmpty() -> true; in detour?.skipped.orEmpty() -> false; else -> null }
+            }
+            else if (block.lines.isEmpty()) LinkedText(block.text, openLine)
+            else FlowRow(horizontalArrangement = Arrangement.spacedBy(K.gap1), verticalArrangement = Arrangement.spacedBy(K.gap1)) {
+                // Each line opens in the Lines tab, found by its number.
+                for (n in block.lines) Row(
+                    Modifier.clip(RoundedCornerShape(6.dp)).clickable(role = Role.Button, onClickLabel = T("Open line $n", "פתיחת קו $n")) { openLine(n) },
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    LinePlateBadge(n, Mode.BUS, null, dense = true)
+                    block.towards[n]?.let { Text(it, style = K.type.subhead, color = K.dim, modifier = Modifier.padding(start = K.gap1, end = K.gap1)) }
+                }
+            }
+        }
+    }
+}
+
+// An alert's sentence with each line it names ("Line 20", "לקו 4", "קווים 9 ו-19") a link to the line.
+@Composable
+private fun LinkedText(text: String, openLine: (String) -> Unit) {
+    val link = androidx.compose.ui.text.TextLinkStyles(androidx.compose.ui.text.SpanStyle(color = K.accent, fontWeight = androidx.compose.ui.text.font.FontWeight.Medium))
+    val ltr = LocalLayoutDirection.current == LayoutDirection.Ltr
+    val shown = remember(text, ltr) {
+        // In an English notice a line with a Hebrew letter ("17ב'") is one piece read left to right, or its letter turns
+        // the numbers around it.
+        fun piece(s: String) = if (ltr) s.replace(HEBREW_LINE) { "\u2066${it.value}\u2069" } else s
+        androidx.compose.ui.text.buildAnnotatedString {
+            var at = 0
+            for ((range, number) in lineMentions(text)) {
+                append(piece(text.substring(at, range.first)))
+                withLink(androidx.compose.ui.text.LinkAnnotation.Clickable("line:$number", link) { openLine(number) }) {
+                    append(piece(text.substring(range.first, range.last + 1)))
+                }
+                at = range.last + 1
+            }
+            append(piece(text.substring(at)))
+        }
+    }
+    Text(shown, style = K.type.body, color = K.textSecondary)
+}
+
+// A line number with its Hebrew letter, a geresh after it or not: "17ב'", "6ב".
+private val HEBREW_LINE = Regex("""(?<![\d\u2066])\d{1,3}[א-ת]['׳]?(?![א-ת])""")
+private val LINE_WORD = Regex("""(?i)\blines?\b|(?<![א-ת])[לבהומש]{0,2}(?:קו|קוו?ים|קווי|קוי)(?![א-ת])""")
+// A line number, not a time or a date ("8:00", "8.11"), its letter with a geresh or not ("17ב'").
+private val LINE_IN_TEXT = Regex("""\d{1,3}(?:[א-תA-Za-z]['׳]?)?(?![א-תA-Za-z\d]|[:.]\d)""")
+// The en dash operators type in notices, as a code so the source holds none.
+private val DASH = Char(0x2013)
+// At most one word between the word and its list: "קווים מושפעים-400/401", "בקוים:", "הקווים, 266".
+private val LINE_LEAD = Regex("""^[\s:,]*(?:[א-תA-Za-z'"]{2,12}[\s:,\-${DASH}]*)?""")
+// Between numbers of one list: commas, slashes, spaces, "ו" or "and"; "-2" after a number is its way.
+private val LINE_BETWEEN = Regex("""^(?:-\d(?!\d))?(?:\s*(?:,|/|&|and(?=\s)|ו-?|ו־|־|\s)\s*)+""")
+// After a number of the list, the word for lines and where it goes, up to the next part: "68 lines towards Kiriat Ono, 205".
+private val LINE_TAIL = Regex("""^(?:\s+lines?\b)?(?:\s+(?:towards|לכיוון)\s+[^\d,;:\n]+)?""")
+// A number the word for lines comes after, as English has it: "the 68 lines".
+private val LINES_AFTER = Regex("""(?<![\d:.])\d{1,3}[א-תA-Za-z]?(?=\s+lines?\b)""")
+
+// Where a text names lines, each number's place in it: the numbers after "line(s)" or "קו"/"קווים", one or a list.
+internal fun lineMentions(text: String): List<Pair<IntRange, String>> {
+    val out = ArrayList<Pair<IntRange, String>>()
+    val starts = LINE_WORD.findAll(text).map { word ->
+        val after = word.range.last + 1
+        after + (LINE_LEAD.find(text.substring(after))?.value?.length ?: 0)
+    } + LINES_AFTER.findAll(text).map { it.range.first }
+    for (start in starts) {
+        var at = start
+        while (at < text.length) {
+            val m = LINE_IN_TEXT.find(text, at)?.takeIf { it.range.first == at } ?: break
+            if (out.none { it.first.first == m.range.first }) out += m.range to m.value
+            at = m.range.last + 1
+            at += LINE_TAIL.find(text.substring(at))?.value?.length ?: 0
+            val gap = LINE_BETWEEN.find(text.substring(at))?.value ?: break
+            if (gap.isEmpty()) break
+            at += gap.length
+        }
+    }
+    return out.sortedBy { it.first.first }
+}
+
+// A run of an alert's text, a list of line numbers in it, or a list of stops by their codes ("20779 - יוחנן הסנדלר").
+// towards: where a line in the list goes, where the operator wrote it ("349 כוכב יאיר").
+internal class AlertBlock(
+    val text: String, val lines: List<String> = emptyList(), val towards: Map<String, String> = emptyMap(),
+    val stops: List<Int> = emptyList(),
+)
+
+private val TABLE_HEAD = Regex("""מק["'״]{1,2}ט|(?i)stop code""")
+
+// A line naming a stop by its code first: "20779 - יוחנן הסנדלר/בלפור", "37192 הגולן/החרמון (תחנת מוצא)".
+private val STOP_LINE = Regex("""^\s*(\d{4,6})(?!\d)\s*[-${DASH}:]?\s*\S.*$""")
+
+private val HEBREW = Regex("[\u0590-\u05FF]")
+private val LATIN = Regex("[A-Za-z]")
+private val LINE_NUMBER = Regex("[0-9]{1,3}[א-תA-Za-z]?")
+// A line number, then where it goes in words (no digits): "349 כוכב יאיר", "370 ת\"א".
+private val LINE_TOWARDS = Regex("([0-9]{1,3}[א-תA-Za-z]?)(?![0-9A-Za-zא-ת])((?:\\s+[^\\s0-9][^0-9]*)?)")
+
+// Lines holding only line numbers (several, or one after a line ending with a colon) become one list; the rest stays text.
+// In a list (after a colon, or next to a line of it), one line number with where it goes is a part of it too: "205
+// towards Yehud", "68 לקריית אונו".
+internal fun alertBlocks(text: String): List<AlertBlock> {
+    val out = ArrayList<AlertBlock>()
+    val prose = ArrayList<String>()
+    val numbers = ArrayList<String>()
+    val towards = LinkedHashMap<String, String>()
+    // A line of line numbers alone, or of parts each a line number and maybe where it goes: "347 / 349 כוכב יאיר / 370".
+    fun numbersOf(line: String): List<String>? {
+        val tokens = line.split(Regex("[\\s,،;/·•${DASH}-]+")).filter { it.isNotBlank() }
+        if (tokens.isNotEmpty() && tokens.all(LINE_NUMBER::matches)) return tokens
+        val parts = line.split(Regex("\\s*[/,،;]\\s*")).map { it.trim() }.filter { it.isNotEmpty() }
+        if (parts.size < 2) return null
+        val found = parts.map { LINE_TOWARDS.matchEntire(it) ?: return null }
+        return found.map { m ->
+            m.groupValues[2].trim().takeIf { it.isNotEmpty() }?.let { towards.putIfAbsent(m.groupValues[1], it) }
+            m.groupValues[1]
+        }
+    }
+    fun flushProse() { prose.joinToString("\n").trim().takeIf { it.isNotEmpty() }?.let { out += AlertBlock(it) }; prose.clear() }
+    fun flushNumbers() {
+        // A line listed once for each way is shown once.
+        if (numbers.size >= 2 || numbers.isNotEmpty() && out.lastOrNull()?.text?.trimEnd()?.endsWith(':') == true) out += AlertBlock("", numbers.distinct(), towards.toMap())
+        else if (numbers.isNotEmpty()) out += AlertBlock(numbers.joinToString(" "))
+        numbers.clear(); towards.clear()
+    }
+    val stops = ArrayList<Int>()
+    fun flushStops() { if (stops.isNotEmpty()) out += AlertBlock("", stops = stops.distinct()); stops.clear() }
+    for (line in text.lines()) {
+        val stop = STOP_LINE.matchEntire(line)?.groupValues?.get(1)?.toIntOrNull()
+        if (stop != null) {
+            // A table's heading over the stops ("מק"ט תחנה  שם תחנה", "Stop code  Stop name"): the rows show both.
+            if (stops.isEmpty() && prose.lastOrNull()?.let(TABLE_HEAD::containsMatchIn) == true) prose.removeAt(prose.size - 1)
+            flushNumbers(); flushProse(); stops += stop; continue
+        }
+        if (stops.isNotEmpty()) { if (line.isBlank()) continue; flushStops() }
+        val inList = numbers.isNotEmpty() || prose.lastOrNull()?.trimEnd()?.endsWith(':') == true ||
+            prose.isEmpty() && out.lastOrNull()?.lines?.isNotEmpty() == true
+        val found = numbersOf(line) ?: LINE_TOWARDS.matchEntire(line.trim())?.takeIf { inList && it.groupValues[2].isNotBlank() }?.let { m ->
+            towards.putIfAbsent(m.groupValues[1], m.groupValues[2].trim())
+            listOf(m.groupValues[1])
+        }
+        if (found != null) { flushProse(); numbers += found }
+        else if (line.isBlank() && numbers.isNotEmpty()) continue
+        else { flushNumbers(); prose += line }
+    }
+    flushStops(); flushNumbers(); flushProse()
+    return out
+}
+
+private fun alertText(a: RideAlerts.Notice): String? {
     val raw = a.body.takeIf { it.isNotBlank() } ?: return null
     if (!a.html && !raw.contains('<')) return raw.trim().replace(Regex("\n{3,}"), "\n\n")
     return androidx.core.text.HtmlCompat.fromHtml(raw, androidx.core.text.HtmlCompat.FROM_HTML_MODE_COMPACT)
         .toString().replace(Regex("\n{3,}"), "\n\n").trim().ifBlank { null }
+}
+
+// How many bottom sheets are open. While one is, the tab bar slides away (MainActivity), as it does for paying and
+// reports, so a sheet and its scrim are the top of the screen and nothing floats over them.
+internal object Sheets {
+    var open by mutableIntStateOf(0)
 }
 
 @Composable
@@ -496,9 +869,16 @@ fun BottomSheet(
     content: @Composable ColumnScope.(close: (then: () -> Unit) -> Unit) -> Unit,
 ) {
     val state = remember { androidx.compose.animation.core.MutableTransitionState(false).apply { targetState = true } }
+    // Counted from opening until it starts to close, so the bar comes back as the sheet goes down.
+    val opened = state.targetState
+    DisposableEffect(opened) {
+        if (opened) Sheets.open++
+        onDispose { if (opened) Sheets.open-- }
+    }
     var after by remember { mutableStateOf<(() -> Unit)?>(null) }
     val close: (() -> Unit) -> Unit = { then -> if (after == null) { after = then; state.targetState = false } }
-    androidx.activity.compose.BackHandler { close(onDismiss) }
+    // Only while it's open: one closing leaves Back to the screen under it.
+    androidx.activity.compose.BackHandler(enabled = state.targetState) { close(onDismiss) }
     if (state.isIdle && !state.currentState) LaunchedEffect(Unit) { after?.invoke() }
     // Pulled down by its grabber, the sheet follows the finger; let go far enough or fast enough and it closes,
     // otherwise it springs back.
@@ -533,7 +913,8 @@ fun BottomSheet(
                         ) { it },
                     )
                     .offset { androidx.compose.ui.unit.IntOffset(0, pulled.roundToInt()) }
-                    .padding(bottom = maxOf(bottomCover(), LocalBottomBarInset.current))
+                    // Above the system's bar (and the keyboard); the tab bar is away while a sheet is open.
+                    .padding(bottom = bottomCover())
                     .padding(K.gap3)
                     .panel(K.rSheet, solid = true)
                     .clickable(enabled = false) {},
@@ -611,6 +992,163 @@ internal fun StopGlyphOrPhoto(
     }
 }
 
+// A place by the photo Google Maps shows of it, where photos are on and Google has one; until then, and else, its
+// glyph on a quiet tile of the photo's size and shape, as a stop has. The photo fades in over the tile as it comes, and
+// tapped (open), shows large.
+@Composable
+internal fun PlaceGlyphOrPhoto(
+    place: uk.noammm.kav.data.Transit.Place, thumb: Dp = 40.dp, open: Boolean = true, glyph: @Composable () -> Unit,
+) {
+    val asked = place.takeIf { StopPhotos.enabled && uk.noammm.kav.data.PlacePhotos.worthAsking(it) }
+    val key = remember(place.name, place.lat, place.lon, place.googleId) { uk.noammm.kav.data.PlacePhotos.key(place) }
+    var shot by remember(key) { mutableStateOf(asked?.let { uk.noammm.kav.data.PlacePhotos.thumbNow(it) }) }
+    var none by remember(key) { mutableStateOf(false) }
+    // On a weak connection Google is asked again, less and less often, for as long as the place is on screen; a row only
+    // passing by while a search is typed asks nothing.
+    if (asked != null) LaunchedEffect(key) {
+        var wait = 2_000L
+        while (shot == null && !none) {
+            try {
+                val got = uk.noammm.kav.data.PlacePhotos.thumb(asked, wait = 300)
+                if (got == null) none = true else shot = got
+            } catch (e: java.io.IOException) {
+                kotlinx.coroutines.delay(wait)
+                wait = (wait * 2).coerceAtMost(60_000L)
+            }
+        }
+    }
+    androidx.compose.animation.Crossfade(shot.takeIf { asked != null }, animationSpec = tween(220), label = "placePhoto") { b ->
+        if (b == null) Box(
+            Modifier.size(thumb).clip(RoundedCornerShape(K.rTile)).background(K.fill),
+            contentAlignment = Alignment.Center,
+        ) { glyph() }
+        else PlacePhotoTile(place, b, thumb, open)
+    }
+}
+
+// Where a trip starts or ends, as its tile shows it: one of the rider's favourites (by its label, or its place within a
+// few metres) by the favourite's own icon, as Home's grid has it, never looked up; another named place by Google Maps'
+// photo of it; else none (where you are, a pinned spot).
+internal sealed interface TripEnd {
+    class Favourite(val icon: String) : TripEnd
+    class Place(val place: uk.noammm.kav.data.Transit.Place) : TripEnd
+}
+
+@Composable
+internal fun rememberTripEnd(label: String, at: Pair<Double, Double>?): TripEnd? {
+    val ctx = androidx.compose.ui.platform.LocalContext.current
+    return remember(label, at) {
+        // The favourite named so first, else the one saved nearest the end within a few metres: the first to match by
+        // either let another favourite saved nearby, listed before it, take an end the rider named outright.
+        val favourites = uk.noammm.kav.Prefs.favourites(ctx)
+        val favourite = favourites.firstOrNull { it.label == label } ?: at?.let { (lat, lon) ->
+            favourites.mapNotNull { f -> f.place?.let { f to metres(it.lat, it.lon, lat, lon) } }
+                .filter { it.second <= FAVOURITE_NEAR_M }.minByOrNull { it.second }?.first
+        }
+        when {
+            favourite != null -> TripEnd.Favourite(favourite.icon)
+            at == null -> null
+            else -> uk.noammm.kav.data.Transit.Place(label, "", at.first, at.second)
+                .takeIf { uk.noammm.kav.data.PlacePhotos.worthAsking(it) }?.let { TripEnd.Place(it) }
+        }
+    }
+}
+
+// A saved place's own icon on its tile, as the favourites grid draws it, at this size.
+@Composable
+internal fun FavouriteTile(icon: String, size: Dp = 40.dp) {
+    Box(Modifier.size(size).clip(RoundedCornerShape(K.rTile)).background(K.fill), contentAlignment = Alignment.Center) {
+        Icon(favouriteIcon(icon), contentDescription = null, tint = K.text, modifier = Modifier.size(size / 2))
+    }
+}
+
+// How far a trip's end can be from a favourite's place and still be that favourite.
+private const val FAVOURITE_NEAR_M = 30.0
+
+// glyph: a place's while its photo comes or where it has none.
+@Composable
+internal fun TripEndTile(
+    end: TripEnd, thumb: Dp = 40.dp, open: Boolean = true,
+    glyph: @Composable () -> Unit = {
+        Icon(Icons.Rounded.Place, contentDescription = null, tint = K.muted, modifier = Modifier.size(18.dp))
+    },
+) {
+    when (end) {
+        is TripEnd.Favourite -> FavouriteTile(end.icon, thumb)
+        is TripEnd.Place -> PlaceGlyphOrPhoto(end.place, thumb, open, glyph)
+    }
+}
+
+// The place's photo; tapped, the photo large, as a stop's is. A place's tiles are few, so its large photo is fetched as
+// soon as the tile shows.
+@Composable
+private fun PlacePhotoTile(place: uk.noammm.kav.data.Transit.Place, shot: android.graphics.Bitmap, thumb: Dp, open: Boolean) {
+    val said = T("A photo of ${place.name}", "תמונה של ${place.name}")
+    PhotoTile(shot, said, said, thumb, open, ahead = true, key = place) { uk.noammm.kav.data.PlacePhotos.full(place) }
+}
+
+// A photo on its tile; tapped, the photo large. The large one opens only once it's in, so a photo never sharpens in front
+// of you: until then a small ring turns on the tile. Where it can't be had, it opens with the photo there is and a way to
+// try again, which closes it and opens it afresh once the large one is in. ahead: fetch the large one as soon as the tile
+// shows (a screen's few tiles), else on the tap (a list's many). onLarge: a tap on the large photo, besides closing it.
+@Composable
+private fun PhotoTile(
+    shot: android.graphics.Bitmap, said: String, largeSaid: String, thumb: Dp, open: Boolean, ahead: Boolean, key: Any,
+    largeAction: String? = null, onLarge: () -> Unit = {}, fetch: suspend () -> android.graphics.Bitmap?,
+) {
+    var full by remember(key) { mutableStateOf<android.graphics.Bitmap?>(null) }
+    var failed by remember(key) { mutableStateOf(false) }
+    var waiting by remember(key) { mutableStateOf(false) }
+    var large by remember(key) { mutableStateOf(false) }
+    var attempt by remember(key) { mutableIntStateOf(0) }
+    LaunchedEffect(key, ahead || waiting, attempt) {
+        if (!(ahead || waiting) || full != null) return@LaunchedEffect
+        val got = runCatching { fetch() }.getOrNull()
+        if (got != null) full = got else failed = true
+    }
+    // A tap made while the large photo comes opens it the moment it's in.
+    LaunchedEffect(waiting, full, failed) { if (waiting && (full != null || failed)) { waiting = false; large = true } }
+    Box(
+        Modifier.size(thumb).clip(RoundedCornerShape(K.rTile))
+            .then(if (open) Modifier.clickable(role = Role.Button, onClickLabel = largeSaid) {
+                if (full != null) large = true
+                else { if (failed) { failed = false; attempt++ }; waiting = true }
+            } else Modifier),
+        contentAlignment = Alignment.Center,
+    ) {
+        androidx.compose.foundation.Image(shot.asImageBitmap(), said, Modifier.matchParentSize(),
+            contentScale = androidx.compose.ui.layout.ContentScale.Crop)
+        androidx.compose.animation.AnimatedVisibility(
+            waiting, Modifier.matchParentSize(),
+            enter = androidx.compose.animation.fadeIn(tween(150)), exit = androidx.compose.animation.fadeOut(tween(150)),
+        ) {
+            Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = .35f)), contentAlignment = Alignment.Center) {
+                Spinner(thumb * .4f, track = Color.White.copy(alpha = .3f), arc = Color.White)
+            }
+        }
+    }
+    if (!large) return
+    androidx.compose.ui.window.Dialog(onDismissRequest = { large = false }) {
+        // The button goes under the photo: on it, a busy street showed through and drowned it out.
+        Column {
+            androidx.compose.foundation.Image(
+                (full ?: shot).asImageBitmap(), largeSaid,
+                Modifier.fillMaxWidth().aspectRatio(1.6f).clip(RoundedCornerShape(K.rSheet))
+                    .clickable(role = Role.Button) { large = false; onLarge() },
+                contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+            )
+            if (full == null) KavButton(
+                T("Try again", "נסו שוב"), { large = false; failed = false; attempt++; waiting = true },
+                Modifier.padding(top = K.gap3), style = ButtonStyle.Secondary, wide = true,
+            )
+            else if (largeAction != null) KavButton(
+                largeAction, { large = false; onLarge() },
+                Modifier.padding(top = K.gap3), style = ButtonStyle.Secondary, wide = true,
+            )
+        }
+    }
+}
+
 // Where a stop's photo goes while it comes: the stop's mode on a quiet tile of the photo's size and shape.
 @Composable
 private fun StopTile(size: Dp, mode: Mode) {
@@ -620,27 +1158,15 @@ private fun StopTile(size: Dp, mode: Mode) {
     ) { ModeGlyph(mode, K.muted, size * .44f) }
 }
 
-// The stop's photo; tapped, the photo large, with Street View a tap further.
+// The stop's photo; tapped, the photo large, with Street View a tap further. A list holds many stops, so the large one
+// is fetched on the tap.
 @Composable
 private fun StopPhotoTile(stop: StopLook, shot: StopPhotos.Photo, thumb: Dp) {
-    var open by remember { mutableStateOf(false) }
-    androidx.compose.foundation.Image(
-        shot.bitmap.asImageBitmap(), T("A photo of the stop", "תמונה של התחנה"),
-        Modifier.size(thumb).clip(RoundedCornerShape(K.rTile)).clickable(role = Role.Button) { open = true },
-        contentScale = androidx.compose.ui.layout.ContentScale.Crop,
-    )
-    if (!open) return
-    var full by remember { mutableStateOf<StopPhotos.Photo?>(null) }
-    LaunchedEffect(stop) { full = runCatching { StopPhotos.full(stop.look) }.getOrNull() }
-    androidx.compose.ui.window.Dialog(onDismissRequest = { open = false }) {
-        val shown = full ?: shot
-        androidx.compose.foundation.Image(
-            shown.bitmap.asImageBitmap(), T("Open Street View", "פתיחת Street View"),
-            Modifier.fillMaxWidth().aspectRatio(1.6f).clip(RoundedCornerShape(K.rSheet))
-                .clickable(role = Role.Button) { open = false; StreetViewer.open = stop },
-            contentScale = androidx.compose.ui.layout.ContentScale.Crop,
-        )
-    }
+    PhotoTile(
+        shot.bitmap, T("A photo of the stop", "תמונה של התחנה"), T("Open stop photo", "פתיחת תמונת התחנה"), thumb,
+        open = true, ahead = false, key = StopPhotos.key(stop.look),
+        largeAction = T("Street View", "Street View"), onLarge = { StreetViewer.open = stop },
+    ) { StopPhotos.full(stop.look)?.bitmap }
 }
 
 // Where no photo is asked for: the stop's sign, as a trip's steps draw it, on its own in the photo's place.

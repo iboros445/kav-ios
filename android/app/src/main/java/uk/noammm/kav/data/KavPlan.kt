@@ -10,7 +10,7 @@ import uk.noammm.kav.ui.T
 import java.util.Locale
 
 // Normalizes provider plans into Transit. Ministry stop, line and operator ids start at BASE;
-// journeys use KavLive's negative ids. MoovitWeb retains its provider ids.
+// journeys use KavLive's negative ids.
 // Live times come from the independently selected live provider.
 object KavPlan {
     private const val BASE = 2_000_000_000
@@ -32,18 +32,17 @@ object KavPlan {
 
     fun agencyName(agencyId: Int): String? = operators[agencyId]
 
-    // Another planner's operator (Moovit's own ids, which never reach BASE), kept with these.
-    internal fun keepOperator(agencyId: Int, name: String) { operators[agencyId] = name }
-
-    // Who plans trips, independently of live locations: Moovit's website until the settings are read. Unknown stored
-    // choices use the old preference migration.
-    var source by mutableStateOf(Source.MOOVIT)
+    // Who plans trips, independently of live locations: Kav's server until the settings are read.
+    var source by mutableStateOf(Source.KAV)
 
     // Every planner's routes, a tab each on the results (Settings), in the rider's order; the rider's own server only
     // once it's set up.
     var everyPlanner by mutableStateOf(false)
     var tabOrder by mutableStateOf(Source.PLANNING)
-    fun tabs(): List<Source> = tabOrder.filter { it != Source.OWN || KavLive.ownServer.isNotEmpty() }
+    // Planners the rider took off the tabs, never asked then; the one chosen above keeps its tab, as results open on it.
+    var hiddenTabs by mutableStateOf(emptySet<Source>())
+    fun offeredTabs(): List<Source> = tabOrder.filter { it != Source.OWN || KavLive.ownServer.isNotEmpty() }
+    fun tabs(): List<Source> = offeredTabs().filter { it == source || it !in hiddenTabs }
 
     // The server that plans for a tab: the chosen planner's as planner() has it, any other's as it's set.
     fun plannerOf(s: Source): String? = if (s == source) planner() else KavLive.serverOf(s)
@@ -63,16 +62,10 @@ object KavPlan {
     fun wanted(): Boolean = planner() != null
 
     // A shared trip Kav planned only a Kav planner finds again, whichever plans now: the one chosen, else the server live
-    // locations come from when that's Kav's or the rider's own. Never a provider for what it wasn't chosen for: Moovit's
-    // website, which knows none of Kav's rides, plans such a link the same way at the same time.
-    fun linkPlanner(): String? =
-        planner() ?: KavLive.server.takeIf { KavLive.enabled && !KavLive.source.provider && source != Source.MOOVIT }
+    // locations come from when that's Kav's or the rider's own. Never a provider for what it wasn't chosen for.
+    fun linkPlanner(): String? = planner() ?: KavLive.server.takeIf { KavLive.enabled && !KavLive.source.provider }
 
     fun owns(trip: Transit.Itinerary): Boolean = trip.guid.startsWith("kav-")
-
-    // Whether a route takes live times from where live locations come from: Kav's planner's, and Moovit's from its
-    // website, by their stops' codes and lines' numbers. Routes an older Kav kept from Moovit's app stay as they were.
-    fun timed(trip: Transit.Itinerary): Boolean = owns(trip) || MoovitWeb.owns(trip)
 
     // A shared link that names Kav's own rides, which only Kav's planner can find again.
     fun owns(rides: List<TripLink.Ride>): Boolean = rides.isNotEmpty() && rides.all { it.lineId >= BASE }
@@ -80,7 +73,7 @@ object KavPlan {
     // The selected trip itself, with its stop and line details and the sender's page choices.
     fun sharePayload(
         trip: Transit.Itinerary, fromName: String, toName: String, resolved: Transit.Resolved,
-        rides: Boolean = true, egg: String? = null, busNearby: String? = null, moovit: String? = null, colors: List<String> = emptyList(),
+        rides: Boolean = true, egg: String? = null, busNearby: String? = null, colors: List<String> = emptyList(),
         style: ShareStyle = ShareStyle(),
     ): JSONObject? {
         val start = trip.legs.firstNotNullOfOrNull { leg -> leg.shape.firstOrNull() }
@@ -94,7 +87,7 @@ object KavPlan {
             .put("fromName", net?.shown(fromName, inEnglish) ?: fromName).put("toName", net?.shown(toName, inEnglish) ?: toName)
             .put("at", trip.dep.toString()).put("data", TripShare.encode(trip, resolved, colors, inEnglish))
             .put("trip", if (rides) trip.rides.joinToString("~") { "${it.lineId}.${it.tripId}.${it.dep}" } else "")
-            .put("egg", egg).put("bnb", busNearby).put("moovit", moovit)
+            .put("egg", egg).put("bnb", busNearby)
     }
 
     // Whether an id is one given here.
@@ -110,10 +103,11 @@ object KavPlan {
     fun typeOf(agencyId: Int): Int? = if (isKav(agencyId)) (agencyId - BASE) % 1000 else null
 
     // Leaving now (n) also brings the taxi card, which is only offered then, but not on the way to other stops;
-    // the last departure (l) is the last way there tonight. Stops on the way go last, in order.
+    // the last departure (l) is the last way there tonight. Stops on the way go last, in order, each with the minutes
+    // to stay there when it isn't only passed.
     internal fun path(
         from: Pair<Double, Double>, to: Pair<Double, Double>, whenMs: Long, timeType: Int, routeTypes: List<Int>,
-        taxi: Boolean = false, stopovers: List<Pair<Double, Double>> = emptyList(),
+        taxi: Boolean = false, stopovers: List<Pair<Double, Double>> = emptyList(), stays: List<Int> = emptyList(),
     ): String {
         val at = (if (whenMs > 0) whenMs else System.currentTimeMillis()) / 1000
         val way = when {
@@ -124,8 +118,8 @@ object KavPlan {
         }
         val types = routeTypes.distinct().sorted().filter { it in 0..7 }
         val only = if (types.isEmpty() || types.size == 8) "" else "/" + types.joinToString(",")
-        val via = if (stopovers.isEmpty()) "" else "/via/" + stopovers.take(3).joinToString(";") { (lat, lon) ->
-            String.format(Locale.US, "%.6f,%.6f", lat, lon)
+        val via = if (stopovers.isEmpty()) "" else "/via/" + stopovers.take(3).withIndex().joinToString(";") { (i, at) ->
+            String.format(Locale.US, "%.6f,%.6f", at.first, at.second) + (stays.getOrNull(i)?.takeIf { it > 0 }?.let { ",$it" } ?: "")
         }
         return String.format(Locale.US, "plan/%.6f,%.6f,%.6f,%.6f/%d%s%s", from.first, from.second, to.first, to.second, at, way, only) + via
     }
@@ -135,11 +129,7 @@ object KavPlan {
         from: Pair<Double, Double>, to: Pair<Double, Double>, whenMs: Long, timeType: Int, routeTypes: List<Int>, taxi: Boolean,
         stopovers: List<Transit.Place> = emptyList(), at: String, by: Source = source,
     ): Planned {
-        val planned = when (at) {
-            MoovitWeb.SERVER -> MoovitWeb.plan(from, to, whenMs, timeType, routeTypes, taxi, stopovers)
-            BusNearby.SERVER -> parse(BusNearby.plan(from, to, whenMs, timeType, routeTypes, stopovers.map { it.lat to it.lon }, by))
-            else -> parse(asked(path(from, to, whenMs, timeType, routeTypes, taxi, stopovers.map { it.lat to it.lon }), at))
-        }
+        val planned = plannerFor(at, by).plan(PlanRequest(from, to, whenMs, timeType, routeTypes, taxi, stopovers))
         // The server's timetable runs two weeks ahead. Walking and cycling don't need it.
         if (planned.plan.itineraries.none { it.rides.isNotEmpty() } && "OUTSIDE_SERVICE_PERIOD" in planned.errors) {
             throw NoTimetable()
@@ -158,7 +148,7 @@ object KavPlan {
     internal var retryBudgetMs = 20_000L
     internal var clock: () -> Long = System::currentTimeMillis
 
-    private fun asked(path: String, at: String): String {
+    internal fun asked(path: String, at: String): String {
         val start = clock()
         var tries = 0
         while (true) {
@@ -200,7 +190,8 @@ object KavPlan {
         store?.edit()?.putString("operators", o.toString())?.apply()
     }
 
-    internal fun parse(body: String): Planned {
+    // stopNames: the names of the stops on the way, in order, for the legs that come after one.
+    internal fun parse(body: String, stopNames: List<String> = emptyList()): Planned {
         val response = JSONObject(body)
         val o = if (response.has("plan")) BusNearby.planBody(response) else response
         val stops = HashMap<Int, Transit.StopInfo>()
@@ -244,10 +235,14 @@ object KavPlan {
             for (j in 0 until parts.length()) {
                 val l = parts.getJSONObject(j)
                 val dep = l.optLong("dep"); val arr = l.optLong("arr")
+                // The first leg on from a stop on the way says which stop, and the stay asked for there.
+                val via = l.optInt("via"); val staying = l.optLong("stay") > 0
+                val first = legs.size
                 val shape = KavLive.decodePolyline(l.optString("shape"), l.optInt("precision", 5))
                 fun point(k: String) = l.optJSONArray(k)?.let { p -> p.optDouble(0) to p.optDouble(1) }
                 when (l.optString("k")) {
-                    "w" -> legs += Transit.Leg(Transit.LegKind.WALK, dep = dep, arr = arr, meters = l.optInt("m"), shape = shape)
+                    "w" -> legs += Transit.Leg(Transit.LegKind.WALK, dep = dep, arr = arr, meters = l.optInt("m"), shape = shape,
+                        turns = turnsOf(l.optJSONArray("turns")))
                     "b" -> legs += Transit.Leg(Transit.LegKind.BIKE, dep = dep, arr = arr, meters = l.optInt("m"), shape = shape)
                     // Waiting for the taxi, then the drive.
                     "x" -> legs += Transit.Leg(Transit.LegKind.OTHER, dep = dep, arr = arr)
@@ -257,7 +252,8 @@ object KavPlan {
                     )
                     else -> {
                         // The ride and the wait for it, and the same for every other line from that stop to that stop.
-                        val waitFrom = minOf(lastArr, dep)
+                        // Boarded straight from a place the rider stays at, the time before it is the stay, not a wait.
+                        val waitFrom = if (staying) dep else minOf(lastArr, dep)
                         val (wait, ride) = ride(l, shape, waitFrom, lines, routeNames, stops, types)
                         val alts = l.optJSONArray("alts") ?: JSONArray()
                         if (alts.length() == 0) {
@@ -272,6 +268,9 @@ object KavPlan {
                         }
                     }
                 }
+                if (via > 0) (first until legs.size).firstOrNull { legs[it].kind != Transit.LegKind.WAIT }?.let { k ->
+                    legs[k] = legs[k].copy(visit = Transit.Visit(stopNames.getOrNull(via - 1).orEmpty(), lastArr, dep, staying))
+                }
                 lastArr = arr
             }
             if (legs.isEmpty()) continue
@@ -281,6 +280,7 @@ object KavPlan {
                 guid = guid,
                 group = 2, legs = legs, dep = it.optLong("dep"), arr = it.optLong("arr"), tags = tags,
                 sectionId = it.optInt("sec", SECTION_MAIN),
+                accessible = it.optBoolean("access"),
                 original = it.optJSONObject("hopOn")?.toString().orEmpty(),
             )
         }
@@ -372,6 +372,11 @@ object KavPlan {
         val stop = KavLive.stopOfCode(net, code?.toIntOrNull() ?: return null).takeIf { it >= 0 } ?: return null
         val at = KavLive.scheduledAt(net, stop, number, first, name) ?: return null
         return first + Math.floorMod(at - KavLive.secondOfDay(first), 86_400)
+    }
+
+    // A walk's turns as Kav's server sends them: [way, street, metres, lat, lon] each.
+    internal fun turnsOf(a: JSONArray?): List<Transit.Turn> = (0 until (a?.length() ?: 0)).mapNotNull { i ->
+        a!!.optJSONArray(i)?.let { t -> Transit.Turn(t.optString(0), t.optString(1), t.optInt(2), t.optDouble(3), t.optDouble(4)) }
     }
 
     // What each route is best at, in a word: the planner's tags, kept on the route as they came so the words follow the

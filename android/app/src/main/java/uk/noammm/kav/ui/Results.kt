@@ -18,6 +18,9 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.DirectionsCar
 import androidx.compose.material.icons.rounded.ElectricScooter
 import androidx.compose.material.icons.rounded.Moped
+import androidx.compose.material.icons.rounded.Schedule
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -43,7 +46,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import uk.noammm.kav.data.MoovitAlerts
+import uk.noammm.kav.data.RideAlerts
 import uk.noammm.kav.data.Transit
 import java.util.Date
 import java.util.Locale
@@ -69,11 +72,13 @@ import androidx.compose.foundation.shape.CircleShape
 private val hm get() = clockFormat()
 
 @Composable
-private fun Chevron(tint: Color = K.surface4, size: androidx.compose.ui.unit.Dp = 12.dp) {
+internal fun Chevron(tint: Color = Ink.surface4, size: androidx.compose.ui.unit.Dp = 12.dp) {
     Canvas(Modifier.size(size)) {
         val w = this.size.width; val h = this.size.height
-        drawLine(tint, Offset(w * mirrorX(.36f), h * .22f), Offset(w * mirrorX(.66f), h * .5f), w * .12f, StrokeCap.Round)
-        drawLine(tint, Offset(w * mirrorX(.66f), h * .5f), Offset(w * mirrorX(.36f), h * .78f), w * .12f, StrokeCap.Round)
+        // Turned with the layout it's in: the app's language's, or a shared trip's card's, in its link's.
+        fun x(f: Float) = if (layoutDirection == androidx.compose.ui.unit.LayoutDirection.Rtl) 1f - f else f
+        drawLine(tint, Offset(w * x(.36f), h * .22f), Offset(w * x(.66f), h * .5f), w * .12f, StrokeCap.Round)
+        drawLine(tint, Offset(w * x(.66f), h * .5f), Offset(w * x(.36f), h * .78f), w * .12f, StrokeCap.Round)
     }
 }
 
@@ -145,7 +150,7 @@ fun DepMarkGlyph(d: Transit.Departure, size: androidx.compose.ui.unit.Dp = 11.dp
 }
 
 @Composable
-private fun AccessibleGlyph(tint: Color = K.muted, size: androidx.compose.ui.unit.Dp = 12.dp) {
+internal fun AccessibleGlyph(tint: Color = K.muted, size: androidx.compose.ui.unit.Dp = 12.dp) {
     Canvas(Modifier.size(size)) {
         val w = this.size.width; val h = this.size.height; val sw = w * .10f
         drawCircle(tint, w * .11f, Offset(w * .46f, h * .13f))
@@ -167,6 +172,9 @@ fun PlanHeader(
     onSwap: () -> Unit,
     onBack: (() -> Unit)? = null,
     stops: List<String> = emptyList(),
+    // The minutes the rider stays at each stop on the way, 0 where they only pass by, and one changed.
+    stays: List<Int> = emptyList(),
+    onStay: (stop: Int, minutes: Int) -> Unit = { _, _ -> },
     onAddStop: (() -> Unit)? = null,
     // A stop on the way tapped, to be changed as the start and destination are.
     onStop: (Int) -> Unit = {},
@@ -235,7 +243,7 @@ fun PlanHeader(
                                 when (i) {
                                     0 -> Endpoint(from, here = fromIsHere, dot = false, onClick = onFrom)
                                     last -> Endpoint(to ?: T("Where to?", "לאן?"), here = toIsHere, dot = true, onClick = onTo, placeholder = to == null)
-                                    else -> StopoverRow(label) { onStop(i - 1) }
+                                    else -> StopoverRow(label, stays.getOrElse(i - 1) { 0 }, { onStay(i - 1, it) }) { onStop(i - 1) }
                                 }
                             }
                             if (stops.isNotEmpty()) {
@@ -294,15 +302,52 @@ const val MAX_STOPOVERS = 3
 private val ENDPOINT_INSET = K.gap4 + 10.dp + K.gap3
 
 @Composable
-private fun StopoverRow(label: String, onClick: () -> Unit) {
+private fun StopoverRow(label: String, stayMin: Int, onStay: (Int) -> Unit, onClick: () -> Unit) {
     Row(
         Modifier.fillMaxWidth().heightIn(min = 52.dp).clickable(role = Role.Button, onClick = onClick)
-            .padding(start = K.gap4, end = K.gap2, top = K.gap3, bottom = K.gap3),
+            .padding(start = K.gap4, end = K.gap2),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(K.gap3),
     ) {
         Canvas(Modifier.size(10.dp)) { drawCircle(K.textSecondary, size.width * .30f) }
-        Text(label, style = K.type.body, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+        Text(label, style = K.type.body, maxLines = 1, overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f).padding(vertical = K.gap3))
+        StayPicker(stayMin, onStay)
+    }
+}
+
+// The minutes a rider can stay at a stop on the way; 0 only passes by it.
+private val STAYS = listOf(0, 15, 30, 60)
+
+// How long the rider stays at a stop on the way: a clock while they only pass by, the time once they choose one. The
+// routes on from the stop leave it that much after getting there, at the soonest.
+@Composable
+private fun StayPicker(stayMin: Int, onStay: (Int) -> Unit) {
+    var open by remember { mutableStateOf(false) }
+    fun named(m: Int) = if (m > 0) T("Stay ${durMinutes(m)}", "שהייה של ${durMinutes(m)}") else T("Pass by", "מעבר בלבד")
+    val said = T("Time at this stop", "זמן שהייה בעצירה") + ": " + named(stayMin)
+    Box {
+        Box(
+            Modifier.heightIn(min = 40.dp).widthIn(min = 40.dp).clip(K.capsule)
+                .clickable(role = Role.Button, onClickLabel = T("Change", "שינוי")) { open = true }
+                .clearAndSetSemantics { contentDescription = said }.padding(horizontal = K.gap2),
+            contentAlignment = Alignment.Center,
+        ) {
+            if (stayMin > 0) Text(durMinutes(stayMin), style = K.type.subhead, color = K.accentInk, maxLines = 1)
+            else Icon(Icons.Rounded.Schedule, contentDescription = null, tint = K.textTertiary, modifier = Modifier.size(18.dp))
+        }
+        DropdownMenu(
+            open, onDismissRequest = { open = false }, modifier = Modifier.background(K.bg),
+            containerColor = K.bg, tonalElevation = 0.dp, shadowElevation = 8.dp,
+            shape = RoundedCornerShape(K.rTile), border = androidx.compose.foundation.BorderStroke(0.5.dp, K.separator),
+        ) {
+            STAYS.forEach { m ->
+                DropdownMenuItem(
+                    text = { Text(named(m), style = K.type.body, color = if (m == stayMin) K.accentInk else K.text) },
+                    onClick = { open = false; onStay(m) },
+                )
+            }
+        }
     }
 }
 
@@ -363,13 +408,15 @@ private fun departLabels(deps: List<Transit.Departure>, now: Long): Pair<List<De
     return out to allMinutes
 }
 
-private fun daysAhead(t: Long, now: Long): Long {
+// How many days on a time is, for saying "tomorrow": by the day that runs to the night's break at 04:00, so a train at
+// 00:12 an hour from now is tonight's, and the first bus at 05:00 is tomorrow's, at 01:00 too.
+internal fun daysAhead(t: Long, now: Long): Long {
     val zone = ISRAEL.toZoneId()
-    return java.time.temporal.ChronoUnit.DAYS.between(
-        java.time.Instant.ofEpochSecond(now).atZone(zone).toLocalDate(),
-        java.time.Instant.ofEpochSecond(t).atZone(zone).toLocalDate(),
-    )
+    fun day(s: Long) = java.time.Instant.ofEpochSecond(s).atZone(zone).minusHours(NIGHT_BREAK_HOUR).toLocalDate()
+    return java.time.temporal.ChronoUnit.DAYS.between(day(now), day(t))
 }
+
+private const val NIGHT_BREAK_HOUR = 4L
 
 private fun clockLabel(t: Long, days: Long): String {
     val time = hm.format(Date(t * 1000))
@@ -478,10 +525,12 @@ fun depMark(d: Transit.Departure): DepMark = when {
 @Composable
 fun ItineraryCard(it: Transit.Itinerary, r: Transit.Resolved, footer: (@Composable () -> Unit)? = null, onClick: (() -> Unit)? = null) {
     val now = System.currentTimeMillis() / 1000
+    // What comes in after the card (live departures, alerts, tags) grows it in place instead of in one jump.
     Column(
         Modifier.fillMaxWidth()
             .panel(K.rCard)
             .then(if (onClick != null) Modifier.clickable(role = Role.Button, onClick = onClick) else Modifier)
+            .animateContentSize(androidx.compose.animation.core.spring(dampingRatio = 1f, stiffness = 500f))
             .padding(K.gap4),
         verticalArrangement = Arrangement.spacedBy(K.gap3),
     ) {
@@ -500,22 +549,35 @@ fun ItineraryCard(it: Transit.Itinerary, r: Transit.Resolved, footer: (@Composab
                 Modifier.clearAndSetSemantics { contentDescription = T("Leaves $dep, arrives $arr", "יציאה ב-$dep, הגעה ב-$arr") },
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text(dep, style = K.type.subhead.tabular, color = K.textTertiary)
+                // A route's times as live ones move them: they roll.
+                LiveText(dep, style = K.type.subhead.tabular, color = K.textTertiary)
                 Icon(
                     Icons.AutoMirrored.Rounded.ArrowForward, contentDescription = null, tint = K.textTertiary,
                     modifier = Modifier.padding(horizontal = K.gap1).size(14.dp),
                 )
-                Text(arr, style = K.type.subhead.tabular, color = K.text)
+                LiveText(arr, style = K.type.subhead.tabular, color = K.text)
             }
         }
         RouteStrip(it, r)
         DepartureLine(it, r, now)
         val notes = cardNotes(it, r)
-        if (notes.isNotEmpty()) Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(K.gap3)) {
-            notes.forEach { (kind, label) ->
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(K.gap1)) {
-                    if (kind == "access") AccessibleGlyph() else GlobeGlyph()
-                    Text(label, style = K.type.subhead)
+        var noted by remember { mutableStateOf(notes) }
+        if (notes.isNotEmpty()) noted = notes
+        androidx.compose.animation.AnimatedVisibility(
+            notes.isNotEmpty(),
+            enter = androidx.compose.animation.expandVertically(androidx.compose.animation.core.spring(dampingRatio = 1f, stiffness = 500f), expandFrom = androidx.compose.ui.Alignment.Top) +
+            androidx.compose.animation.fadeIn(tween(200, delayMillis = 60)),
+        exit = androidx.compose.animation.shrinkVertically(androidx.compose.animation.core.spring(dampingRatio = 1f, stiffness = 500f), shrinkTowards = androidx.compose.ui.Alignment.Top) +
+            androidx.compose.animation.fadeOut(tween(120)),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(K.gap3)) {
+                noted.forEachIndexed { i, (kind, label) ->
+                    // The fare's dot parts them, as on the line above.
+                    if (i > 0) Text("•", style = K.type.subhead, color = K.dim)
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(K.gap1)) {
+                        if (kind == "access") AccessibleGlyph() else GlobeGlyph()
+                        Text(label, style = K.type.subhead)
+                    }
                 }
             }
         }
@@ -553,7 +615,28 @@ private fun stripItems(it: Transit.Itinerary): List<StripItem> {
     return out.filter { s -> s.kind != Transit.LegKind.WALK || s.minutes >= 1 }
 }
 
-private fun showMinutes(leg: StripItem): Boolean = leg.minutes >= 5
+private fun showMinutes(leg: StripItem): Boolean = stripShowsMinutes(leg.minutes)
+
+// A step's minutes show in a route's strip from five on; a shorter walk is its walker alone.
+internal fun stripShowsMinutes(minutes: Int): Boolean = minutes >= 5
+
+// A walk in a route's strip: the walker, with its minutes where they show. Home's latest route draws its walks with it
+// too, so the two can't come to differ.
+@Composable
+internal fun StripWalk(minutes: Int) {
+    Row(
+        Modifier.height(28.dp).clearAndSetSemantics {
+            contentDescription = if (stripShowsMinutes(minutes)) T("Walk $minutes min", "הליכה $minutes דק׳") else T("Walk", "הליכה")
+        },
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        WalkGlyph(Ink.muted, 18.dp)
+        if (stripShowsMinutes(minutes)) {
+            Spacer(Modifier.width(4.dp))
+            Text("$minutes", fontSize = 14.sp, color = Ink.text)
+        }
+    }
+}
 
 private val PIP_OVERHANG = 5.dp
 
@@ -577,11 +660,18 @@ internal fun RouteStrip(it: Transit.Itinerary, r: Transit.Resolved) {
                     Modifier.padding(vertical = PIP_OVERHANG, horizontal = PIP_OVERHANG),
                 ) {
                     leg.ride?.let { RouteChoices(it, r) }
-                    val alert = maxOf(leg.alert, leg.ride?.let { MoovitAlerts.of(r.line(it.lineId))?.category } ?: 0)
-                    if (alert >= 3) Box(
+                    val alert = maxOf(leg.alert, leg.ride?.let { RideAlerts.of(r.line(it.lineId), it, r)?.category } ?: 0)
+                    // An alert that comes in once the line's alerts are read grows out of the badge's corner.
+                    var raised by remember { mutableStateOf(alert) }
+                    if (alert >= 3) raised = alert
+                    androidx.compose.animation.AnimatedVisibility(
+                        alert >= 3,
                         Modifier.align(Alignment.TopEnd).offset(x = PIP_OVERHANG, y = -PIP_OVERHANG),
+                        enter = androidx.compose.animation.scaleIn(androidx.compose.animation.core.spring(dampingRatio = .7f, stiffness = 500f)) +
+                            androidx.compose.animation.fadeIn(tween(150)),
+                        exit = androidx.compose.animation.scaleOut(tween(150)) + androidx.compose.animation.fadeOut(tween(150)),
                     ) {
-                        AlertPip(alert)
+                        AlertPip(raised)
                     }
                 }
                 Transit.LegKind.TAXI -> leg.ride?.let { GettPill(it) }
@@ -594,21 +684,10 @@ internal fun RouteStrip(it: Transit.Itinerary, r: Transit.Resolved) {
                     CycleGlyph(leg.ride)
                     if (showMinutes(leg)) {
                         Spacer(Modifier.width(4.dp))
-                        Text("${leg.minutes}", fontSize = 14.sp, color = K.text)
+                        Text("${leg.minutes}", fontSize = 14.sp, color = Ink.text)
                     }
                 }
-                else -> Row(
-                    Modifier.height(28.dp).clearAndSetSemantics {
-                        contentDescription = if (showMinutes(leg)) T("Walk ${leg.minutes} min", "הליכה ${leg.minutes} דק׳") else T("Walk", "הליכה")
-                    },
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    WalkGlyph(K.muted, 18.dp)
-                    if (showMinutes(leg)) {
-                        Spacer(Modifier.width(4.dp))
-                        Text("${leg.minutes}", fontSize = 14.sp, color = K.text)
-                    }
-                }
+                else -> StripWalk(leg.minutes)
             }
             }
         }
@@ -624,26 +703,26 @@ private fun LineBadgeOnline(lineId: Int, shortName: String, r: Transit.Resolved)
     val plate = linePlate(rt, agency) { Operators.of(r, agency) }
     val said = lineDescription(rt, label)
     // The strip look for buses, when chosen in Settings.
-    if (K.lineBadgeAppearance == LineBadgeAppearance.STRIP && modeOf(rt) == Mode.BUS) {
-        Box(Modifier.clearAndSetSemantics { contentDescription = said }) { LinePlateBadge(label, Mode.BUS, plate) }
-        return
-    }
-    Column(
-        Modifier.clearAndSetSemantics { contentDescription = said }
-            .clip(RoundedCornerShape(K.rBadge)).background(plate?.fill ?: K.badgePlate)
-            .border(1.dp, plate?.edge ?: K.borderStrong, RoundedCornerShape(K.rBadge)),
-    ) {
-        Row(
-            Modifier.padding(start = 5.dp, end = if (label == null) 5.dp else 6.dp, top = 2.dp, bottom = 2.dp),
-            verticalAlignment = Alignment.CenterVertically,
+    BadgeLookSwitch(K.lineBadgeAppearance == LineBadgeAppearance.STRIP && modeOf(rt) == Mode.BUS) { strip ->
+        if (strip) Box(Modifier.clearAndSetSemantics { contentDescription = said }) {
+            LinePlateBadge(label, Mode.BUS, plate, look = LineBadgeAppearance.STRIP)
+        } else Column(
+            Modifier.clearAndSetSemantics { contentDescription = said }
+                .clip(RoundedCornerShape(K.rBadge)).background(plate?.fill ?: Ink.badgePlate)
+                .border(1.dp, plate?.edge ?: Ink.borderStrong, RoundedCornerShape(K.rBadge)),
         ) {
-            AgencyMark(rt, agency, plate?.ink ?: K.muted, 14.dp)
-            if (label != null) {
-                Spacer(Modifier.width(4.dp))
-                Text(
-                    label, style = K.type.bodyStrong, color = plate?.ink ?: K.text,
-                    maxLines = 3, overflow = TextOverflow.Ellipsis,
-                )
+            Row(
+                Modifier.padding(start = 5.dp, end = if (label == null) 5.dp else 6.dp, top = 2.dp, bottom = 2.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                AgencyMark(rt, agency, plate?.ink ?: Ink.muted, 14.dp)
+                if (label != null) {
+                    Spacer(Modifier.width(4.dp))
+                    Text(
+                        label, style = K.type.bodyStrong, color = plate?.ink ?: Ink.text,
+                        maxLines = 3, overflow = TextOverflow.Ellipsis,
+                    )
+                }
             }
         }
     }
@@ -651,7 +730,7 @@ private fun LineBadgeOnline(lineId: Int, shortName: String, r: Transit.Resolved)
 
 // A bike-kind leg: the rider's own bike, or a shared one picked up in the street, and what it is.
 @Composable
-internal fun CycleGlyph(leg: Transit.Leg?, tint: Color = K.muted, size: androidx.compose.ui.unit.Dp = 18.dp) {
+internal fun CycleGlyph(leg: Transit.Leg?, tint: Color = Ink.muted, size: androidx.compose.ui.unit.Dp = 18.dp) {
     val icon = when (leg?.shared) {
         3, 4 -> Icons.Rounded.ElectricScooter
         5 -> Icons.Rounded.Moped
@@ -711,11 +790,19 @@ private fun DepartureLine(it: Transit.Itinerary, r: Transit.Resolved, now: Long)
     val stop = (wait?.fromStop ?: ride?.fromStop)?.takeIf { id -> id > 0 }?.let { id -> r.stopName(id) }
     val deps = ride?.let { leg -> r.cardDepartures(leg, wait) }.orEmpty()
     val (labels, allMinutes) = departLabels(deps, now)
-    val fare = if (it.fare >= 0) "%s%.2f".format(Locale.US, it.currency.ifBlank { "" }, it.fare / 100.0) else null
+    val amount = Shown.fareProfile.price(it)
+    val fare = if (amount >= 0) "%s%.2f".format(Locale.US, it.currency.ifBlank { "" }, amount / 100.0) else null
 
-    if (labels.isEmpty() && stop == null && fare == null) return
     val lead = labels.firstOrNull()?.dep
-    // A new live time rolls in where the old one was, and the rest of the line stays put or slides over to make room.
+    // The line opens once its departures or stop come in, and a new live time rolls in where the old one was, the rest
+    // of the line staying put or sliding over to make room.
+    androidx.compose.animation.AnimatedVisibility(
+        labels.isNotEmpty() || stop != null || fare != null,
+        enter = androidx.compose.animation.expandVertically(androidx.compose.animation.core.spring(dampingRatio = 1f, stiffness = 500f), expandFrom = androidx.compose.ui.Alignment.Top) +
+        androidx.compose.animation.fadeIn(tween(200, delayMillis = 60)),
+        exit = androidx.compose.animation.shrinkVertically(androidx.compose.animation.core.spring(dampingRatio = 1f, stiffness = 500f), shrinkTowards = androidx.compose.ui.Alignment.Top) +
+        androidx.compose.animation.fadeOut(tween(120)),
+    ) {
     LiveText(
         buildAnnotatedString {
             if (labels.isNotEmpty()) {
@@ -756,13 +843,15 @@ private fun DepartureLine(it: Transit.Itinerary, r: Transit.Resolved, now: Long)
         style = K.type.subhead,
         maxLines = 2, overflow = TextOverflow.Ellipsis,
     )
+    }
 }
 
 private const val MARK = "mark"
 
 private fun cardNotes(it: Transit.Itinerary, r: Transit.Resolved): List<Pair<String, String>> {
     val out = ArrayList<Pair<String, String>>(2)
-    if (it.accessible) out.add("access" to T("Step-free", "נגיש לנכים"))
+    // Every ride on a vehicle marked wheelchair accessible: the timetable says nothing of stops and walks.
+    if (Shown.accessibility && it.accessible) out.add("access" to T("Wheelchair accessible", "נגיש לכיסא גלגלים"))
     val g = if (Shown.co2) uk.noammm.kav.data.Emissions.grams(it, r) else -1
     if (g >= 0) out.add("co2" to co2(g))
     return out

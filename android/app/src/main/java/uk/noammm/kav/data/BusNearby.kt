@@ -1,6 +1,7 @@
 package uk.noammm.kav.data
 
 import org.json.JSONArray
+import kotlin.math.roundToInt
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
@@ -35,7 +36,7 @@ internal object BusNearby {
     class NotFound(message: String) : java.io.IOException(message)
 
     private fun fetch(url: String, source: Source): String {
-        val c = URL(url).openConnection() as HttpURLConnection
+        val c = RiderProxy.open(URL(url)) as HttpURLConnection
         try {
             c.connectTimeout = 5_000; c.readTimeout = 15_000
             c.setRequestProperty("Accept", "application/json")
@@ -94,7 +95,7 @@ internal object BusNearby {
 
     internal fun planQuery(
         from: Pair<Double, Double>, to: Pair<Double, Double>, whenMs: Long, timeType: Int,
-        types: List<Int>, via: List<Pair<Double, Double>>,
+        types: List<Int>,
     ): String {
         val at = planTime(whenMs, timeType)
         val modes = mapOf(0 to "TRAM", 1 to "SUBWAY", 2 to "RAIL", 3 to "BUS", 4 to "FERRY", 5 to "CABLE_CAR", 6 to "GONDOLA", 7 to "FUNICULAR")
@@ -103,14 +104,13 @@ internal object BusNearby {
         var q = "locale=he&mode=$mode,WALK&pathComparator=duration&numItineraries=3&showIntermediateStops=true" +
             "&fromPlace=${point(from)}&toPlace=${point(to)}&date=${at.toLocalDate()}&time=${at.toLocalTime().toString().take(5)}"
         if (timeType == Transit.TIME_ARRIVAL || timeType == Transit.TIME_LAST) q += "&arriveBy=true"
-        for (p in via.take(3)) q += "&intermediatePlaces=${point(p)}"
         return q
     }
 
     fun plan(from: Pair<Double, Double>, to: Pair<Double, Double>, whenMs: Long, timeType: Int,
-        types: List<Int>, via: List<Pair<Double, Double>>, source: Source): String {
+        types: List<Int>, source: Source): String {
         val asked = whenMs.takeIf { it > 0 } ?: System.currentTimeMillis()
-        val o = JSONObject(get("directions", planQuery(from, to, asked, timeType, types, via), source))
+        val o = JSONObject(get("directions", planQuery(from, to, asked, timeType, types), source))
         val plan = o.optJSONObject("plan") ?: return o.toString()
         val trips = plan.optJSONArray("itineraries") ?: return o.toString()
         val until = planTime(asked, timeType).toInstant().toEpochMilli()
@@ -163,6 +163,7 @@ internal object BusNearby {
                     .put("precision", if (geometry?.has("points6") == true) 6 else 5)
                 if (!transit) {
                     leg.put("k", if (l.optString("mode") == "BICYCLE") "b" else "w")
+                    l.optJSONArray("steps")?.takeIf { it.length() > 0 }?.let { leg.put("turns", turnsOf(it)) }
                 } else {
                     val route = id(l.getString("routeId")); val agency = l.getString("agencyId")
                     val from = l.getJSONObject("from"); val to = l.getJSONObject("to")
@@ -305,6 +306,23 @@ internal object BusNearby {
         Schedules.cached(source, "$path?$args") { get(path, args, source) }
 
     // HopOn's modes as the week's route types, with its own two: the Carmelit (7) and shuttles (711).
+    // A walk's steps as Kav's server sends its turns ([way, street, metres, lat, lon]), from HopOn's OpenTripPlanner
+    // answer: a way with no name of its own has none, and going on along the same way is one step.
+    internal fun turnsOf(steps: JSONArray): JSONArray {
+        val out = JSONArray()
+        var last: JSONArray? = null
+        for (i in 0 until steps.length()) {
+            val st = steps.optJSONObject(i) ?: continue
+            val name = if (st.optBoolean("bogusName")) "" else st.optString("streetName")
+            val way = st.optString("relativeDirection").ifBlank { "CONTINUE" }
+            val metres = st.optDouble("distance", 0.0).roundToInt()
+            if (last != null && way == "CONTINUE" && name == last.optString(1)) { last.put(2, last.optInt(2) + metres); continue }
+            last = JSONArray().put(way).put(name).put(metres).put(st.optDouble("lat")).put(st.optDouble("lon"))
+            out.put(last)
+        }
+        return out
+    }
+
     internal fun typeOf(mode: String, operator: String, name: String, number: String): Int = when (mode) {
         "TRAM" -> 0; "SUBWAY" -> 1; "RAIL" -> 2; "FERRY" -> 4; "GONDOLA" -> 6; "FUNICULAR" -> 7; "SHARE_TAXI" -> 8
         "CABLE_CAR" -> if (operator == "כרמלית") 7 else 5
@@ -500,15 +518,17 @@ internal object BusNearby {
 // trip under a short id until a little after it ends. Asked only when the rider shares such a trip, with a random device
 // id Kav keeps for it (X-BNB), as the apps send theirs; the trip itself is HopOn's original answer.
 internal object HopOnShare {
-    fun has(trip: Transit.Itinerary): Boolean = trip.original.isNotEmpty() && !MoovitWeb.owns(trip)
+    fun has(trip: Transit.Itinerary): Boolean = trip.original.isNotEmpty()
 
-    // Blocks, so off the main thread. egg's short id and Bus Nearby's, each null when HopOn gave none.
-    fun links(ctx: android.content.Context, trip: Transit.Itinerary): Pair<String?, String?> {
-        val itinerary = trip.original.takeIf { has(trip) } ?: return null to null
+    // Blocks, so off the main thread. egg's short id and Bus Nearby's, each null when HopOn gave none. A trip another
+    // planner made goes as HopOn's own route of the same rides (itineraryOf()), so the links open that very route and not
+    // a search for its ends; without one, there are none.
+    fun links(ctx: android.content.Context, trip: Transit.Itinerary, r: Transit.Resolved): Pair<String?, String?> {
+        val itinerary = trip.original.takeIf { has(trip) } ?: runCatching { itineraryOf(trip, r) }.getOrNull() ?: return null to null
         val body = JSONObject().put("itinerary", JSONObject(itinerary)).toString().toByteArray()
         val device = uk.noammm.kav.Prefs.hopOnDevice(ctx)
         fun ask(source: Source): String? = runCatching {
-            val c = URL("${BusNearby.SERVER}/itinerary/share").openConnection() as HttpURLConnection
+            val c = RiderProxy.open(URL("${BusNearby.SERVER}/itinerary/share")) as HttpURLConnection
             try {
                 c.connectTimeout = 5_000; c.readTimeout = 10_000
                 c.requestMethod = "POST"; c.doOutput = true
@@ -524,6 +544,29 @@ internal object HopOnShare {
             } finally { c.disconnect() }
         }.getOrNull()
         return ask(Source.EGG) to ask(Source.BUS_NEARBY)
+    }
+
+    // HopOn's route of the trip's very rides: asked of Bus Nearby's planner from where the trip starts, a little before
+    // it sets out, the one whose rides are the same lines from the same stops within five minutes of each.
+    private fun itineraryOf(trip: Transit.Itinerary, r: Transit.Resolved): String? {
+        val rides = trip.rides.takeIf { it.isNotEmpty() } ?: return null
+        val from = trip.legs.firstNotNullOfOrNull { it.shape.firstOrNull() } ?: return null
+        val to = trip.legs.lastOrNull { it.shape.isNotEmpty() }?.shape?.lastOrNull() ?: return null
+        val o = JSONObject(BusNearby.plan(from, to, (trip.dep - 120) * 1000, Transit.TIME_DEPARTURE, emptyList(), Source.BUS_NEARBY))
+        val all = o.optJSONObject("plan")?.optJSONArray("itineraries") ?: return null
+        return (0 until all.length()).map { all.getJSONObject(it) }.firstOrNull { sameRides(it, rides, r) }?.toString()
+    }
+
+    internal fun sameRides(itinerary: JSONObject, rides: List<Transit.Leg>, r: Transit.Resolved): Boolean {
+        val legs = itinerary.optJSONArray("legs") ?: return false
+        val transit = (0 until legs.length()).map { legs.getJSONObject(it) }.filter { it.optBoolean("transitLeg") }
+        return transit.size == rides.size && transit.zip(rides).all { (leg, ride) ->
+            val number = ride.shortName.ifBlank { r.line(ride.lineId)?.number.orEmpty() }.trim()
+            val code = r.stop(ride.fromStop)?.code.orEmpty()
+            number.isNotEmpty() && leg.optString("routeShortName").trim() == number &&
+                (code.isEmpty() || leg.optJSONObject("from")?.optString("stopCode") == code) &&
+                kotlin.math.abs(leg.optLong("startTime") / 1000 - ride.dep) <= 300
+        }
     }
 
     internal fun shortId(answer: String): String? =

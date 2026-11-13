@@ -1,5 +1,6 @@
 package uk.noammm.kav.ui
 
+import androidx.compose.animation.core.VisibilityThreshold
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -27,6 +28,7 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -47,6 +49,7 @@ import uk.noammm.kav.data.Net
 import uk.noammm.kav.data.nearestStops
 import uk.noammm.kav.data.stopsMatching
 import kotlinx.coroutines.async
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -166,6 +169,8 @@ fun PlacePicker(
     var places by remember { mutableStateOf<List<Transit.Place>>(emptyList()) }
     var stations by remember { mutableStateOf<List<Transit.Place>>(emptyList()) }
     var busy by remember { mutableStateOf(false) }
+    // The words the last search finished for: until then a new word shows it's searching, not that nothing was found.
+    var doneFor by remember { mutableStateOf("") }
     var recents by remember { mutableStateOf(uk.noammm.kav.Prefs.recents(ctx)) }
     var setting by remember { mutableStateOf(initialSetting) }
     var editing by remember { mutableStateOf<Favourite?>(null) }
@@ -219,13 +224,13 @@ fun PlacePicker(
 
     LaunchedEffect(q) {
         if (q.isBlank()) {
-            places = emptyList(); stations = emptyList(); busy = false
+            places = emptyList(); stations = emptyList(); busy = false; doneFor = q
             return@LaunchedEffect
         }
         // A point copied from a map is that very place.
         uk.noammm.kav.data.TripLink.coordinates(q)?.let { (lat, lon) ->
             places = listOf(Transit.Place("%.5f, %.5f".format(java.util.Locale.US, lat, lon), T("Coordinates", "קואורדינטות"), lat, lon))
-            stations = emptyList(); busy = false
+            stations = emptyList(); busy = false; doneFor = q
             return@LaunchedEffect
         }
         busy = true
@@ -252,7 +257,7 @@ fun PlacePicker(
         }
         val google = async(kotlinx.coroutines.Dispatchers.IO) {
             try {
-                uk.noammm.kav.data.GoogleMaps.suggest(q, at)
+                uk.noammm.kav.data.Search.provider.suggest(q, at)
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -266,7 +271,7 @@ fun PlacePicker(
         val suggested = typed?.queries?.firstOrNull()?.takeIf { typed.places.isEmpty() }?.let { fixed ->
             kotlinx.coroutines.withTimeoutOrNull(3000) {
                 kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                    runCatching { uk.noammm.kav.data.GoogleMaps.suggest(fixed, at) }.getOrNull()
+                    runCatching { uk.noammm.kav.data.Search.provider.suggest(fixed, at) }.getOrNull()
                 }
             }?.let { again -> uk.noammm.kav.data.GoogleMaps.Suggestions(again.places, typed.queries) }
         } ?: typed
@@ -280,22 +285,17 @@ fun PlacePicker(
             }.getOrDefault(emptyList())
         }
         val exact = kotlinx.coroutines.withTimeoutOrNull(3000) { address.await() }.orEmpty()
-        // Google's places. A suggested address only knows its street's position, so it gives way to the house itself.
+        // The search's places. A suggested address only knows its street's position, so it gives way to the house itself.
         val number = uk.noammm.kav.data.searchWords(q).firstOrNull { it.first().isDigit() }
         val fromGoogle = suggested?.places.orEmpty()
             .filter { p -> number == null || uk.noammm.kav.data.searchWords(p.name).none { it == number } }
         places = (exact + fromGoogle).take(5)
         busy = false
+        doneFor = q
     }
 
     var onMap by remember { mutableStateOf(false) }
-    if (onMap) {
-        StopMapPicker(
-            net, here, onPick = { p -> onMap = false; pick(p) }, onDismiss = { onMap = false },
-            onLocate = onLocate, allowPin = true,
-        )
-        return
-    }
+    val under by underSearch(onMap)
     val leave: () -> Unit = {
         cancelLocation()
         if (setting != null && initialSetting == null) setting = null else onDismiss()
@@ -324,7 +324,7 @@ fun PlacePicker(
     val showRecents = q.isBlank() && recents.isNotEmpty()
     val found = q.isNotBlank() && (places.isNotEmpty() || stations.isNotEmpty())
 
-    Box(Modifier.fillMaxSize().background(K.bg)) {
+    Box(Modifier.fillMaxSize().graphicsLayer { alpha = under }.background(K.bg)) {
     FloatingTop(top = {
         Row(
             Modifier.fillMaxWidth().padding(K.gap3).heightIn(min = 48.dp),
@@ -376,44 +376,49 @@ fun PlacePicker(
             ) {
                 Icon(Icons.Rounded.MyLocation, contentDescription = null, tint = if (ready) K.textSecondary else K.textTertiary,
                     modifier = Modifier.size(20.dp))
-                Text(
+                // What the row says fades from one state of finding you to the next.
+                androidx.compose.animation.Crossfade(
                     if (locating) T("Finding you…", "מאתרים אתכם…")
                     else if (locateFailed) T("Couldn't get an accurate location. Tap to retry", "לא התקבל מיקום מדויק. לחצו לנסות שוב")
                     else if (ready) T("My location", "המיקום שלי")
                     else T("Use my location", "השתמשו במיקום שלי"),
-                    style = K.type.body, color = if (ready) K.text else K.textSecondary,
-                )
+                    Modifier.weight(1f, fill = false), animationSpec = androidx.compose.animation.core.tween(220), label = "here",
+                ) { said -> Text(said, style = K.type.body, color = if (ready) K.text else K.textSecondary) }
                 if (!ready && !locating && !locateFailed && !hasLocationPermission(ctx)) Text(
                     T("Location is off", "המיקום כבוי"),
                     style = K.type.caption, modifier = Modifier.padding(start = K.gap1),
                 )
             }
         }
+        // Every row of the search comes, goes and moves with a fade and a glide as the words are typed.
         when {
-            q.isBlank() && recents.isEmpty() -> item {
-                NoteCard(T("Search a station, street or place.", "חפשו תחנה, רחוב או מקום."), Modifier.padding(horizontal = K.gap4, vertical = K.gap4))
+            q.isBlank() && recents.isEmpty() -> item(key = "hint") {
+                NoteCard(T("Search a station, street or place.", "חפשו תחנה, רחוב או מקום."), listMotion(quick = true).padding(horizontal = K.gap4, vertical = K.gap4))
             }
             q.isBlank() -> Unit
-            busy && places.isEmpty() && stations.isEmpty() -> item {
-                Box(Modifier.fillMaxWidth().padding(vertical = K.gap8), contentAlignment = Alignment.Center) {
+            (busy || doneFor != q) && places.isEmpty() && stations.isEmpty() -> item(key = "searching") {
+                Box(listMotion(quick = true).fillMaxWidth().padding(vertical = K.gap8), contentAlignment = Alignment.Center) {
                     LoadingPulse(T("Searching", "מחפשים"))
                 }
             }
-            places.isEmpty() && stations.isEmpty() -> item {
-                NoteCard(T("Nothing found.", "לא נמצאו תוצאות."), Modifier.padding(horizontal = K.gap4, vertical = K.gap4))
+            places.isEmpty() && stations.isEmpty() -> item(key = "nothing") {
+                NoteCard(T("Nothing found.", "לא נמצאו תוצאות."), listMotion(quick = true).padding(horizontal = K.gap4, vertical = K.gap4))
             }
         }
         if (showRecents) {
             item(key = "recentHead") {
-                SectionHeader(T("Recent", "אחרונים"), Modifier.padding(horizontal = K.gap4), action = T("Clear", "ניקוי"),
+                SectionHeader(T("Recent", "אחרונים"), listMotion(quick = true).padding(horizontal = K.gap4), action = T("Clear", "ניקוי"),
                     onAction = { uk.noammm.kav.Prefs.clearRecents(ctx); recents = emptyList() })
             }
-            itemsIndexed(recents) { i, p -> PlaceRow(p, here, i == 0, i == recents.lastIndex) { pick(p) } }
+            val recentKeys = uniqueKeys(recents.map { "recent:${it.name}|${it.lat}|${it.lon}" })
+            itemsIndexed(recents, key = { i, _ -> recentKeys[i] }) { i, p -> Box(listMotion(quick = true)) { PlaceRow(p, here, i == 0, i == recents.lastIndex) { pick(p) } } }
         } else if (found) {
-            if (places.isNotEmpty()) item { SectionTitle(T("Places", "מקומות")) }
-            itemsIndexed(places) { i, p -> Box(Modifier.popIn(i, places)) { PlaceRow(p, here, i == 0, i == places.lastIndex) { pickPlace(p) } } }
-            if (stations.isNotEmpty()) item { SectionTitle(T("Stops", "תחנות")) }
-            itemsIndexed(stations) { i, p -> Box(Modifier.popIn(places.size + i, stations)) { PlaceRow(p, here, i == 0, i == stations.lastIndex) { pick(p) } } }
+            if (places.isNotEmpty()) item(key = "placesTitle") { Box(listMotion(quick = true)) { SectionTitle(T("Places", "מקומות")) } }
+            val placeKeys = uniqueKeys(places.map { "place:${it.name}|${it.lat}|${it.lon}" })
+            itemsIndexed(places, key = { i, _ -> placeKeys[i] }) { i, p -> Box(listMotion(quick = true)) { PlaceRow(p, here, i == 0, i == places.lastIndex) { pickPlace(p) } } }
+            if (stations.isNotEmpty()) item(key = "stopsTitle") { Box(listMotion(quick = true)) { SectionTitle(T("Stops", "תחנות")) } }
+            val stopKeys = uniqueKeys(stations.map { "stop:${it.name}|${it.lat}|${it.lon}" })
+            itemsIndexed(stations, key = { i, _ -> stopKeys[i] }) { i, p -> Box(listMotion(quick = true)) { PlaceRow(p, here, i == 0, i == stations.lastIndex) { pick(p) } } }
         }
     }
     }
@@ -442,6 +447,10 @@ fun PlacePicker(
             onChangePlace = { editing = null; setting = f; onQuery("") },
         )
     }
+    StopMapPicker(
+        onMap, net, here, onPick = { p -> onMap = false; pick(p) }, onDismiss = { onMap = false },
+        onLocate = onLocate, allowPin = true,
+    )
 }
 
 // Under a search field, an action rather than a second field: no frame, its pin in the accent, its words in the
@@ -462,9 +471,11 @@ internal fun SelectOnMapRow(sides: androidx.compose.ui.unit.Dp = K.gap3, framed:
     }
 }
 
-// Rises in like search does, wherever it opens from.
+// Rises in like search does, over the page it opens from, and goes back down off it the same way: drawn after that
+// page, which stays (under it, faded as under search: underSearch).
 @Composable
 fun StopMapPicker(
+    visible: Boolean,
     net: Net?,
     here: Pair<Double, Double>?,
     onPick: (Transit.Place) -> Unit,
@@ -474,8 +485,7 @@ fun StopMapPicker(
     onStop: ((Int) -> Unit)? = null,
 ) {
     val rise = with(androidx.compose.ui.platform.LocalDensity.current) { 76.dp.roundToPx() }
-    val shown = remember { androidx.compose.animation.core.MutableTransitionState(false).apply { targetState = true } }
-    androidx.compose.animation.AnimatedVisibility(shown, enter = searchIn(rise).targetContentEnter) {
+    androidx.compose.animation.AnimatedVisibility(visible, enter = searchIn(rise).targetContentEnter, exit = searchOut(rise).initialContentExit) {
         MapPickerScreen(net, here, onPick, onDismiss, onLocate, allowPin, onStop)
     }
 }
@@ -571,28 +581,52 @@ private fun StopMapBody(
     var chosen by remember { mutableStateOf<MapPick?>(null) }
     val reach = with(LocalDensity.current) { 26.dp.toPx() }
     val points = remember(stops, centre) { listOf(centre) + stops.take(12).map { net.lat[it] to net.lon[it] } }
-    val geometry = remember(stops, chosen, here, K.light) {
+    // The pick's ring comes and goes as the map's focus (TileMap's focus, FOCUS_IN): by its layer's opacity, frame by
+    // frame. Its own dots, over the stop's unchanged ones, kept while it fades out; the five hundred stops around
+    // aren't sent again for it.
+    val ring = remember { androidx.compose.animation.core.Animatable(0f) }
+    var ringAt by remember { mutableStateOf<MapPick?>(null) }
+    // Where the ring is in the dots the map has (TileMap's onDotsSent): its fade comes in once they're there, not
+    // while the five hundred stops with it are still being made into the map's features.
+    var ringOnMap by remember { mutableStateOf<Pair<Double, Double>?>(null) }
+    LaunchedEffect(chosen) {
         val pick = chosen
+        if (pick != null) {
+            if (ringAt !== pick) { ringAt = pick; ring.snapTo(0f) }
+            val at = when (pick) { is MapPick.Stop -> net.lat[pick.index] to net.lon[pick.index]; is MapPick.Point -> pick.lat to pick.lon }
+            // At most a second: a map that never says still shows the ring.
+            kotlinx.coroutines.withTimeoutOrNull(1000) { snapshotFlow { ringOnMap }.first { it == at } }
+            ring.animateTo(1f, tween(200))
+        } else {
+            ring.animateTo(0f, tween(220))
+            ringAt = null
+        }
+    }
+    val geometry = remember(stops, ringAt, here, MapInk.bg, MapInk.muted, MapInk.accent) {
+        val pick = ringAt
         MapGeometry(
             dots = stops.flatMap { i ->
-                val on = pick is MapPick.Stop && pick.index == i
                 listOf(
-                    MapDot(net.lat[i], net.lon[i], K.bg, if (on) 8f else 6f),
-                    MapDot(
-                        net.lat[i], net.lon[i], androidx.compose.ui.graphics.Color.Transparent,
-                        if (on) 6f else 4.2f, if (on) K.accent else K.muted, if (on) 2.4f else 1.6f,
-                    ),
+                    MapDot(net.lat[i], net.lon[i], MapInk.bg, 6f),
+                    MapDot(net.lat[i], net.lon[i], androidx.compose.ui.graphics.Color.Transparent, 4.2f, MapInk.muted, 1.6f),
                 )
+            } + when (pick) {
+                is MapPick.Stop -> listOf(
+                    MapDot(net.lat[pick.index], net.lon[pick.index], MapInk.bg, 8f, id = "pick-fill", fade = FOCUS_IN),
+                    MapDot(net.lat[pick.index], net.lon[pick.index], androidx.compose.ui.graphics.Color.Transparent, 6f,
+                        MapInk.accent, 2.4f, id = "pick-ring", fade = FOCUS_IN),
+                )
+                is MapPick.Point -> listOf(
+                    MapDot(pick.lat, pick.lon, MapInk.bg, 9f, id = "pick-fill", fade = FOCUS_IN),
+                    MapDot(pick.lat, pick.lon, MapInk.accent, 6f, id = "pick-ring", fade = FOCUS_IN),
+                )
+                null -> emptyList()
             } + (
-                (pick as? MapPick.Point)?.let { p ->
-                    listOf(MapDot(p.lat, p.lon, K.bg, 9f), MapDot(p.lat, p.lon, K.accent, 6f))
-                } ?: emptyList()
-                ) + (
                 here?.let { (lat, lon) ->
                     listOf(
-                        MapDot(lat, lon, K.live.copy(alpha = .18f), 13f, id = "here-halo"),
-                        MapDot(lat, lon, K.bg, 6f, id = "here-ring"),
-                        MapDot(lat, lon, K.live, 4f, id = "here-dot"),
+                        MapDot(lat, lon, MapInk.accent.copy(alpha = .18f), 13f, id = "here-halo"),
+                        MapDot(lat, lon, MapInk.bg, 6f, id = "here-ring"),
+                        MapDot(lat, lon, MapInk.accent, 4f, id = "here-dot"),
                     )
                 } ?: emptyList()
                 ),
@@ -607,6 +641,8 @@ private fun StopMapBody(
                 contentPadding = PaddingValues(top = 72.dp),
                 recenterOn = here,
                 geometry = geometry,
+                focus = { ring.value },
+                onDotsSent = { sent -> ringOnMap = sent.firstOrNull { it.id == "pick-ring" }?.let { it.lat to it.lon } },
                 onTap = { at, proj ->
                     val stop = stops
                         .map { it to (proj.point(net.lat[it], net.lon[it]) - at).getDistance() }
@@ -626,7 +662,9 @@ private fun StopMapBody(
                 modifier = Modifier.align(Alignment.BottomCenter),
                 enter = slideInVertically(spring(dampingRatio = .9f, stiffness = Spring.StiffnessMediumLow)) { it } +
                     fadeIn(tween(140)),
-                exit = slideOutVertically(tween(180)) { it } + fadeOut(tween(140)),
+                // Out as it came in, the way it came: sliding down, and fading only on its way, so it's seen going.
+                exit = slideOutVertically(spring(dampingRatio = 1f, stiffness = Spring.StiffnessMediumLow)) { it } +
+                    fadeOut(tween(160, delayMillis = 90)),
             ) {
                 last?.let { pick ->
                 val stopAt = (pick as? MapPick.Stop)?.index

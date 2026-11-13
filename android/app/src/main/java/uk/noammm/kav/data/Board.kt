@@ -1,7 +1,8 @@
 package uk.noammm.kav.data
 
 // Trips past midnight are written as 24:00 and later, so last night's run of one can still be to come.
-// Tomorrow's trips follow today's, so a board opened late at night isn't empty.
+// Tomorrow's trips follow today's, so a board opened late at night isn't empty. Each is its stop time (an index into
+// stStop and stDep) and when it leaves, in seconds from today's midnight.
 fun Net.departuresAt(stop: Int, now: Int, today: Int, limit: Int = 60): List<Pair<Int, Int>> {
     // Providers name the whole station by its code. Its unnumbered stop may have no trips: those leave from the
     // platforms sharing that code. A specific platform still gets only its own departures.
@@ -14,13 +15,12 @@ fun Net.departuresAt(stop: Int, now: Int, today: Int, limit: Int = 60): List<Pai
     val out = ArrayList<Pair<Int, Int>>()
     var i = dStart[stop]
     while (i < dStart[stop + 1]) {
-        val c = dConn[i]
-        val st = cST[c]
+        val st = dConn[i]
         val dep = stDep[st]
         val t = tripOf(st)
-        if (dep >= now && runsOn(t, today)) out.add(c to dep)
-        if (dep - 86_400 >= now && runsOn(t, yesterday)) out.add(c to dep - 86_400)
-        if (dep < 86_400 && runsOn(t, tomorrow)) out.add(c to dep + 86_400)
+        if (dep >= now && runsOn(t, today)) out.add(st to dep)
+        if (dep - 86_400 >= now && runsOn(t, yesterday)) out.add(st to dep - 86_400)
+        if (dep < 86_400 && runsOn(t, tomorrow)) out.add(st to dep + 86_400)
         i++
     }
     return out.sortedBy { it.second }.take(limit)
@@ -36,7 +36,7 @@ class TrainRow(val trip: Int, val to: String?)
 // later on, else the only one. Works can move a night's train by a few minutes, so failing those, the nearest within
 // five that ends or calls there. Null when none fits or it can't tell which.
 fun Net.trainLeaving(stop: Int, second: Int, today: Int, starts: (String) -> Boolean, ends: (String) -> Boolean): TrainRow? {
-    val near = departuresAt(stop, second - MOVED_S, today).map { (c, dep) -> cST[c] to dep }
+    val near = departuresAt(stop, second - MOVED_S, today)
         .filter { (st, dep) -> dep <= second + MOVED_S && rType[tripRoute[tripOf(st)]] == 2 }
         .sortedBy { (_, dep) -> kotlin.math.abs(dep - second) }
     val close = near.filter { (_, dep) -> kotlin.math.abs(dep - second) <= 60 }
@@ -100,7 +100,7 @@ fun Net.lineTimesAt(stop: Int, route: Int, today: Int): List<Int> {
     val yesterday = (today + 6) % 7
     val out = ArrayList<Int>()
     for (i in dStart[stop] until dStart[stop + 1]) {
-        val st = cST[dConn[i]]
+        val st = dConn[i]
         val t = tripOf(st)
         if (tripRoute[t] != route) continue
         val dep = stDep[st]

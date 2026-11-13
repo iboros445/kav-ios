@@ -14,6 +14,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.PagerState
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.rememberScrollState
@@ -30,6 +31,8 @@ import androidx.compose.animation.core.spring
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.Dispatchers
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.AbsoluteAlignment
 import androidx.compose.ui.Modifier
@@ -37,12 +40,14 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.Login
 import androidx.compose.material.icons.automirrored.rounded.Logout
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.vector.rememberVectorPainter
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.unit.Velocity
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -54,6 +59,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.selected
@@ -122,9 +128,10 @@ internal fun buildSteps(trip: Transit.Itinerary, fromLabel: String, toLabel: Str
         when (l.kind) {
             Transit.LegKind.WALK -> {
                 val prev = all.getOrNull(i - 1)
-                if (prev?.kind == Transit.LegKind.WALK) return@forEachIndexed
+                // Walks one after another are one walk, but for the one on from a stop on the way.
+                if (prev?.kind == Transit.LegKind.WALK && l.visit == null) return@forEachIndexed
                 var mins = 0; var metres = 0; var j = i
-                while (j < all.size && all[j].kind == Transit.LegKind.WALK) {
+                while (j < all.size && all[j].kind == Transit.LegKind.WALK && (j == i || all[j].visit == null)) {
                     mins += all[j].minutes; metres += all[j].meters; j++
                 }
                 if (mins < 1 && metres <= 30) return@forEachIndexed
@@ -132,6 +139,7 @@ internal fun buildSteps(trip: Transit.Itinerary, fromLabel: String, toLabel: Str
                     Transit.LegKind.WALK, dep = l.dep, arr = all[j - 1].arr,
                     fromStop = l.fromStop, toStop = all[j - 1].toStop,
                     meters = metres, shape = all.subList(i, j).flatMap { it.shape },
+                    turns = all.subList(i, j).flatMap { it.turns },
                 )
                 val k = (j until all.size).firstOrNull { all[it].kind != Transit.LegKind.WAIT }
                     ?.takeIf { all[it].kind == Transit.LegKind.RIDE }
@@ -248,6 +256,10 @@ fun NavigateScreen(
     }
     val steps = remember(trip, fromLabel, toLabel) { buildSteps(trip, fromLabel, toLabel) }
     val journey = model.activeJourney?.takeIf { it.trip === trip }
+    // Ended elsewhere (arrived, or the notification's End trip), the screen leaves as its own End trip does.
+    val wasActive = remember(trip) { booleanArrayOf(false) }
+    if (journey != null) wasActive[0] = true
+    LaunchedEffect(journey == null) { if (journey == null && wasActive[0]) onStop() }
     val chosen: Map<Int, Int> = journey?.chosen ?: emptyMap()
     fun choose(leg: Int, option: Int) {
         model.activeJourney?.takeIf { it.trip === trip }?.let { model.activeJourney = it.copy(chosen = it.chosen + (leg to option)) }
@@ -257,17 +269,24 @@ fun NavigateScreen(
     // Where the map shows and follows you: the last sharp fix, or a rough one that came well after it.
     val seen = model.roughFix?.takeIf { rough -> fix == null || rough.at > fix.at + 10 } ?: fix
     val currentStep = model.journeyStep.coerceIn(0, steps.lastIndex)
-    // The ride being waited for now, whichever page is looked at: on the map its bus is the soonest of its line to come.
-    val waitingFor = (steps.getOrNull(currentStep) as? Step.Wait)?.let { boardingChoice(it.ride, it.wait, chosen[it.legIndex] ?: 0) }
+    // The ride waited for now, or next before any ride (walking to the stop counts), whichever page is looked at: on the
+    // map its bus is the soonest of its line to come.
+    val waitingFor = steps.drop(currentStep).takeWhile { it !is Step.Ride }.firstOrNull { it is Step.Wait }
+        ?.let { it as Step.Wait }?.let { boardingChoice(it.ride, it.wait, chosen[it.legIndex] ?: 0) }
     // The vehicle tapped on the map: its card takes the step cards' place until closed.
     var tappedBus by remember(trip) { mutableStateOf<Long?>(null) }
     val bus = chosenLegs(trip, chosen).firstOrNull { it.kind == Transit.LegKind.RIDE && shownArrival(it, waitingFor, r, now)?.tripId == tappedBus }
         ?.let { leg -> shownArrival(leg, waitingFor, r, now)?.takeIf { it.hasLocation }?.let { leg to it } }
     val pager = rememberPagerState(initialPage = currentStep) { steps.size }
     LaunchedEffect(currentStep) { pager.animateScrollToPage(currentStep) }
-    val following = pager.settledPage == currentStep ||
-        pager.targetPage == currentStep ||
-        (steps.getOrNull(currentStep) is Step.Start && pager.settledPage == currentStep + 1)
+    // Derived, so the screen and its map are composed again only when following changes, not at each page the pager
+    // passes.
+    val following by remember(currentStep, steps) {
+        derivedStateOf {
+            pager.settledPage == currentStep || pager.targetPage == currentStep ||
+                (steps.getOrNull(currentStep) is Step.Start && pager.settledPage == currentStep + 1)
+        }
+    }
     val scope = rememberCoroutineScope()
 
     val liquid = rememberLiquidBackdrop()
@@ -280,7 +299,8 @@ fun NavigateScreen(
             val cardHeight = (contentHeight * .30f).coerceIn(160.dp, 240.dp)
             NavigateMap(trip, r, steps.getOrNull(pager.settledPage), chosen, waitingFor, here, seen, model.heading, now,
                 following = following, tapped = tappedBus, onTap = { tappedBus = it },
-                Modifier.fillMaxSize().glassBackdrop(liquid),
+                riding = steps.getOrNull(currentStep) is Step.Ride,
+                modifier = Modifier.fillMaxSize().glassBackdrop(liquid),
                 contentPadding = if (compact) PaddingValues(top = 96.dp, end = panelWidth, bottom = bottomInset + 12.dp)
                     else PaddingValues(top = 138.dp, bottom = cardHeight + 88.dp + bottomInset),
                 attribution = compact)
@@ -305,7 +325,7 @@ fun NavigateScreen(
                     KavIconButton(Icons.AutoMirrored.Rounded.FormatListBulleted, T("Show trip plan", "הצגת המסלול"), onPlan,
                         tint = K.text)
                 }
-                if (!compact) StepStrip(pager.currentPage, steps.size, currentStep) { target ->
+                if (!compact) StepStrip(pager, steps.size, currentStep) { target ->
                     scope.launch { pager.animateScrollToPage(target) }
                 }
             }
@@ -316,7 +336,7 @@ fun NavigateScreen(
                 else Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(bottom = bottomInset),
             ) {
                 if (compact) {
-                    StepStrip(pager.currentPage, steps.size, currentStep) { target ->
+                    StepStrip(pager, steps.size, currentStep) { target ->
                         scope.launch { pager.animateScrollToPage(target) }
                     }
                     Spacer(Modifier.height(K.gap2))
@@ -352,7 +372,7 @@ fun NavigateScreen(
                     beyondViewportPageCount = 1,
                 ) { page ->
                     Column(Modifier.fillMaxWidth().onSizeChanged { pageHeights[page] = it.height }.animateContentSize()) {
-                        CurrentStepButton(page, currentStep) { scope.launch { pager.animateScrollToPage(currentStep) } }
+                        CurrentStepButton(page, currentStep, shown = page == pager.targetPage) { scope.launch { pager.animateScrollToPage(currentStep) } }
                         StepCard(
                             steps[page], r, active = page == currentStep, now = now,
                             chosen = chosen, fix = fix,
@@ -378,15 +398,21 @@ fun NavigateScreen(
     }
 }
 
+// shown: the page is the one the pager is going to. As the trip reaches its next step the pager is carried there, and
+// the page it leaves showed the button for a moment as it slid away. The button keeps its room while it fades: the
+// page is anchored to the bottom, so a height that came and went with the swipe made the card jump up and down.
 @Composable
-internal fun CurrentStepButton(page: Int, current: Int, onClick: () -> Unit) {
+internal fun CurrentStepButton(page: Int, current: Int, shown: Boolean = true, onClick: () -> Unit) {
+    var back by remember { mutableStateOf(page > current) }
+    if (page != current) back = page > current
     if (page == current) return
-    val back = page > current
-    Row(Modifier.fillMaxWidth().padding(bottom = K.gap2),
+    val alpha by animateFloatAsState(if (shown) 1f else 0f, tween(if (shown) 200 else 150), label = "currentStepButton")
+    Row(Modifier.fillMaxWidth().padding(bottom = K.gap2).graphicsLayer { this.alpha = alpha }
+        .then(if (shown) Modifier else Modifier.clearAndSetSemantics { }),
         horizontalArrangement = if (back) Arrangement.Start else Arrangement.End) {
         Row(
             Modifier.heightIn(min = 44.dp).glassSurface(22.dp)
-                .clickable(role = Role.Button, onClick = onClick)
+                .clickable(enabled = shown, role = Role.Button, onClick = onClick)
                 .padding(horizontal = K.gap3, vertical = K.gap2),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(K.gap2),
@@ -399,7 +425,9 @@ internal fun CurrentStepButton(page: Int, current: Int, onClick: () -> Unit) {
 }
 
 @Composable
-private fun StepStrip(current: Int, count: Int, live: Int, goTo: (Int) -> Unit) {
+// The pager's page is read here, so only the strip is composed again as a slide passes from one page to the next.
+private fun StepStrip(pager: PagerState, count: Int, live: Int, goTo: (Int) -> Unit) {
+    val current = pager.currentPage
     Row(
         Modifier.fillMaxWidth().padding(horizontal = K.gap3).height(48.dp).glassSurface(24.dp)
             .padding(horizontal = K.gap1),
@@ -431,8 +459,8 @@ private fun StepStrip(current: Int, count: Int, live: Int, goTo: (Int) -> Unit) 
 @Composable
 internal fun StepDot(looked: Boolean, now: Boolean) {
     val width by animateDpAsState(if (looked) 16.dp else 6.dp, spring(dampingRatio = 1f, stiffness = 500f), label = "dot")
-    Box(Modifier.padding(horizontal = 3.dp).size(width, 6.dp).clip(K.capsule)
-        .background(if (now) K.accent else if (looked) K.text else K.fillStrong))
+    val tint by androidx.compose.animation.animateColorAsState(if (now) K.accent else if (looked) K.text else K.fillStrong, tween(200), label = "dotTint")
+    Box(Modifier.padding(horizontal = 3.dp).size(width, 6.dp).clip(K.capsule).background(tint))
 }
 
 @Composable
@@ -459,7 +487,7 @@ internal fun StepCard(
     chosen: Map<Int, Int> = emptyMap(),
     fix: Fix? = null,
     onChoose: (leg: Int, option: Int) -> Unit = { _, _ -> },
-    // The ride's payment, or its ticket once bought, on its riding card; a train's on the card waiting for it too.
+    // The ride's payment, or its ticket once bought, on its riding card; a train's on the way to its station too.
     pay: (@Composable (legIndex: Int, ride: Transit.Leg) -> Unit)? = null,
     // Reporting the bus ridden to the ministry.
     report: ((ReportFor) -> Unit)? = null,
@@ -478,10 +506,18 @@ internal fun StepCard(
                 Spacer(Modifier.height(K.gap2))
             } else Text(step.label, style = K.type.body, maxLines = 2, overflow = TextOverflow.Ellipsis)
             Text(T("Leave at ${hm.format(Date(step.time * 1000))}", "יציאה בשעה ${hm.format(Date(step.time * 1000))}"), fontSize = 12.sp, color = K.dim)
+            // A trip starting at its station: the train is paid at the gates, before its waiting card.
+            if (pay != null && board != null && step.boardLeg >= 0 && paidAtEntry(board, r)) {
+                pay(step.boardLeg, boardingChoice(board, step.boardWait, chosen[step.boardLeg] ?: 0).first)
+            }
         }
 
         is Step.Arrive -> Card(T("Arrive", "הגעה"), active) {
+            // The place itself, as a stop's photo shows the stop: a favourite's icon, a place's photo from Google Maps.
+            val end = rememberTripEnd(step.label, step.focus.lastOrNull())
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(K.gap2)) {
+                // The row's gap and this make the 12 dp a stop's photo keeps from its name.
+                if (end != null) { TripEndTile(end); Spacer(Modifier.width(K.gap1)) }
                 Column(Modifier.weight(1f)) {
                     Text(step.label, style = K.type.body, maxLines = 2, overflow = TextOverflow.Ellipsis)
                     LiveText(hm.format(Date(step.time * 1000)), style = K.type.subhead.tabular)
@@ -505,6 +541,19 @@ internal fun StepCard(
                     stopId = step.toStop,
                     streetView = step.toRide?.let { ride -> stop?.point?.let { lookAt(it, ride, r) } },
                 )
+                // The walk's next turn, from where the rider is on it, rolling on as they pass each one.
+                nextTurn(step.leg, fix?.takeIf { active })?.let { (turn, metres) ->
+                    Spacer(Modifier.height(K.gap2))
+                    LiveText(
+                        turnText(turn) + if (metres >= 10) " · " + distanceLabel(metres) else "",
+                        style = K.type.subhead, color = K.textSecondary,
+                    )
+                }
+                // A train is paid at the station's gates, reached on the way to it: its payment is on this card too.
+                val ride = step.toRide
+                if (pay != null && ride != null && step.toLeg >= 0 && paidAtEntry(ride, r)) {
+                    pay(step.toLeg, boardingChoice(ride, step.toWait, chosen[step.toLeg] ?: 0).first)
+                }
             }
         }
 
@@ -520,46 +569,73 @@ internal fun StepCard(
 
         is Step.Wait -> {
             val options = Transit.boardingOptions(step.ride, step.wait)
+            // Each line's next departures, in boardingOrder: the soonest first, again as live times come. The line taken
+            // stays the plan's, or the rider's pick.
+            val depsOf = options.map { (o, b) ->
+                androidx.compose.runtime.key(o.lineId) { rememberLineDepartures(o, b, r, now).filter { it.timeUtc >= now - 60 } }
+            }
             val pick = boardingIndex(chosen[step.legIndex] ?: 0, options.size)
-            val choice = options.size > 1
+            val order = boardingOrder(depsOf, pick)
+            val choice = order.size > 1
             Card(if (choice) T("Select a line", "בחרו קו") else T("Wait for", "המתנה ל-"), active) {
                 // Changing trains here: where the next one leaves from, on the card for waiting for it.
                 step.after?.let { trainChange(it, options[pick].first, options[pick].second, r) }?.let {
                     ChangeBlock(it)
                     Spacer(Modifier.height(K.gap3))
                 }
-                // A train is paid at the station's gates, before its platform, so its payment comes first: under a list of
-                // trains to pick from it was out of sight.
-                if (pay != null && paidAtEntry(step.ride, r)) {
-                    pay(step.legIndex, options[pick].first)
-                    Spacer(Modifier.height(K.gap3))
-                }
-                options.forEachIndexed { index, (ride, wait) ->
-                    if (index > 0) Spacer(Modifier.height(K.gap2))
+                order.forEachIndexed { place, index ->
+                    val (ride, wait) = options[index]
+                    if (place > 0) Spacer(Modifier.height(K.gap2))
                     val picked = index == pick
+                    // The pick moves from one line to the other as the map's roads fade. Its colours are read only where
+                    // they're drawn, and the card's content is a layer of its own: read here, each frame of the fade
+                    // composed both cards again and drew all their text anew.
+                    val fill = androidx.compose.animation.animateColorAsState(
+                        if (picked) K.plate else K.plate.copy(alpha = 0f), androidx.compose.animation.core.tween(240), label = "pickFill",
+                    )
+                    val outline = androidx.compose.animation.animateColorAsState(
+                        choiceOutline(picked), androidx.compose.animation.core.tween(240), label = "pickOutline",
+                    )
                     Column(
                         Modifier.fillMaxWidth()
                             .then(
                                 if (choice) Modifier
                                     .clip(RoundedCornerShape(K.rTile))
-                                    .background(if (picked) K.plate else Color.Transparent)
-                                    .border(1.dp, choiceOutline(picked), RoundedCornerShape(K.rTile))
+                                    .drawBehind {
+                                        val corner = androidx.compose.ui.geometry.CornerRadius(K.rTile.toPx())
+                                        val line = 1.dp.toPx()
+                                        drawRoundRect(fill.value, cornerRadius = corner)
+                                        drawRoundRect(
+                                            outline.value, topLeft = Offset(line / 2, line / 2),
+                                            size = androidx.compose.ui.geometry.Size(size.width - line, size.height - line),
+                                            cornerRadius = androidx.compose.ui.geometry.CornerRadius(K.rTile.toPx() - line / 2),
+                                            style = androidx.compose.ui.graphics.drawscope.Stroke(line),
+                                        )
+                                    }
                                     .semantics { selected = picked }
                                     .clickable(role = Role.RadioButton) {
                                         onChoose(step.legIndex, index)
                                     }
+                                    .graphicsLayer()
                                     .padding(K.gap2)
                                 else Modifier,
                             ),
                     ) {
-                        LineRow(ride, r)
+                        // The ride's stops and minutes right after the line's number, and where it goes under them.
+                        RideDetails(ride, r) { LineBadge(ride, r) }
+                        lineDestination(ride, r).takeIf { it.isNotEmpty() }?.let {
+                            Text(it, style = K.type.subhead, maxLines = 2, overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.padding(top = K.gap1))
+                        }
                         Spacer(Modifier.height(K.gap2))
                         val platform = r.platform(ride, wait)
                         if (platform.isNotBlank()) {
                             PlatformTag(platform)
                             Spacer(Modifier.height(K.gap2))
                         }
-                        DepartureTimes(r.departures(ride, wait), now)
+                        val lineDeps = depsOf[index]
+                        DepartureTimes(lineDeps, now)
+                        CrowdMeter(ride, r, lineDeps.firstOrNull())
                         // A train late by the railway's forecast says by how much, as its own list does.
                         if (r.isTrain(ride)) r.departures(ride, wait).firstOrNull { it.tripId == ride.tripId }?.let(::lateBy)?.let {
                             Text(lateLabel(it), fontSize = 14.sp, color = K.critical, modifier = Modifier.padding(top = K.gap1))
@@ -682,6 +758,9 @@ private fun MarkedLines(
     }
 }
 
+// A rail's stops made in each frame while it's made a few at a time: more than its window in a Live card shows.
+private const val RAIL_FEW = 8
+
 @Composable
 internal fun StopRail(
     stops: List<Int>,
@@ -691,7 +770,13 @@ internal fun StopRail(
     times: List<StopTime> = emptyList(),
     modifier: Modifier = Modifier,
     follow: (suspend (Int) -> Unit)? = null,
+    // Its stops made a few a frame, for a rail in a card that's opening: all of them in its first frame take 36 to 50 ms.
+    byFew: Boolean = false,
 ) {
+    var made by remember(stops) { mutableIntStateOf(if (byFew) minOf(stops.size, RAIL_FEW) else stops.size) }
+    if (made < stops.size) LaunchedEffect(stops) {
+        while (made < stops.size) { withFrameNanos { }; made = minOf(stops.size, made + RAIL_FEW) }
+    }
     val centres = remember(stops) { mutableStateListOf<Float>().also { c -> repeat(stops.size) { c.add(Float.NaN) } } }
     val tops = remember(stops) { mutableStateListOf<Int>().also { c -> repeat(stops.size) { c.add(-1) } } }
     val density = LocalDensity.current
@@ -709,8 +794,11 @@ internal fun StopRail(
         val up = getArrowBitmap(density.density * .55f)
         Bitmap.createBitmap(up, 0, 0, up.width, up.height, Matrix().apply { postRotate(180f) }, true).asImageBitmap()
     }
+    // The rail moves on to a stop it passes rather than jumping there; its names and times ease with it.
+    val eased by androidx.compose.animation.core.animateFloatAsState(progress, tween(400), label = "railProgress")
     Box(modifier.fillMaxWidth()) {
         Canvas(Modifier.matchParentSize()) {
+            val progress = eased
             val x = if (layoutDirection == LayoutDirection.Rtl) size.width - 10.dp.toPx() else 10.dp.toPx()
             val wide = 3.dp.toPx()
             var decidedSplit = Float.NaN
@@ -742,6 +830,7 @@ internal fun StopRail(
         }
         Column(Modifier.fillMaxWidth()) {
             stops.forEachIndexed { i, id ->
+                if (i >= made) return@forEachIndexed
                 val last = i == stops.lastIndex
                 val done = progress >= i + 1
                 Row(
@@ -751,18 +840,23 @@ internal fun StopRail(
                     },
                 ) {
                     Spacer(Modifier.width(20.dp + K.gap2))
+                    val ink by androidx.compose.animation.animateColorAsState(if (done) K.dim else K.text, tween(240), label = "stopName")
                     Text(
                         names[id]?.shown() ?: "…",
                         style = K.type.subhead,
-                        color = if (done) K.dim else K.text,
+                        color = ink,
                         maxLines = 1, overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f).padding(vertical = 3.dp),
                     )
                     val time = times.getOrNull(i)
-                    if (time != null && !done) LiveText(
-                        hm.format(Date(time.utc * 1000)), style = androidx.compose.material3.LocalTextStyle.current.copy(fontSize = 12.sp),
-                        color = if (time.live) K.realtime else K.dim, modifier = Modifier.padding(vertical = 3.dp),
-                    )
+                    if (time != null) androidx.compose.animation.AnimatedVisibility(
+                        !done, enter = androidx.compose.animation.fadeIn(tween(240)), exit = androidx.compose.animation.fadeOut(tween(240)),
+                    ) {
+                        LiveText(
+                            hm.format(Date(time.utc * 1000)), style = androidx.compose.material3.LocalTextStyle.current.copy(fontSize = 12.sp),
+                            color = if (time.live) K.realtime else K.dim, modifier = Modifier.padding(vertical = 3.dp),
+                        )
+                    }
                     else if (times.isEmpty() && last && arriveUtc > 0) Text(
                         hm.format(Date(arriveUtc * 1000)),
                         fontSize = 12.sp, color = K.dim, modifier = Modifier.padding(vertical = 3.dp),
@@ -775,14 +869,30 @@ internal fun StopRail(
 
 @Composable
 private fun LineRow(ride: Transit.Leg, r: Transit.Resolved) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        LineBadge(ride, r)
+        Spacer(Modifier.width(K.gap3))
+        Text(
+            lineDestination(ride, r), style = K.type.subhead, maxLines = 2,
+            overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f),
+        )
+    }
+}
+
+private fun lineDestination(ride: Transit.Leg, r: Transit.Resolved): String =
+    r.line(ride.lineId)?.destination?.ifBlank { null }?.let { T("to ${shownName(it)}", "לכיוון ${shownName(it)}") } ?: ""
+
+@Composable
+private fun LineBadge(ride: Transit.Leg, r: Transit.Resolved) {
     val info = r.line(ride.lineId)
     val agency = info?.agencyId ?: -1
     val rt = if (info != null) r.routeType(agency) else 3
     val plate = linePlate(rt, agency) { Operators.of(r, agency) }
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        // The strip look for buses, when chosen in Settings.
-        if (K.lineBadgeAppearance == LineBadgeAppearance.STRIP && modeOf(rt) == Mode.BUS) {
-            LinePlateBadge(ride.shortName.ifBlank { null } ?: info?.number?.ifBlank { null } ?: "…", Mode.BUS, plate)
+    // The strip look for buses, when chosen in Settings.
+    BadgeLookSwitch(K.lineBadgeAppearance == LineBadgeAppearance.STRIP && modeOf(rt) == Mode.BUS) { strip ->
+        if (strip) {
+            LinePlateBadge(ride.shortName.ifBlank { null } ?: info?.number?.ifBlank { null } ?: "…", Mode.BUS, plate,
+                look = LineBadgeAppearance.STRIP)
         } else Column(
             Modifier.width(IntrinsicSize.Min).clip(RoundedCornerShape(K.rBadge)).background(plate?.fill ?: K.plate)
                 .border(1.dp, plate?.edge ?: K.borderStrong, RoundedCornerShape(K.rBadge)),
@@ -800,12 +910,6 @@ private fun LineRow(ride: Transit.Leg, r: Transit.Resolved) {
                 )
             }
         }
-        Spacer(Modifier.width(K.gap3))
-        Text(
-            info?.destination?.ifBlank { null }?.let { T("to ${shownName(it)}", "לכיוון ${shownName(it)}") } ?: "",
-            style = K.type.subhead, maxLines = 2,
-            overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f),
-        )
     }
 }
 
@@ -820,18 +924,22 @@ private fun Card(
     Column(
         Modifier.fillMaxWidth().glassSurface(K.rCard),
     ) {
+        // The step coming up takes the accent as the trip reaches it, easing in rather than switching.
+        val wash by androidx.compose.animation.animateColorAsState(if (active) K.live.copy(alpha = .18f) else K.live.copy(alpha = 0f), androidx.compose.animation.core.tween(300), label = "stepWash")
+        val ink by androidx.compose.animation.animateColorAsState(if (active) K.live else K.text, androidx.compose.animation.core.tween(300), label = "stepInk")
+        val side by androidx.compose.animation.animateColorAsState(if (active) K.live else K.muted, androidx.compose.animation.core.tween(300), label = "stepSide")
         Row(
-            Modifier.fillMaxWidth().background(if (active) K.live.copy(alpha = .18f) else Color.Transparent)
+            Modifier.fillMaxWidth().background(wash)
                 .padding(horizontal = K.gap3, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
                 header, style = K.type.subhead, fontWeight = FontWeight.Medium,
-                color = if (active) K.live else K.text, modifier = Modifier.weight(1f),
+                color = ink, modifier = Modifier.weight(1f),
             )
-            if (trailing != null) Text(
+            if (trailing != null) LiveText(
                 trailing, style = K.type.subhead, fontWeight = FontWeight.Medium,
-                color = if (active) K.live else K.muted,
+                color = side,
             )
         }
         // A long card stops scrolling at its ends instead of dragging the page.
@@ -871,7 +979,7 @@ private fun followFor(
         is Step.Ride -> {
             val ride = chosenRide ?: return null
             val at = recent?.takeIf { it.isFresh(now) && it.aboard(ride.shape) } ?: return null
-            Follow(at.lat, at.lon, bearingAlong(at.lat, at.lon, ride.shape) ?: heading ?: 0f, zoom = 18.3f)
+            Follow(at.lat, at.lon, bearingAt(ride.shape, RideAlong.of(ride, at.lat to at.lon)) ?: heading ?: 0f, zoom = 18.3f)
         }
         else -> null
     }
@@ -905,6 +1013,8 @@ private fun NavigateMap(
     following: Boolean = true,
     tapped: Long? = null,
     onTap: (Long?) -> Unit = {},
+    // The trip is on a ride now (its current step), not just showing one's card.
+    riding: Boolean = false,
     modifier: Modifier = Modifier,
     contentPadding: PaddingValues = PaddingValues(),
     attribution: Boolean = true,
@@ -914,18 +1024,14 @@ private fun NavigateMap(
     if (legs.isEmpty()) return
     val rideLegs = picked.filter { it.kind == Transit.LegKind.RIDE }
     val rideLegsShapes = legs.filter { it.kind != Transit.LegKind.WALK }
-    val tints = routeTints(rideLegsShapes, r)
-    val lineRoutes = rideLegs
-        .map { l ->
-            val a = shownArrival(l, waitingFor, r, now)
-            val route = lineRoute(a, r)
-            val off = l.shape.lastOrNull() ?: r.stop(l.toStop)?.point
-            if (route.size < 2 || off == null) route
-            else splitPath(route, off.first, off.second).first
-        }
-        .filter { it.size >= 2 }
-    val vehicles = rideLegs.mapNotNull { shownArrival(it, waitingFor, r, now)?.takeIf { a -> a.hasLocation } }
-    val vehicleModes = remember(rideLegs, r) {
+    val tints = routeTints(rideLegsShapes, r, MapInk.light, MapInk.route)
+    val arrivals = rideLegs.map { shownArrival(it, waitingFor, r, now) }
+    // Each line's road and its stops before the rider boards, grey around the ride (rememberGreyRoad).
+    val greys = rideLegs.indices.map { i -> androidx.compose.runtime.key(i) { rememberGreyRoad(rideLegs[i], arrivals[i], r) } }
+    val lineRoutes = greys.map { it.road }.filter { it.size >= 2 }
+    val lineStopPoints = greys.flatMap { it.stops }
+    val vehicles = arrivals.mapNotNull { it?.takeIf { a -> a.hasLocation } }
+    val vehicleModes = remember(rideLegs, r, vehicles.map { it.tripId }) {
         rideLegs.mapNotNull { leg ->
             shownArrival(leg, waitingFor, r, now)?.takeIf { it.hasLocation }
                 ?.let { it.tripId to modeOf(r.routeType(r.line(leg.lineId)?.agencyId ?: -1)) }
@@ -951,14 +1057,19 @@ private fun NavigateMap(
     val mePulse = animateFloatAsState(if (here == null) 0f else 1f, tween(350), label = "meReveal")
     val vehicleAlpha = animateFloatAsState(if (vehicles.isEmpty()) 0f else 1f, tween(350), label = "vehicleReveal")
     val heldWalk = remember(step) { mutableStateOf(false) }
+    // Riding, the rider and the camera keep to the ride's road (RideRoad).
+    // Only while the trip is on that ride: a rider looking at a ride's card from home stays where they are.
+    val onRoad = (step as? Step.Ride)?.takeIf { riding }?.let { chosenRide }?.let { ride -> fix?.takeIf { it.isFresh(now) }?.let { RideRoad.place(ride, it) } }
+    val shownHere = onRoad?.let { it.lat to it.lon } ?: here
     // A ride's card follows the rider whenever they are on it, even before the trip has moved on to it.
-    val follow = if (following || step is Step.Ride) followFor(step, chosenRide, fix, heading, now, heldWalk.value) else null
+    val follow = if (following || step is Step.Ride) followFor(step, chosenRide, onRoad ?: fix, heading, now, heldWalk.value) else null
     SideEffect { heldWalk.value = follow != null && step is Step.Walk }
     val fresh = fix?.takeIf { it.isFresh(now) }
 
     val ridingLeg = (step as? Step.Ride)?.let { chosenRide }
     val behind = remember(ridingLeg, fresh?.lat, fresh?.lon, focusedVehicle?.lat, focusedVehicle?.lon, step) {
-        val shape = ridingLeg?.shape ?: return@remember emptyList<Pair<Double, Double>>()
+        val ride = ridingLeg ?: return@remember emptyList<Pair<Double, Double>>()
+        val shape = ride.shape
         val at = when {
             fresh != null && fresh.aboard(shape) -> fresh.lat to fresh.lon
             focusedVehicle != null && distanceToPath(focusedVehicle.lat, focusedVehicle.lon, shape) < 80 &&
@@ -966,28 +1077,35 @@ private fun NavigateMap(
             fresh != null && distanceToPath(fresh.lat, fresh.lon, shape) < 80 -> fresh.lat to fresh.lon
             else -> return@remember emptyList<Pair<Double, Double>>()
         }
-        splitPath(shape, at.first, at.second).first
+        splitRoute(shape, RideAlong.of(ride, at)).first
+    }
+    // The ride's stops already passed, grey as its card's stop list has them (StopRail).
+    // Unknown progress is -1: none passed then.
+    val passedCount = ridingLeg?.let { ride -> stopsProgress(ride, r.stops, busOn(ride, r, riderTrip(ride, r, fix, now)), fix, now).toInt().coerceAtLeast(0) } ?: 0
+    val passedPoints = remember(ridingLeg, passedCount, r.stops) {
+        ridingLeg?.let { ride -> ride.stops.take(passedCount).mapNotNull { r.stops[it]?.point }.map { onRoute(it, ride.shape) }.toSet() }.orEmpty()
     }
 
     val walkLegs = legs.filter { it.kind == Transit.LegKind.WALK }
-    val marks = remember(picked, tints, r, K.light) { stationMarks(picked, rideLegsShapes, tints, r) }
+    val marks = remember(picked, tints, r, MapInk.light) { stationMarks(picked, rideLegsShapes, tints, r) }
     val entrance = rememberVectorPainter(Icons.AutoMirrored.Rounded.Login)
     val exit = rememberVectorPainter(Icons.AutoMirrored.Rounded.Logout)
     val density = LocalDensity.current
     val dir = LocalLayoutDirection.current
-    val geometry = remember(lineRoutes, legs, behind, stopPoints, tints, marks, K.look, K.accent, dir) {
+    val geometry = remember(lineRoutes, lineStopPoints, legs, behind, stopPoints, passedPoints, tints, marks, MapInk.bg, MapInk.text, MapInk.icons, K.accent, dir) {
         val station = tripMarks(marks, legs.last().shape.lastOrNull(), entrance, exit, density, dir)
         MapGeometry(
-            lines = lineRoutes.map { MapLine(it, K.routeIdle, 3f, casing = 6f) } +
-                walkLegs.map { MapLine(it.shape, K.muted, 2f, dashed = true) } +
-                rideLegsShapes.mapIndexed { i, l -> MapLine(l.shape, tints[i], 4f, casing = 8f) } +
-                listOf(MapLine(behind, K.routeIdle, 4f, casing = 8f)),
-            dots = stopPoints.flatMap { (ride, at) ->
+            // Another line picked on the card: its road and stops fade in as the last one's fade out.
+            lines = lineRoutes.map { MapLine(it, MapInk.routeIdle, 3f, casing = 6f, fades = true) } +
+                walkLegs.map { MapLine(it.shape, MapInk.muted, 2f, dashed = true, fades = true) } +
+                rideLegsShapes.mapIndexed { i, l -> MapLine(l.shape, tints[i], 4f, casing = 8f, fades = true) } +
+                listOf(MapLine(behind, MapInk.routeIdle, 4f, casing = 8f)),
+            dots = greyStopDots(lineStopPoints) + stopPoints.flatMap { (ride, at) ->
                 val (lat, lon) = at
-                listOf(MapDot(lat, lon, K.bg, 6f), MapDot(lat, lon, Color.Transparent, 3.5f, tints[ride], 2f))
+                listOf(MapDot(lat, lon, MapInk.bg, 6f), MapDot(lat, lon, Color.Transparent, 3.5f, if (at in passedPoints) MapInk.routeIdle else tints[ride], 2f))
             } + boardingMarkers(rideLegsShapes, tints, r, r.stops) + listOfNotNull(
-                legs.first().shape.firstOrNull()?.let { (lat, lon) -> MapDot(lat, lon, K.bg, 7f) },
-                legs.first().shape.firstOrNull()?.let { (lat, lon) -> MapDot(lat, lon, Color.Transparent, 5f, K.text, 2f) },
+                legs.first().shape.firstOrNull()?.let { (lat, lon) -> MapDot(lat, lon, MapInk.bg, 7f) },
+                legs.first().shape.firstOrNull()?.let { (lat, lon) -> MapDot(lat, lon, Color.Transparent, 5f, MapInk.text, 2f) },
             ),
             markers = station.markers,
             images = station.images,
@@ -997,36 +1115,29 @@ private fun NavigateMap(
     // Walking, the arrow is the way the phone faces; riding, the way the vehicle goes.
     val arrow = if (follow == null) null else if (step is Step.Ride) follow.bearing else heading
     val nowSec = System.currentTimeMillis() / 1000
-    fun tintOf(v: Transit.Arrival) = if (v.vehicleStatus == 2) K.problem else freshColour(freshnessOf(v.sampleUtc, nowSec))
+    fun tintOf(v: Transit.Arrival) = if (v.vehicleStatus == 2) MapInk.icons.problem else mapFreshColour(freshnessOf(v.sampleUtc, nowSec))
     val vehicleMarks = vehicles.map { v -> v to ringedMark(vehicleModes[v.tripId] ?: Mode.BUS, tintOf(v), 12f, 10f, density) }
     val headings = vehicles.filter { it.bearing >= 0 }.map { v -> v to headingMark(tintOf(v), 12f, density) }
+    // The rider gliding from fix to fix, as the vehicles do (riderArrowGeometry).
+    val me = riderArrowGeometry(shownHere, arrow, density, mePulse.value)
+    // Each vehicle by its id, as RouteMap names them: the map sends this layer as one, and only what has an id.
+    fun idOf(v: Transit.Arrival) = "v" + v.vehicleId.ifEmpty { v.tripId.toString() }.replace(':', '.')
     val live = MapGeometry(
-        dots = buildList {
-            here?.let { (lat, lon) ->
-                add(MapDot(lat, lon, K.text.copy(alpha = 0.16f * mePulse.value), 15f))
-                if (arrow == null) {
-                    add(MapDot(lat, lon, K.bg.copy(alpha = mePulse.value), 8f))
-                    add(MapDot(lat, lon, K.text.copy(alpha = mePulse.value), 5f))
-                }
-            }
-        },
-        markers = (
-            if (arrow != null) here?.let { (lat, lon) ->
-                listOf(MapMarker(lat, lon, MAP_ARROW_ICON, arrow, mePulse.value, turns = true))
-            }.orEmpty() else emptyList()
-        ) + vehicleMarks.map { (v, mark) -> MapMarker(v.lat, v.lon, mark.first, alpha = vehicleAlpha.value) } +
+        markers = me.markers + vehicleMarks.map { (v, mark) -> MapMarker(v.lat, v.lon, mark.first, alpha = vehicleAlpha.value, id = idOf(v)) } +
             headings.map { (v, mark) ->
-                MapMarker(v.lat, v.lon, mark.first, v.bearing.toFloat(), vehicleAlpha.value, turns = true)
+                MapMarker(v.lat, v.lon, mark.first, v.bearing.toFloat(), vehicleAlpha.value, turns = true, id = "${idOf(v)}:turn")
             },
-        halos = vehicles.map { v -> MapDot(v.lat, v.lon, tintOf(v).copy(alpha = 0.20f * vehicleAlpha.value), 20f) },
-        images = vehicleMarks.associate { it.second } + headings.associate { it.second },
+        halos = me.halos + vehicles.map { v -> MapDot(v.lat, v.lon, tintOf(v).copy(alpha = 0.20f * vehicleAlpha.value), 20f, id = "${idOf(v)}:halo") },
+        images = vehicleMarks.associate { it.second } + headings.associate { it.second } + me.images,
+        // All in one source as they glide, so the rider's glow is never in two at once, drawn twice and brighter.
+        together = true,
     )
 
     val reach = with(LocalDensity.current) { 36.dp.toPx() }
     Box(Modifier.fillMaxSize()) {
         TileMap(framedPoints, modifier, focusKey = step to chosenRide?.tripId,
             fitMaxZoom = if (step is Step.Walk || step is Step.Arrive) 18.4f else Geo.MAX_Z.toFloat(),
-            recenterOn = remember(here, legs) { recentreOn(here, legs.map { it.shape }) },
+            recenterOn = remember(shownHere, legs) { recentreOn(shownHere, legs.map { it.shape }) },
             contentPadding = contentPadding, follow = follow,
             geometry = geometry, live = live, attribution = attribution,
             onTap = { at, proj ->
@@ -1063,8 +1174,10 @@ private fun VehicleCard(
             a.vehicleStatus == 2 -> T("Out of route", "מחוץ למסלול") to K.problem
             else -> locationHeadline(a.sampleUtc, now)
         }
-        Text(headline, fontSize = 14.sp, color = tint)
-        if (a.sampleUtc > 0) Text(
+        // How fresh its position is ticks each second: only the number rolls (LiveText), the words stay put, and a new
+        // state eases to its colour (LiveText eases it). A crossfade faded the whole line out and in every second.
+        LiveText(headline, style = K.type.subhead.copy(fontSize = 14.sp), color = tint)
+        if (a.sampleUtc > 0) LiveText(
             updatedLabel(a),
             style = K.type.subhead,
         )
@@ -1081,7 +1194,8 @@ private fun VehicleCard(
         if (a.platform.isNotBlank()) Text(T("Platform ${a.platform}", "רציף ${a.platform}"), style = K.type.subhead)
         KavLive.plateOf(a.vehicleId)?.let { Text(T("Number plate $it", "מספר רישוי $it"), style = K.type.subhead) }
         rideReport(leg, r, a, now)?.let { report ->
-            Text(if (report.train) T("Report this train", "דיווח על הרכבת הזו") else T("Report this bus", "דיווח על האוטובוס הזה"),
+            Text(if (report.lightRail) T("Report this light rail", "דיווח על הרכבת הקלה") else if (report.train) T("Report this train", "דיווח על הרכבת הזו")
+                else T("Report this bus", "דיווח על האוטובוס הזה"),
                 fontSize = 14.sp, color = K.accentInk,
                 modifier = Modifier.clickable(role = Role.Button) { onReport(report) }.padding(vertical = K.gap1))
         }
@@ -1140,7 +1254,7 @@ internal fun lookAt(stop: Pair<Double, Double>, road: List<Pair<Double, Double>>
 internal fun lookAt(net: uk.noammm.kav.data.Net, stop: Int): StreetLook {
     val at = net.lat[stop].toDouble() to net.lon[stop].toDouble()
     for (i in net.dStart[stop] until net.dStart[stop + 1]) {
-        val k = net.cST[net.dConn[i]]
+        val k = net.dConn[i]
         val t = net.tripOf(k)
         val before = (k - 1).takeIf { it >= net.tripStart[t] }?.let { net.stStop[it] } ?: stop
         val after = (k + 1).takeIf { it < net.tripStart[t + 1] }?.let { net.stStop[it] } ?: stop
@@ -1166,3 +1280,84 @@ internal fun rideStopPoints(legs: List<Transit.Leg>, stops: Map<Int, Transit.Sto
             leg.shape.lastOrNull().takeIf { stops[leg.toStop]?.point == null && stops[leg.stops.lastOrNull()]?.point == null },
         )).map { i to it }
     }.distinct()
+
+// How far a timetable's stop can be from the grey road and still be drawn on it.
+private const val APPROACH_STOP_M = 40.0
+
+// A ride's line around it, grey: the road its bus takes up to where the rider gets off (the provider's shape for the
+// bus; for a bus from Kav's server, which has none, the road of the route its id names), and the stops on that road
+// before the rider boards (approachStops). Worked out again only when the bus's road changes, not at each tick: a road
+// can be thousands of points.
+internal class GreyRoad(val road: List<Pair<Double, Double>>, val stops: List<Pair<Double, Double>>)
+
+@Composable
+internal fun rememberGreyRoad(ride: Transit.Leg, arrival: Transit.Arrival?, r: Transit.Resolved): GreyRoad {
+    val kav = rememberKavShape(arrival?.takeIf { it.tripShapeId <= 0 }?.let { KavLive.routeOf(it.vehicleId) } ?: -1)
+    val road = remember(ride, arrival?.tripShapeId, r.shapes, kav) {
+        val whole = lineRoute(arrival, r).ifEmpty { kav }
+        val off = ride.shape.lastOrNull() ?: r.stop(ride.toStop)?.point
+        if (whole.size < 2 || off == null) whole else splitPath(whole, off.first, off.second).first
+    }
+    val ctx = androidx.compose.ui.platform.LocalContext.current
+    val net = uk.noammm.kav.Loaded.net
+    val stops by produceState(emptyList<Pair<Double, Double>>(), ride, road, net, uk.noammm.kav.data.Schedules.source) {
+        val number = ride.shortName.ifBlank { r.line(ride.lineId)?.number.orEmpty() }
+        val from = r.stop(ride.fromStop)?.code?.toIntOrNull()
+        val to = r.stop(ride.toStop)?.code?.toIntOrNull()
+        value = if (road.size < 2 || number.isEmpty() || from == null || to == null) emptyList()
+        else withContext(Dispatchers.IO) {
+            approachStops(ctx, net, number, r.line(ride.lineId)?.routeName.orEmpty(), from, to)
+                .filter { (lat, lon) -> distanceToPath(lat, lon, road) <= APPROACH_STOP_M }
+        }
+    }
+    return GreyRoad(road, stops)
+}
+
+// A grey road's stops as the map draws them: rings in the road's grey.
+internal fun greyStopDots(stops: List<Pair<Double, Double>>): List<MapDot> = stops.flatMap { (lat, lon) ->
+    listOf(MapDot(lat, lon, MapInk.bg, 5f), MapDot(lat, lon, Color.Transparent, 3f, MapInk.routeIdle, 1.6f))
+}
+
+// The stops a ride's line calls at before the rider boards, from the timetable picked in Settings: that line's way that
+// stops at the boarding stop and later where the rider gets off, its stops before the boarding one. The provider's own
+// ways (Schedules, kept for the day), found by the line's ministry name where it lists it; the week on the phone for
+// Kav's or the rider's own timetable.
+internal fun approachStops(
+    ctx: android.content.Context, net: uk.noammm.kav.data.Net?, number: String, routeName: String, from: Int, to: Int,
+): List<Pair<Double, Double>> {
+    if (uk.noammm.kav.data.Schedules.online) {
+        val lines = runCatching { uk.noammm.kav.data.Schedules.keptLines(ctx) ?: uk.noammm.kav.data.Schedules.lines(ctx) }.getOrNull()
+            ?: return emptyList()
+        // Each line asked about is a request to the provider: its ministry name, else a few of that number.
+        val asked = approachLines(lines, number, routeName)
+        for (line in asked) {
+            val ways = runCatching { uk.noammm.kav.data.Schedules.ways(line) }.getOrNull() ?: continue
+            for (w in ways) {
+                val at = w.stops.indexOfFirst { it.code == from }
+                if (at > 0 && w.stops.drop(at + 1).any { it.code == to })
+                    return w.stops.take(at).filter { it.lat.isFinite() && it.lon.isFinite() }.map { it.lat to it.lon }
+            }
+        }
+        return emptyList()
+    }
+    val n = net ?: return emptyList()
+    val routes = n.rShort.indices.filter { n.rShort[it] == number }.toHashSet()
+    for (t in n.tripRoute.indices) {
+        if (n.tripRoute[t] !in routes) continue
+        val first = n.tripStart[t]
+        val end = n.tripStart[t + 1]
+        val board = (first until end).firstOrNull { n.code[n.stStop[it]] == from } ?: continue
+        if (board > first && (board + 1 until end).any { n.code[n.stStop[it]] == to })
+            return (first until board).map { k -> n.stStop[k].let { n.lat[it] to n.lon[it] } }
+    }
+    return emptyList()
+}
+
+private const val APPROACH_LINES_ASKED = 2
+
+internal fun approachLines(
+    lines: List<uk.noammm.kav.data.Schedules.Line>, number: String, routeName: String,
+): List<uk.noammm.kav.data.Schedules.Line> {
+    val same = lines.filter { it.number == number }
+    return same.filter { routeName.isNotEmpty() && routeName in it.names }.ifEmpty { same.take(APPROACH_LINES_ASKED) }
+}

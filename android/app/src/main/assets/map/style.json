@@ -775,6 +775,20 @@
      2,
      18,
      11
+    ],
+    "line-opacity": [
+     "interpolate",
+     [
+      "exponential",
+      0.01
+     ],
+     [
+      "zoom"
+     ],
+     12,
+     0,
+     13,
+     1
     ]
    }
   },
@@ -850,6 +864,158 @@
      3,
      18,
      13
+    ],
+    "line-opacity": [
+     "interpolate",
+     [
+      "exponential",
+      0.01
+     ],
+     [
+      "zoom"
+     ],
+     6,
+     [
+      "case",
+      [
+       ">",
+       [
+        "get",
+        "min_zoom"
+       ],
+       6
+      ],
+      0,
+      1
+     ],
+     7,
+     [
+      "case",
+      [
+       ">",
+       [
+        "get",
+        "min_zoom"
+       ],
+       7
+      ],
+      0,
+      1
+     ],
+     8,
+     [
+      "case",
+      [
+       ">",
+       [
+        "get",
+        "min_zoom"
+       ],
+       8
+      ],
+      0,
+      1
+     ],
+     9,
+     [
+      "case",
+      [
+       ">",
+       [
+        "get",
+        "min_zoom"
+       ],
+       9
+      ],
+      0,
+      1
+     ],
+     10,
+     [
+      "case",
+      [
+       ">",
+       [
+        "get",
+        "min_zoom"
+       ],
+       10
+      ],
+      0,
+      1
+     ],
+     11,
+     [
+      "case",
+      [
+       ">",
+       [
+        "get",
+        "min_zoom"
+       ],
+       11
+      ],
+      0,
+      1
+     ],
+     12,
+     [
+      "case",
+      [
+       ">",
+       [
+        "get",
+        "min_zoom"
+       ],
+       12
+      ],
+      0,
+      1
+     ],
+     13,
+     [
+      "case",
+      [
+       ">",
+       [
+        "get",
+        "min_zoom"
+       ],
+       13
+      ],
+      0,
+      1
+     ],
+     14,
+     [
+      "case",
+      [
+       ">",
+       [
+        "get",
+        "min_zoom"
+       ],
+       14
+      ],
+      0,
+      1
+     ],
+     15,
+     [
+      "case",
+      [
+       ">",
+       [
+        "get",
+        "min_zoom"
+       ],
+       15
+      ],
+      0,
+      1
+     ],
+     16,
+     1
     ]
    }
   },
@@ -917,8 +1083,21 @@
    ],
    "paint": {
     "fill-color": "#0a0a0a",
-    "fill-opacity": 0.5
-   }
+    "fill-opacity": [
+     "interpolate",
+     [
+      "linear"
+     ],
+     [
+      "zoom"
+     ],
+     15,
+     0,
+     15.5,
+     0.5
+    ]
+   },
+   "minzoom": 15
   },
   {
    "id": "roads_pier",
@@ -1067,6 +1246,20 @@
      12,
      0,
      12.5,
+     1
+    ],
+    "line-opacity": [
+     "interpolate",
+     [
+      "exponential",
+      0.01
+     ],
+     [
+      "zoom"
+     ],
+     12,
+     0,
+     13,
      1
     ]
    }
@@ -1277,6 +1470,158 @@
      0.5,
      20,
      12
+    ],
+    "line-opacity": [
+     "interpolate",
+     [
+      "exponential",
+      0.01
+     ],
+     [
+      "zoom"
+     ],
+     6,
+     [
+      "case",
+      [
+       ">",
+       [
+        "get",
+        "min_zoom"
+       ],
+       6
+      ],
+      0,
+      1
+     ],
+     7,
+     [
+      "case",
+      [
+       ">",
+       [
+        "get",
+        "min_zoom"
+       ],
+       7
+      ],
+      0,
+      1
+     ],
+     8,
+     [
+      "case",
+      [
+       ">",
+       [
+        "get",
+        "min_zoom"
+       ],
+       8
+      ],
+      0,
+      1
+     ],
+     9,
+     [
+      "case",
+      [
+       ">",
+       [
+        "get",
+        "min_zoom"
+       ],
+       9
+      ],
+      0,
+      1
+     ],
+     10,
+     [
+      "case",
+      [
+       ">",
+       [
+        "get",
+        "min_zoom"
+       ],
+       10
+      ],
+      0,
+      1
+     ],
+     11,
+     [
+      "case",
+      [
+       ">",
+       [
+        "get",
+        "min_zoom"
+       ],
+       11
+      ],
+      0,
+      1
+     ],
+     12,
+     [
+      "case",
+      [
+       ">",
+       [
+        "get",
+        "min_zoom"
+       ],
+       12
+      ],
+      0,
+      1
+     ],
+     13,
+     [
+      "case",
+      [
+       ">",
+       [
+        "get",
+        "min_zoom"
+       ],
+       13
+      ],
+      0,
+      1
+     ],
+     14,
+     [
+      "case",
+      [
+       ">",
+       [
+        "get",
+        "min_zoom"
+       ],
+       14
+      ],
+      0,
+      1
+     ],
+     15,
+     [
+      "case",
+      [
+       ">",
+       [
+        "get",
+        "min_zoom"
+       ],
+       15
+      ],
+      0,
+      1
+     ],
+     16,
+     1
     ]
    }
   },
@@ -1411,6 +1756,20 @@
      2,
      18,
      11
+    ],
+    "line-opacity": [
+     "interpolate",
+     [
+      "exponential",
+      0.01
+     ],
+     [
+      "zoom"
+     ],
+     12,
+     0,
+     13,
+     1
     ]
    }
   },
@@ -1510,6 +1869,158 @@
      3,
      18,
      13
+    ],
+    "line-opacity": [
+     "interpolate",
+     [
+      "exponential",
+      0.01
+     ],
+     [
+      "zoom"
+     ],
+     6,
+     [
+      "case",
+      [
+       ">",
+       [
+        "get",
+        "min_zoom"
+       ],
+       6
+      ],
+      0,
+      1
+     ],
+     7,
+     [
+      "case",
+      [
+       ">",
+       [
+        "get",
+        "min_zoom"
+       ],
+       7
+      ],
+      0,
+      1
+     ],
+     8,
+     [
+      "case",
+      [
+       ">",
+       [
+        "get",
+        "min_zoom"
+       ],
+       8
+      ],
+      0,
+      1
+     ],
+     9,
+     [
+      "case",
+      [
+       ">",
+       [
+        "get",
+        "min_zoom"
+       ],
+       9
+      ],
+      0,
+      1
+     ],
+     10,
+     [
+      "case",
+      [
+       ">",
+       [
+        "get",
+        "min_zoom"
+       ],
+       10
+      ],
+      0,
+      1
+     ],
+     11,
+     [
+      "case",
+      [
+       ">",
+       [
+        "get",
+        "min_zoom"
+       ],
+       11
+      ],
+      0,
+      1
+     ],
+     12,
+     [
+      "case",
+      [
+       ">",
+       [
+        "get",
+        "min_zoom"
+       ],
+       12
+      ],
+      0,
+      1
+     ],
+     13,
+     [
+      "case",
+      [
+       ">",
+       [
+        "get",
+        "min_zoom"
+       ],
+       13
+      ],
+      0,
+      1
+     ],
+     14,
+     [
+      "case",
+      [
+       ">",
+       [
+        "get",
+        "min_zoom"
+       ],
+       14
+      ],
+      0,
+      1
+     ],
+     15,
+     [
+      "case",
+      [
+       ">",
+       [
+        "get",
+        "min_zoom"
+       ],
+       15
+      ],
+      0,
+      1
+     ],
+     16,
+     1
     ]
    }
   },
@@ -1637,7 +2148,158 @@
      0.3,
      0.75
     ],
-    "line-opacity": 0.5,
+    "line-opacity": [
+     "interpolate",
+     [
+      "exponential",
+      0.01
+     ],
+     [
+      "zoom"
+     ],
+     6,
+     [
+      "case",
+      [
+       ">",
+       [
+        "get",
+        "min_zoom"
+       ],
+       6
+      ],
+      0,
+      0.5
+     ],
+     7,
+     [
+      "case",
+      [
+       ">",
+       [
+        "get",
+        "min_zoom"
+       ],
+       7
+      ],
+      0,
+      0.5
+     ],
+     8,
+     [
+      "case",
+      [
+       ">",
+       [
+        "get",
+        "min_zoom"
+       ],
+       8
+      ],
+      0,
+      0.5
+     ],
+     9,
+     [
+      "case",
+      [
+       ">",
+       [
+        "get",
+        "min_zoom"
+       ],
+       9
+      ],
+      0,
+      0.5
+     ],
+     10,
+     [
+      "case",
+      [
+       ">",
+       [
+        "get",
+        "min_zoom"
+       ],
+       10
+      ],
+      0,
+      0.5
+     ],
+     11,
+     [
+      "case",
+      [
+       ">",
+       [
+        "get",
+        "min_zoom"
+       ],
+       11
+      ],
+      0,
+      0.5
+     ],
+     12,
+     [
+      "case",
+      [
+       ">",
+       [
+        "get",
+        "min_zoom"
+       ],
+       12
+      ],
+      0,
+      0.5
+     ],
+     13,
+     [
+      "case",
+      [
+       ">",
+       [
+        "get",
+        "min_zoom"
+       ],
+       13
+      ],
+      0,
+      0.5
+     ],
+     14,
+     [
+      "case",
+      [
+       ">",
+       [
+        "get",
+        "min_zoom"
+       ],
+       14
+      ],
+      0,
+      0.5
+     ],
+     15,
+     [
+      "case",
+      [
+       ">",
+       [
+        "get",
+        "min_zoom"
+       ],
+       15
+      ],
+      0,
+      0.5
+     ],
+     16,
+     0.5
+    ],
     "line-color": "#292929",
     "line-width": [
      "interpolate",
@@ -2001,6 +2663,20 @@
      2,
      18,
      11
+    ],
+    "line-opacity": [
+     "interpolate",
+     [
+      "exponential",
+      0.01
+     ],
+     [
+      "zoom"
+     ],
+     12,
+     0,
+     13,
+     1
     ]
    }
   },
@@ -2209,7 +2885,21 @@
    "paint": {
     "text-color": "#525252",
     "text-halo-color": "#141414",
-    "text-halo-width": 1
+    "text-halo-width": 1,
+    "text-opacity": [
+     "interpolate",
+     [
+      "exponential",
+      0.01
+     ],
+     [
+      "zoom"
+     ],
+     18,
+     0,
+     19,
+     1
+    ]
    }
   },
   {
@@ -3141,7 +3831,21 @@
    "paint": {
     "text-color": "#707070",
     "text-halo-color": "#333333",
-    "text-halo-width": 1
+    "text-halo-width": 1,
+    "text-opacity": [
+     "interpolate",
+     [
+      "exponential",
+      0.01
+     ],
+     [
+      "zoom"
+     ],
+     13,
+     0,
+     14,
+     1
+    ]
    }
   },
   {
@@ -3163,6 +3867,22 @@
     "icon-image": "arrow",
     "icon-rotate": 90,
     "symbol-spacing": 100
+   },
+   "paint": {
+    "icon-opacity": [
+     "interpolate",
+     [
+      "exponential",
+      0.01
+     ],
+     [
+      "zoom"
+     ],
+     16,
+     0,
+     17,
+     1
+    ]
    }
   },
   {
@@ -3179,10 +3899,6 @@
     "path"
    ],
    "layout": {
-    "symbol-sort-key": [
-     "get",
-     "min_zoom"
-    ],
     "symbol-placement": "line",
     "text-font": [
      "NotoRegular"
@@ -4098,7 +4814,21 @@
    "paint": {
     "text-color": "#525252",
     "text-halo-color": "#141414",
-    "text-halo-width": 1
+    "text-halo-width": 1,
+    "text-opacity": [
+     "interpolate",
+     [
+      "exponential",
+      0.01
+     ],
+     [
+      "zoom"
+     ],
+     15,
+     0,
+     16,
+     1
+    ]
    }
   },
   {
@@ -7036,10 +7766,6 @@
     "major_road"
    ],
    "layout": {
-    "symbol-sort-key": [
-     "get",
-     "min_zoom"
-    ],
     "symbol-placement": "line",
     "text-font": [
      "NotoRegular"
@@ -7955,7 +8681,68 @@
    "paint": {
     "text-color": "#5c5c5c",
     "text-halo-color": "#141414",
-    "text-halo-width": 1
+    "text-halo-width": 1,
+    "text-opacity": [
+     "interpolate",
+     [
+      "exponential",
+      0.01
+     ],
+     [
+      "zoom"
+     ],
+     11,
+     0,
+     12,
+     [
+      "case",
+      [
+       "==",
+       [
+        "get",
+        "kind"
+       ],
+       "major_road"
+      ],
+      0,
+      1
+     ],
+     13,
+     1
+    ]
+   }
+  },
+  {
+   "id": "buildings_3d",
+   "type": "fill-extrusion",
+   "source": "protomaps",
+   "source-layer": "buildings",
+   "minzoom": 15,
+   "filter": [
+    "in",
+    "kind",
+    "building",
+    "building_part"
+   ],
+   "paint": {
+    "fill-extrusion-color": "#2c2c2c",
+    "fill-extrusion-height": [
+     "coalesce",
+     [
+      "get",
+      "height"
+     ],
+     6
+    ],
+    "fill-extrusion-base": [
+     "coalesce",
+     [
+      "get",
+      "min_height"
+     ],
+     0
+    ],
+    "fill-extrusion-opacity": 0
    }
   },
   {
@@ -7970,21 +8757,6 @@
     "macrohood"
    ],
    "layout": {
-    "symbol-sort-key": [
-     "case",
-     [
-      "has",
-      "sort_key"
-     ],
-     [
-      "get",
-      "sort_key"
-     ],
-     [
-      "get",
-      "min_zoom"
-     ]
-    ],
     "text-field": [
      "case",
      [
@@ -8934,7 +9706,159 @@
    "paint": {
     "text-color": "#5c5c5c",
     "text-halo-color": "#141414",
-    "text-halo-width": 1
+    "text-halo-width": 1,
+    "text-opacity": [
+     "interpolate",
+     [
+      "exponential",
+      0.01
+     ],
+     [
+      "zoom"
+     ],
+     6,
+     [
+      "case",
+      [
+       ">",
+       [
+        "get",
+        "min_zoom"
+       ],
+       6
+      ],
+      0,
+      1
+     ],
+     7,
+     [
+      "case",
+      [
+       ">",
+       [
+        "get",
+        "min_zoom"
+       ],
+       7
+      ],
+      0,
+      1
+     ],
+     8,
+     [
+      "case",
+      [
+       ">",
+       [
+        "get",
+        "min_zoom"
+       ],
+       8
+      ],
+      0,
+      1
+     ],
+     9,
+     [
+      "case",
+      [
+       ">",
+       [
+        "get",
+        "min_zoom"
+       ],
+       9
+      ],
+      0,
+      1
+     ],
+     10,
+     [
+      "case",
+      [
+       ">",
+       [
+        "get",
+        "min_zoom"
+       ],
+       10
+      ],
+      0,
+      1
+     ],
+     11,
+     [
+      "case",
+      [
+       ">",
+       [
+        "get",
+        "min_zoom"
+       ],
+       11
+      ],
+      0,
+      1
+     ],
+     12,
+     [
+      "case",
+      [
+       ">",
+       [
+        "get",
+        "min_zoom"
+       ],
+       12
+      ],
+      0,
+      1
+     ],
+     13,
+     [
+      "case",
+      [
+       ">",
+       [
+        "get",
+        "min_zoom"
+       ],
+       13
+      ],
+      0,
+      1
+     ],
+     14,
+     [
+      "case",
+      [
+       ">",
+       [
+        "get",
+        "min_zoom"
+       ],
+       14
+      ],
+      0,
+      1
+     ],
+     15,
+     [
+      "case",
+      [
+       ">",
+       [
+        "get",
+        "min_zoom"
+       ],
+       15
+      ],
+      0,
+      1
+     ],
+     16,
+     1
+    ]
    }
   },
   {
@@ -8948,10 +9872,6 @@
     "region"
    ],
    "layout": {
-    "symbol-sort-key": [
-     "get",
-     "sort_key"
-    ],
     "text-field": [
      "step",
      [
@@ -10844,21 +11764,6 @@
     "text-font": [
      "NotoMedium"
     ],
-    "symbol-sort-key": [
-     "case",
-     [
-      "has",
-      "sort_key"
-     ],
-     [
-      "get",
-      "sort_key"
-     ],
-     [
-      "get",
-      "min_zoom"
-     ]
-    ],
     "text-padding": [
      "interpolate",
      [
@@ -11068,7 +11973,311 @@
    "paint": {
     "text-color": "#999999",
     "text-halo-color": "#141414",
-    "text-halo-width": 1
+    "text-halo-width": 1,
+    "text-opacity": [
+     "interpolate",
+     [
+      "exponential",
+      0.01
+     ],
+     [
+      "zoom"
+     ],
+     6,
+     [
+      "case",
+      [
+       ">",
+       [
+        "get",
+        "min_zoom"
+       ],
+       6
+      ],
+      0,
+      1
+     ],
+     7,
+     [
+      "case",
+      [
+       ">",
+       [
+        "get",
+        "min_zoom"
+       ],
+       7
+      ],
+      0,
+      1
+     ],
+     8,
+     [
+      "case",
+      [
+       ">",
+       [
+        "get",
+        "min_zoom"
+       ],
+       8
+      ],
+      0,
+      1
+     ],
+     9,
+     [
+      "case",
+      [
+       ">",
+       [
+        "get",
+        "min_zoom"
+       ],
+       9
+      ],
+      0,
+      1
+     ],
+     10,
+     [
+      "case",
+      [
+       ">",
+       [
+        "get",
+        "min_zoom"
+       ],
+       10
+      ],
+      0,
+      1
+     ],
+     11,
+     [
+      "case",
+      [
+       ">",
+       [
+        "get",
+        "min_zoom"
+       ],
+       11
+      ],
+      0,
+      1
+     ],
+     12,
+     [
+      "case",
+      [
+       ">",
+       [
+        "get",
+        "min_zoom"
+       ],
+       12
+      ],
+      0,
+      1
+     ],
+     13,
+     [
+      "case",
+      [
+       ">",
+       [
+        "get",
+        "min_zoom"
+       ],
+       13
+      ],
+      0,
+      1
+     ],
+     14,
+     [
+      "case",
+      [
+       ">",
+       [
+        "get",
+        "min_zoom"
+       ],
+       14
+      ],
+      0,
+      1
+     ],
+     15,
+     [
+      "case",
+      [
+       ">",
+       [
+        "get",
+        "min_zoom"
+       ],
+       15
+      ],
+      0,
+      1
+     ],
+     16,
+     1
+    ],
+    "icon-opacity": [
+     "interpolate",
+     [
+      "exponential",
+      0.01
+     ],
+     [
+      "zoom"
+     ],
+     6,
+     [
+      "case",
+      [
+       ">",
+       [
+        "get",
+        "min_zoom"
+       ],
+       6
+      ],
+      0,
+      1
+     ],
+     7,
+     [
+      "case",
+      [
+       ">",
+       [
+        "get",
+        "min_zoom"
+       ],
+       7
+      ],
+      0,
+      1
+     ],
+     8,
+     [
+      "case",
+      [
+       ">",
+       [
+        "get",
+        "min_zoom"
+       ],
+       8
+      ],
+      0,
+      1
+     ],
+     9,
+     [
+      "case",
+      [
+       ">",
+       [
+        "get",
+        "min_zoom"
+       ],
+       9
+      ],
+      0,
+      1
+     ],
+     10,
+     [
+      "case",
+      [
+       ">",
+       [
+        "get",
+        "min_zoom"
+       ],
+       10
+      ],
+      0,
+      1
+     ],
+     11,
+     [
+      "case",
+      [
+       ">",
+       [
+        "get",
+        "min_zoom"
+       ],
+       11
+      ],
+      0,
+      1
+     ],
+     12,
+     [
+      "case",
+      [
+       ">",
+       [
+        "get",
+        "min_zoom"
+       ],
+       12
+      ],
+      0,
+      1
+     ],
+     13,
+     [
+      "case",
+      [
+       ">",
+       [
+        "get",
+        "min_zoom"
+       ],
+       13
+      ],
+      0,
+      1
+     ],
+     14,
+     [
+      "case",
+      [
+       ">",
+       [
+        "get",
+        "min_zoom"
+       ],
+       14
+      ],
+      0,
+      1
+     ],
+     15,
+     [
+      "case",
+      [
+       ">",
+       [
+        "get",
+        "min_zoom"
+       ],
+       15
+      ],
+      0,
+      1
+     ],
+     16,
+     1
+    ]
    }
   },
   {
@@ -11082,21 +12291,6 @@
     "country"
    ],
    "layout": {
-    "symbol-sort-key": [
-     "case",
-     [
-      "has",
-      "sort_key"
-     ],
-     [
-      "get",
-      "sort_key"
-     ],
-     [
-      "get",
-      "min_zoom"
-     ]
-    ],
     "text-field": [
      "format",
      [

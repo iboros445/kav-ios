@@ -12,6 +12,7 @@ import uk.noammm.kav.Prefs
 import uk.noammm.kav.SupportPrompt
 import uk.noammm.kav.data.AutoUpdate
 import uk.noammm.kav.data.StartNotice
+import uk.noammm.kav.data.Updates
 import uk.noammm.kav.data.WhatsNew
 
 // Every popup Kav puts up by itself as it opens, in the order they go: a look to pick after a big update, the message
@@ -84,18 +85,22 @@ fun StartPopups(model: KavModel) {
         if (updated == null) updated = withContext(Dispatchers.IO) { AutoUpdate.notice(app) ?: WhatsNew.notice(app) }
         if (ready == null && Prefs.autoUpdate(app)) ready = withContext(Dispatchers.IO) { AutoUpdate.ready(app) }
     }
+    val readyNow = ready?.takeIf { r -> model.update?.let { Updates.isNewer(it.version, r.to) } != true }
     val wanted = buildSet {
         if (pickLook) add(StartPopup.LOOK)
         if (notice != null) add(StartPopup.NOTICE)
         if (mapPromptWanted) add(StartPopup.MAP)
         if (PendingBackup.uri != null) add(StartPopup.IMPORT)
         if (pickSupport && !supportWaits) add(StartPopup.SUPPORT)
-        // With automatic updates on, Kav asks about the version it downloaded instead.
-        if (model.update != null && !model.updateDismissed && Shown.updatePrompts && !Prefs.autoUpdate(ctx)) add(StartPopup.UPDATE)
-        if (ready != null && readyLater != opening) add(StartPopup.READY)
+        // The version downloaded in the background, unless the check as Kav opened found a newer one, which is offered
+        // to download and install instead.
+        if (model.update != null && !model.updateDismissed && (Shown.updatePrompts || Prefs.autoUpdate(ctx)) && readyNow == null) {
+            add(StartPopup.UPDATE)
+        }
+        if (readyNow != null && readyLater != opening) add(StartPopup.READY)
         if (updated != null) add(StartPopup.UPDATED)
     }
-    when (queue.pick(wanted, setOf(StartPopup.IMPORT), opening)) {
+    when (if (Openings.launched) queue.pick(wanted, setOf(StartPopup.IMPORT), opening) else null) {
         StartPopup.LOOK -> LookPrompt { Prefs.lookPicked(ctx); pickLook = false }
         StartPopup.NOTICE -> notice?.let { n ->
             NoticePrompt(n) { coffee ->
@@ -108,7 +113,7 @@ fun StartPopups(model: KavModel) {
         StartPopup.IMPORT -> ImportPrompt(model)
         StartPopup.SUPPORT -> SupportPrompt { Prefs.supportShown(ctx); pickSupport = false }
         StartPopup.UPDATE -> UpdatePrompt(model)
-        StartPopup.READY -> ready?.let { ReadyPrompt(it) { readyLater = opening } }
+        StartPopup.READY -> readyNow?.let { ReadyPrompt(it) { readyLater = opening } }
         StartPopup.UPDATED -> updated?.let { UpdatedNotice(it) { AutoUpdate.noticeShown(ctx); WhatsNew.shown(ctx); updated = null } }
         null -> {}
     }

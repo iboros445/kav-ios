@@ -1,5 +1,8 @@
 package uk.noammm.kav.data
 
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
@@ -13,31 +16,50 @@ import java.util.zip.GZIPOutputStream
 internal object TripShare {
     private const val MAX_BYTES = 2_000_000
 
-    fun create(trip: JSONObject, days: Int): String {
+    // card: the picture chats show with the link (ShareSheet's card), a JPEG. A server that doesn't take one yet, or won't
+    // take this one, still makes the link, without it.
+    // The server a new link is made on, as picked in Settings (null until it is): Kav's or the rider's own (server/selfhost).
+    var picked by mutableStateOf<Source?>(null)
+    val server: String get() = Sources.shareOn(picked, KavLive.source, KavPlan.source, KavLive.ownServer)
+
+    fun create(trip: JSONObject, days: Int, card: ByteArray? = null): String {
         require(days in listOf(3, 7, 30))
-        val result = request("/api/share", JSONObject().put("trip", trip).put("days", days))
+        val at = server
+        val doc = JSONObject().put("trip", trip).put("days", days)
+        val result = card?.let { picture ->
+            val encoded = Base64.getEncoder().encodeToString(picture)
+            runCatching { request(at, "/api/share", JSONObject(doc.toString()).put("card", encoded), encoded.length) }.getOrNull()
+        } ?: request(at, "/api/share", doc)
         val url = result.getString("url")
-        require(url.matches(Regex("https://kav\\.noammm\\.uk/[A-Za-z0-9]{7}")))
+        require(made(at, url))
         return url
     }
 
-    fun read(id: String): JSONObject {
+    // A link where the server that made it keeps its links, and nowhere else.
+    internal fun made(at: String, url: String): Boolean = url.matches(Regex(Regex.escape(linkSite(at)) + "/[A-Za-z0-9]{7}"))
+
+    // Where a server's links are: Kav's on share.kavapp.link (asked through kav.noammm.uk, it still gives its own), a
+    // copy's on itself.
+    internal fun linkSite(at: String): String = if (at == KavLive.KAV_SERVER) "https://${TripLink.HOST}" else at
+
+    // host: the server the link is on, Kav's own or a copy of it.
+    fun read(id: String, host: String = TripLink.HOST): JSONObject {
         require(id.matches(Regex("[A-Za-z0-9]{7}")))
-        return request("/api/share/$id")
+        return request("https://$host", "/api/share/$id")
     }
 
-    private fun request(path: String, doc: JSONObject? = null): JSONObject {
-        val c = (URI(KavLive.KAV_SERVER + path).toURL().openConnection() as HttpURLConnection).apply {
+    private fun request(at: String, path: String, doc: JSONObject? = null, card: Int = 0): JSONObject {
+        val c = (RiderProxy.open(URI(at + path).toURL()) as HttpURLConnection).apply {
             connectTimeout = 10_000; readTimeout = 15_000
             instanceFollowRedirects = false
         }
         try {
             if (doc != null) {
                 val bytes = doc.toString().toByteArray(Charsets.UTF_8)
-                require(bytes.size <= 262_144) { "This trip is too large to share" }
+                require(bytes.size <= 262_144 + card) { "This trip is too large to share" }
                 c.requestMethod = "POST"; c.doOutput = true
                 c.setRequestProperty("Content-Type", "application/json")
-                KavLive.sign(c, path, KavLive.keyFor(KavLive.KAV_SERVER))
+                KavLive.sign(c, path, KavLive.keyFor(at))
                 c.setFixedLengthStreamingMode(bytes.size)
                 c.outputStream.use { it.write(bytes) }
             }

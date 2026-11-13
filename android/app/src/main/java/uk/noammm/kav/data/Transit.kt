@@ -52,7 +52,7 @@ object Transit {
 
     class Stop(val id: Int, val lat: Double, val lon: Double, val name: String)
 
-    // routeName: the ministry's own name for this way of the line, which service alerts are found by (MoovitAlerts).
+    // routeName: the ministry's own name for this way of the line, which service alerts are found by (RideAlerts).
     class LineInfo(
         val groupId: Int,
         val number: String,
@@ -97,13 +97,21 @@ object Transit {
         val type: Int = 5,
         val mode: Int = -1,
         val googleId: String? = null,
-    )
+        // As a stop on the way of a trip: the minutes to stay there, 0 to only pass by.
+        val stayMin: Int = 0,
+    ) {
+        fun staying(minutes: Int) = Place(name, detail, lat, lon, type, mode, googleId, minutes)
+    }
+
+    // A stop on the way, on the first leg on from it: the rider is there from getting there until leaving for that leg.
+    // stay: they asked to stay there, not only to pass by.
+    data class Visit(val place: String, val from: Long, val until: Long, val stay: Boolean = false) {
+        val minutes get() = ((until - from) / 60).toInt().coerceAtLeast(0)
+    }
 
     const val PLACE_TOWN = 4
 
     enum class LegKind { WALK, WAIT, RIDE, TAXI, BIKE, OTHER }
-
-    enum class DayOff { SHABBAT, HOLIDAY }
 
     enum class TimeState { STATIC, STATISTICAL, REAL_TIME, REAL_TIME_HIGH, REAL_TIME_MEDIUM, REAL_TIME_LOW, REAL_TIME_DROPPED, CANCELED, OUT_OF_SHAPE, FREQUENCY }
 
@@ -171,6 +179,10 @@ object Transit {
         // 3 e-scooter, 4 kick scooter, 5 moped or -1 car, and who runs it. 0 for every other leg.
         val shared: Int = 0,
         val sharedBy: String = "",
+        // A walk's turns, as its planner gives them.
+        val turns: List<Turn> = emptyList(),
+        // On the first leg on from a stop on the way.
+        val visit: Visit? = null,
     ) {
         val options get() = alternatives.ifEmpty { listOf(this) }
         // Every line that can take the ride by when it leaves, as a route card lists them: the card's own first of those
@@ -178,6 +190,10 @@ object Transit {
         val lineChoices get() = (options.sortedBy { it.dep }.map { it.lineId } + alternativeLineIds).distinct()
         val minutes get() = (((arr - dep) / 60).toInt()).coerceAtLeast(0)
     }
+
+    // A turn on a walk: which way (OpenTripPlanner's relativeDirection: DEPART, LEFT, SLIGHTLY_RIGHT, CONTINUE...), onto
+    // which street (blank for a path with no name), how far along it, and where.
+    data class Turn(val way: String, val street: String, val metres: Int, val lat: Double, val lon: Double)
 
     class Itinerary(
         val guid: String,
@@ -195,12 +211,6 @@ object Transit {
         // The provider's original itinerary, kept for its own Share request, including after reopening a saved trip.
         val original: String = "",
     ) {
-        // The day off a route sets out after, when the search falls on one and nothing runs: the planner tags it.
-        val after: DayOff? get() = when {
-            "after_shabbat" in tags -> DayOff.SHABBAT
-            "after_holiday" in tags -> DayOff.HOLIDAY
-            else -> null
-        }
         val durationMin get() = ((arr - dep) / 60).toInt()
         val rides get() = legs.filter { it.kind == LegKind.RIDE }
         val transfers get() = (rides.size - 1).coerceAtLeast(0)
@@ -429,8 +439,6 @@ object Transit {
         }
         return out
     }
-
-    val ALL_ROUTE_TYPES = listOf(0, 1, 2, 3, 4, 5, 6, 7)
 
     // How old a vehicle's report can be for its time to stay live when a refresh fails.
     const val STALE_LIVE_S = 120L

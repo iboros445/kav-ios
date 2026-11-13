@@ -55,7 +55,7 @@ object TownHub {
         val week = HashMap<Int, Int>()
         fun departures(s: Int) = week.getOrPut(s) {
             var n = 0
-            for (i in net.dStart[s] until net.dStart[s + 1]) n += Integer.bitCount(net.tripDays[net.tripOf(net.cST[net.dConn[i]])] and 0x7f)
+            for (i in net.dStart[s] until net.dStart[s + 1]) n += Integer.bitCount(net.tripDays[net.tripOf(net.dConn[i])] and 0x7f)
             n
         }
         val joined = (0 until net.nStops).filter { s ->
@@ -99,7 +99,7 @@ object TownHub {
         fun trains(s: Int): Int {
             var n = 0
             for (i in net.dStart[s] until net.dStart[s + 1]) {
-                val t = net.tripOf(net.cST[net.dConn[i]])
+                val t = net.tripOf(net.dConn[i])
                 if (net.rType[net.tripRoute[t]] == 2) n += Integer.bitCount(net.tripDays[t] and 0x7f)
             }
             return n

@@ -202,13 +202,18 @@ private fun TimeField(
                 onValue(v)
                 if (digits.length == 2 || v * 10 > range.last) onFilled()
             },
+            // The focus ring eases in and out, as does the red of a time out of range.
             modifier = modifier.width(96.dp).height(72.dp)
-                .border(if (focused) 2.dp else 1.dp, if (focused) K.accent else K.borderStrong, RoundedCornerShape(K.rTile))
+                .border(
+                    androidx.compose.animation.core.animateDpAsState(if (focused) 2.dp else 1.dp, androidx.compose.animation.core.tween(150), label = "ringWidth").value,
+                    androidx.compose.animation.animateColorAsState(if (focused) K.accent else K.borderStrong, androidx.compose.animation.core.tween(150), label = "ring").value,
+                    RoundedCornerShape(K.rTile),
+                )
                 .onFocusChanged { focused = it.isFocused; typed = null },
-            textStyle = TextStyle(fontSize = 44.sp, color = if (valid) K.text else K.critical, textAlign = TextAlign.Center),
+            textStyle = TextStyle(fontSize = 44.sp, color = androidx.compose.animation.animateColorAsState(if (valid) K.text else K.critical, androidx.compose.animation.core.tween(150), label = "digits").value, textAlign = TextAlign.Center),
             singleLine = true,
             cursorBrush = SolidColor(K.accent),
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword, imeAction = ime),
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ime),
             keyboardActions = KeyboardActions(onNext = { onFilled() }, onDone = { onFilled() }),
             decorationBox = { box ->
                 Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
@@ -224,13 +229,16 @@ private fun TimeField(
 
 @Composable
 private fun Period(text: String, on: Boolean, onClick: () -> Unit) {
+    // The picked half of the day eases to the accent as the other eases back.
+    val fill = androidx.compose.animation.animateColorAsState(if (on) K.accent else Color.Transparent, androidx.compose.animation.core.tween(150), label = "period").value
+    val ink = androidx.compose.animation.animateColorAsState(if (on) K.onAccent else K.dim, androidx.compose.animation.core.tween(150), label = "periodInk").value
     Box(
-        Modifier.size(64.dp, 44.dp).background(if (on) K.accent else Color.Transparent)
+        Modifier.size(64.dp, 44.dp).background(fill)
             .semantics { selected = on }
             .clickable(role = Role.RadioButton, onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
-        Text(text, fontSize = 16.sp, fontWeight = FontWeight.Medium, color = if (on) K.onAccent else K.dim)
+        Text(text, fontSize = 16.sp, fontWeight = FontWeight.Medium, color = ink)
     }
 }
 

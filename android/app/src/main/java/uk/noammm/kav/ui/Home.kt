@@ -1,8 +1,10 @@
 package uk.noammm.kav.ui
 
 import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.VisibilityThreshold
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.pager.HorizontalPager
@@ -53,6 +55,7 @@ internal fun HomeScreen(
     onSetFavourite: (Favourite) -> Unit,
     onTrip: (RecentTrip) -> Unit,
     onResume: () -> Unit,
+    onLatest: (ActiveJourney) -> Unit,
 ) {
     val ctx = androidx.compose.ui.platform.LocalContext.current
     val favourites = model.favourites
@@ -110,7 +113,7 @@ internal fun HomeScreen(
                 contentPadding = PaddingValues(start = K.gap4, end = K.gap4, top = topSpace + K.gap4,
                     bottom = K.gap6 + LocalBottomBarInset.current),
             ) {
-                item {
+                item(key = "favourites") {
                     FavouriteStrip(
                         favourites,
                         // A trip to a saved place goes by the name it was saved under, with where it is under that.
@@ -122,10 +125,16 @@ internal fun HomeScreen(
                         onRemove = { f -> save(favourites.filter { it.id != f.id }) },
                     )
                 }
-                model.activeJourney?.let { journey -> item { Box(Modifier.padding(top = K.gap4)) { JourneyCard(model, journey, onResume) } } }
+                // Each card comes, goes and moves with a fade and a glide: a trip starting or ending, paying hidden, the
+                // first recent trip.
+                model.activeJourney?.let { journey -> item(key = "journey") { Box(listMotion().padding(top = K.gap4)) { JourneyCard(model, journey, onResume) } } }
+                if (model.activeJourney == null) item(key = "suggestions") {
+                    HomeSuggestions(model, onLatest, listMotion().padding(top = K.gap4))
+                }
                 // Paying, the tickets still running and the history, in one card, unless the rider has hidden paying.
-                if (Shown.payments) item {
-                    Column(Modifier.padding(top = K.gap4).fillMaxWidth().panel(K.rCard)) {
+                if (Shown.payments) item(key = "payments") {
+                    Column(listMotion().padding(top = K.gap4).fillMaxWidth().panel(K.rCard)
+                        .animateContentSize(androidx.compose.animation.core.spring(dampingRatio = 1f, stiffness = 500f))) {
                         ListRow(
                             T("Pay for a ride", "תשלום על נסיעה"),
                             leading = { Icon(Icons.Rounded.QrCodeScanner, contentDescription = null, tint = K.textSecondary, modifier = Modifier.size(24.dp)) },
@@ -138,16 +147,23 @@ internal fun HomeScreen(
                         }
                     }
                 }
-                if (recentTrips.isNotEmpty()) item {
-                    Column {
-                        SectionHeader(
-                            T("Recent trips", "נסיעות אחרונות"),
-                            action = if (recentTrips.size > 3) T("See all", "הכול") else null, onAction = { allTrips = true },
-                        )
-                        ListGroup(inset = RECENT_INSET) {
-                            recentTrips.take(if (model.activeJourney != null) 2 else 3).forEach { trip ->
-                                row { RecentTripRow(trip) { onTrip(trip) } }
-                            }
+                // Its caption and See all inside the card, as the suggestions card has its pages' captions.
+                if (recentTrips.isNotEmpty()) item(key = "recent") {
+                    Column(listMotion().padding(top = K.gap4).fillMaxWidth().panel(K.rCard)
+                        .animateContentSize(androidx.compose.animation.core.spring(dampingRatio = 1f, stiffness = 500f))) {
+                        Row(Modifier.fillMaxWidth()) {
+                            Text(T("Recent trips", "נסיעות אחרונות"), style = K.type.caption, color = K.textSecondary,
+                                modifier = Modifier.weight(1f).padding(start = K.gap4, end = K.gap2, top = K.gap4, bottom = K.gap1))
+                            // As tall as the caption's row, so the trips sit where the suggestions card's rows do.
+                            if (recentTrips.size > 3) Text(
+                                T("See all", "הכול"), style = K.type.caption, color = K.accentInk,
+                                modifier = Modifier.clip(RoundedCornerShape(K.rTile)).clickable(role = Role.Button) { allTrips = true }
+                                    .padding(start = K.gap2, end = K.gap4, top = K.gap4, bottom = K.gap1),
+                            )
+                        }
+                        recentTrips.take(if (model.activeJourney != null) 2 else 3).forEachIndexed { i, trip ->
+                            if (i > 0) Separator(RECENT_INSET)
+                            RecentTripRow(trip) { onTrip(trip) }
                         }
                     }
                 }
@@ -298,6 +314,8 @@ internal fun DrawScope.drawQr() {
 // on every return to the Home tab.
 internal object Openings {
     var count by mutableIntStateOf(0)
+    // False while the launch screen's arrow flies off: a popup's window would cut it short.
+    var launched by mutableStateOf(true)
 }
 
 private object WhereToHint {

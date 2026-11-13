@@ -14,6 +14,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
@@ -88,6 +89,7 @@ fun PipOverlay(model: KavModel) {
 @Composable
 private fun TripBar(n: TripNotice) {
     val tracker = remember(n.glyph, n.tint) { trackerIcon(n.glyph, n.tint).asImageBitmap() }
+    val bg = K.bg
     Canvas(Modifier.fillMaxWidth().height(20.dp)) {
         val rtl = layoutDirection == LayoutDirection.Rtl
         fun at(x: Float) = if (rtl) size.width - x else x
@@ -104,6 +106,18 @@ private fun TripBar(n: TripNotice) {
                 size = Size(kotlin.math.abs(b - a).coerceAtLeast(bar), bar), cornerRadius = CornerRadius(bar / 2),
             )
             x += w
+        }
+        // The rides' stops, as the map draws them: a ring in the line's colour, grey once passed. One too close to the
+        // last ring drawn is left out, so stops close together (a loop's) don't run into a smudge; the last always shows.
+        var lastRing = Float.NEGATIVE_INFINITY
+        n.stops.forEachIndexed { i, (place, colour) ->
+            val x = place / total * size.width
+            val last = i == n.stops.lastIndex
+            if (x - lastRing < bar * 2.4f && !last) return@forEachIndexed
+            lastRing = x
+            val c = Offset(at(x), y)
+            drawCircle(bg, bar * 0.95f, c)
+            drawCircle(Color(colour), bar * 0.6f, c, style = Stroke(1.5.dp.toPx()))
         }
         val t = size.height
         val cx = at((n.progress / total * size.width).coerceAtMost(size.width - t / 2).coerceAtLeast(t / 2))

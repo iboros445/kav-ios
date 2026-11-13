@@ -30,7 +30,7 @@ object Updates {
         runCatching { ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName }.getOrNull() ?: "0"
 
     fun latest(): Release {
-        val c = (URL("https://api.github.com/repos/$OWNER/$REPO/releases/latest").openConnection() as HttpURLConnection).apply {
+        val c = (RiderProxy.open(URL("https://api.github.com/repos/$OWNER/$REPO/releases/latest")) as HttpURLConnection).apply {
             connectTimeout = 10_000; readTimeout = 15_000
             setRequestProperty("Accept", "application/vnd.github+json")
             setRequestProperty("X-GitHub-Api-Version", "2022-11-28")
@@ -55,8 +55,8 @@ object Updates {
         )
     }
 
-    // The newest release the background check (Checks) found, kept on the phone so Kav can tell of it as it opens without
-    // asking GitHub then. GitHub is asked at most once a day.
+    // The newest release GitHub named, kept on the phone for the background check's download (Checks) and for an opening
+    // with no connection. The background check asks GitHub at most once a day.
     private const val DAY_MS = 24 * 3600_000L
 
     private fun storeFile(ctx: Context) = File(ctx.filesDir, "release.json")
@@ -103,7 +103,7 @@ object Updates {
         }
         dir(ctx).listFiles()?.forEach { if (it != file) it.delete() }
         val part = File(file.path + ".part")
-        var c = URL(url).openConnection() as HttpURLConnection
+        var c = RiderProxy.open(URL(url)) as HttpURLConnection
         c.instanceFollowRedirects = true
         c.connectTimeout = 15_000; c.readTimeout = 30_000
         c.setRequestProperty("User-Agent", "Kav")
@@ -111,7 +111,7 @@ object Updates {
         while (c.responseCode in 300..399 && hops < 5) {
             val next = c.getHeaderField("Location") ?: break
             c.disconnect()
-            c = URL(URL(url), next).openConnection() as HttpURLConnection
+            c = RiderProxy.open(URL(URL(url), next)) as HttpURLConnection
             c.connectTimeout = 15_000; c.readTimeout = 30_000
             c.setRequestProperty("User-Agent", "Kav")
             hops++

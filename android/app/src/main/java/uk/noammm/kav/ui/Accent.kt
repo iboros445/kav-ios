@@ -12,6 +12,8 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
+import uk.noammm.kav.Tab
+import uk.noammm.kav.TabGlyph
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -22,6 +24,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -69,9 +73,10 @@ fun AccentPicker(modifier: Modifier = Modifier, onChange: (Color) -> Unit) {
         if (glide) { glide = false; dot.animateTo(target, tween(360, easing = FastOutSlowInEasing)) } else dot.snapTo(target)
     }
 
-    fun pick(x: Float, width: Int) {
+    // A tap recolours the app with the theme's fade and the dot glides there, as a preset does; a drag follows at once.
+    fun pick(x: Float, width: Int, tap: Boolean = false) {
         val chosen = Color.hsv((x / width.coerceAtLeast(1)).coerceIn(0f, 1f) * 359.9f, strength, 1f)
-        K.accent = chosen
+        if (tap) { glide = true; K.restyle { K.accent = chosen } } else K.accent = chosen
         onChange(chosen)
     }
     Column(modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
@@ -79,7 +84,7 @@ fun AccentPicker(modifier: Modifier = Modifier, onChange: (Color) -> Unit) {
         Canvas(
             Modifier.fillMaxWidth().height(36.dp)
                 .semantics { contentDescription = T("Colour", "צבע") }
-                .pointerInput(strength) { detectTapGestures { pick(it.x, size.width) } }
+                .pointerInput(strength) { detectTapGestures { pick(it.x, size.width, tap = true) } }
                 .pointerInput(strength) {
                     detectHorizontalDragGestures(onDragStart = { pick(it.x, size.width) }) { change, _ ->
                         change.consume(); pick(change.position.x, size.width)
@@ -109,7 +114,7 @@ fun AccentPicker(modifier: Modifier = Modifier, onChange: (Color) -> Unit) {
                         .semantics { contentDescription = p.label }
                         .clickable(role = Role.Button) {
                             if (kotlin.math.abs(p.hue / 360f - target) > .001f) glide = true
-                            K.accent = p.color; onChange(p.color)
+                            K.restyle { K.accent = p.color }; onChange(p.color)
                         },
                 )
             }
@@ -119,52 +124,110 @@ fun AccentPicker(modifier: Modifier = Modifier, onChange: (Color) -> Unit) {
 
 @Composable
 fun AccentPreview(modifier: Modifier = Modifier) {
-    Column(
-        modifier.fillMaxWidth().clip(RoundedCornerShape(K.rCard)).background(K.bg)
-            .border(0.5.dp, K.separator, RoundedCornerShape(K.rCard)).padding(K.gap3),
-        verticalArrangement = Arrangement.spacedBy(K.gap2),
-    ) {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(K.gap2)) {
-            Row(
-                Modifier.weight(1f).height(32.dp).clip(K.capsule).background(K.fill).padding(horizontal = K.gap3),
-                verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(K.gap2),
+    // The page under the floating parts is what their glass is made of: map under the search and the trip card, so
+    // liquid glass shows the streets through both and solid hides them, as on Home. It's drawn once; the glass draws
+    // again only with it. The map fills the card: ending under the floating parts, it left the rest a darker band.
+    val liquid = rememberLiquidBackdrop()
+    val density = LocalDensity.current
+    var floating by remember { mutableStateOf(150.dp) }
+    Box(modifier.fillMaxWidth().clip(RoundedCornerShape(K.rCard)).background(K.bg).border(0.5.dp, K.separator, RoundedCornerShape(K.rCard))) {
+        Box(Modifier.fillMaxWidth().glassBackdrop(liquid)) {
+            PreviewMap(Modifier.matchParentSize())
+            Column(
+                Modifier.fillMaxWidth().padding(start = K.gap3, top = floating, end = K.gap3, bottom = K.gap3),
+                verticalArrangement = Arrangement.spacedBy(K.gap2),
             ) {
-                Icon(Icons.Rounded.Search, contentDescription = null, tint = K.textTertiary, modifier = Modifier.size(14.dp))
-                Text(T("Where to?", "לאן?"), fontSize = 12.sp, color = K.textTertiary)
-            }
-            Box(Modifier.size(32.dp).clip(K.capsule).background(K.fill), contentAlignment = Alignment.Center) {
-                Icon(Icons.Rounded.Settings, contentDescription = null, tint = K.textSecondary, modifier = Modifier.size(16.dp))
-            }
-        }
-        Column(Modifier.fillMaxWidth().panel(K.rTile).padding(K.gap3), verticalArrangement = Arrangement.spacedBy(K.gap2)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(T("Current trip", "הנסיעה הנוכחית"), fontSize = 12.sp, color = K.textSecondary, modifier = Modifier.weight(1f))
-                Text(T("Resume", "המשך"), fontSize = 12.sp, color = K.accentInk, fontWeight = FontWeight.Medium)
-            }
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(K.gap2)) {
-                LinePlateBadge("69", Mode.BUS, operatorPlate(Operators.ofGtfs(5)))
-                Text(T("to Tel Aviv", "לתל אביב"), fontSize = 12.sp, color = K.text, modifier = Modifier.weight(1f))
-                LiveGlyph(K.realtime, 10.dp)
-                Text(T("3 min", "3 דק׳"), fontSize = 12.sp, color = K.realtime, fontWeight = FontWeight.Medium)
-            }
-        }
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(K.gap2)) {
-            Text(
-                T("Bus", "אוטובוס"), fontSize = 12.sp, color = K.onAccent, fontWeight = FontWeight.Medium,
-                modifier = Modifier.clip(K.capsule).background(K.accent).padding(horizontal = 10.dp, vertical = 4.dp),
-            )
-            Text(
-                T("Train", "רכבת"), fontSize = 12.sp, color = K.textSecondary,
-                modifier = Modifier.clip(K.capsule).background(K.fill).padding(horizontal = 10.dp, vertical = 4.dp),
-            )
-            Spacer(Modifier.weight(1f))
-            Box(Modifier.size(30.dp, 18.dp).clip(K.capsule).background(K.accent)) {
-                Box(Modifier.align(Alignment.CenterEnd).padding(2.dp).size(14.dp).clip(K.capsule).background(Color.White))
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(K.gap2)) {
+                    Text(
+                        T("Bus", "אוטובוס"), fontSize = 12.sp, color = K.onAccent, fontWeight = FontWeight.Medium,
+                        modifier = Modifier.clip(K.capsule).background(K.accent).padding(horizontal = 10.dp, vertical = 4.dp),
+                    )
+                    Text(
+                        T("Train", "רכבת"), fontSize = 12.sp, color = K.textSecondary,
+                        modifier = Modifier.clip(K.capsule).background(K.fill).padding(horizontal = 10.dp, vertical = 4.dp),
+                    )
+                    Spacer(Modifier.weight(1f))
+                    Box(Modifier.size(30.dp, 18.dp).clip(K.capsule).background(K.accent)) {
+                        Box(Modifier.align(Alignment.CenterEnd).padding(2.dp).size(14.dp).clip(K.capsule).background(Color.White))
+                    }
+                }
+                Box(
+                    Modifier.fillMaxWidth().height(34.dp).clip(K.capsule).background(K.accent),
+                    contentAlignment = Alignment.Center,
+                ) { Text(T("Start", "התחלה"), fontSize = 12.sp, color = K.onAccent, fontWeight = FontWeight.Medium) }
             }
         }
-        Box(
-            Modifier.fillMaxWidth().height(34.dp).clip(K.capsule).background(K.accent),
-            contentAlignment = Alignment.Center,
-        ) { Text(T("Start", "התחלה"), fontSize = 12.sp, color = K.onAccent, fontWeight = FontWeight.Medium) }
+        // The floating search and settings over the map, and the trip card under them, as on Home.
+        CompositionLocalProvider(LocalLiquidBackdrop provides liquid) {
+            Column(
+                Modifier.fillMaxWidth().padding(K.gap3).onSizeChanged { floating = with(density) { it.height.toDp() } + K.gap3 * 2 },
+                verticalArrangement = Arrangement.spacedBy(K.gap2),
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(K.gap2)) {
+                    Row(
+                        Modifier.weight(1f).height(32.dp).glassSurface(16.dp).padding(horizontal = K.gap3),
+                        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(K.gap2),
+                    ) {
+                        Icon(Icons.Rounded.Search, contentDescription = null, tint = K.textSecondary, modifier = Modifier.size(14.dp))
+                        Text(T("Where to?", "לאן?"), fontSize = 12.sp, color = K.textSecondary)
+                    }
+                    Box(Modifier.size(32.dp).glassSurface(16.dp), contentAlignment = Alignment.Center) {
+                        Icon(Icons.Rounded.Settings, contentDescription = null, tint = K.text, modifier = Modifier.size(16.dp))
+                    }
+                }
+                Column(Modifier.fillMaxWidth().glassSurface(K.rTile).padding(K.gap3), verticalArrangement = Arrangement.spacedBy(K.gap2)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(T("Current trip", "הנסיעה הנוכחית"), fontSize = 12.sp, color = K.textSecondary, modifier = Modifier.weight(1f))
+                        Text(T("Resume", "המשך"), fontSize = 12.sp, color = K.accentInk, fontWeight = FontWeight.Medium)
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(K.gap2)) {
+                        LinePlateBadge("69", Mode.BUS, operatorPlate(Operators.ofGtfs(5)))
+                        Text(T("to Tel Aviv", "לתל אביב"), fontSize = 12.sp, color = K.text, modifier = Modifier.weight(1f))
+                        LiveGlyph(K.realtime, 10.dp)
+                        Text(T("3 min", "3 דק׳"), fontSize = 12.sp, color = K.realtime, fontWeight = FontWeight.Medium)
+                    }
+                }
+                // The tab bar, the glass seen most: Home on the accent, as TabBar shows the chosen tab.
+                Row(
+                    Modifier.fillMaxWidth().height(44.dp).glassSurface(22.dp).padding(3.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Tab.entries.forEachIndexed { i, t ->
+                        val ink = if (i == 0) K.onAccent else K.textSecondary
+                        Column(
+                            Modifier.weight(1f).fillMaxHeight().clip(K.capsule).then(if (i == 0) Modifier.background(K.accent) else Modifier),
+                            horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center,
+                        ) {
+                            TabGlyph(t, ink, 14.dp)
+                            Text(t.label, fontSize = 9.sp, color = ink, maxLines = 1)
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// A few streets and two lines on the page's colour, the kind of map the search floats over on Home.
+@Composable
+private fun PreviewMap(modifier: Modifier) {
+    val street = K.fillStrong
+    val line = K.accent
+    val other = K.realtime
+    Canvas(modifier.background(K.surface1)) {
+        val w = size.width; val h = size.height
+        fun road(x0: Float, y0: Float, x1: Float, y1: Float, width: Float) =
+            drawLine(street, Offset(w * x0, h * y0), Offset(w * x1, h * y1), width, androidx.compose.ui.graphics.StrokeCap.Round)
+        val thin = 3.dp.toPx(); val wide = 6.dp.toPx()
+        road(-.05f, .3f, 1.05f, .45f, wide); road(.1f, -.1f, .35f, 1.1f, thin); road(.6f, -.1f, .7f, 1.1f, wide)
+        road(-.05f, .85f, 1.05f, .7f, thin); road(.85f, -.1f, .95f, 1.1f, thin)
+        val route = androidx.compose.ui.graphics.Path().apply {
+            moveTo(-.02f * w, .75f * h); cubicTo(.25f * w, .9f * h, .35f * w, .2f * h, .62f * w, .38f * h); lineTo(1.02f * w, .2f * h)
+        }
+        drawPath(route, line, style = Stroke(4.dp.toPx(), cap = androidx.compose.ui.graphics.StrokeCap.Round))
+        drawLine(other, Offset(w * .2f, h * 1.05f), Offset(w * .78f, h * -.05f), 3.dp.toPx(), androidx.compose.ui.graphics.StrokeCap.Round)
+        listOf(.62f to .38f, .3f to .55f, .82f to .27f).forEach { (x, y) ->
+            drawCircle(K.bg, 5.dp.toPx(), Offset(w * x, h * y)); drawCircle(line, 3.dp.toPx(), Offset(w * x, h * y))
+        }
     }
 }

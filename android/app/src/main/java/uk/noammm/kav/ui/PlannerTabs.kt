@@ -2,21 +2,13 @@ package uk.noammm.kav.ui
 
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.spring
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.KeyboardArrowDown
-import androidx.compose.material.icons.rounded.KeyboardArrowUp
 import androidx.compose.material.icons.rounded.Tab
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
@@ -55,59 +47,45 @@ internal fun PlannerTabs(tabs: List<Source>, planner: Source, onPick: (Source) -
 }
 
 // Settings: every planner's routes, a tab each, in the order set here. Results open on the tab of the planner chosen
-// above. Each search then goes to every planner, which the text says.
+// above. Each search then goes to every planner with a tab, which the text says; a planner taken off the tabs isn't asked.
 @Composable
 internal fun EveryPlannerChoice() {
     val ctx = LocalContext.current
     InfoHeader(
         T("Routes from every planner", "מסלולים מכל המתכננים"),
         T(
-            "Results get a tab for each planner under Earlier and Later, and open on the planner chosen above. Each search then goes to every planner: each gets the trip's two points and time, and your IP address.",
-            "בתוצאות יש לשונית לכל מתכנן מתחת למוקדם יותר ומאוחר יותר, והן נפתחות על המתכנן שנבחר למעלה. כל חיפוש נשלח אז לכל המתכננים: כל אחד מקבל את שתי הנקודות והשעה של המסלול, ואת כתובת ה-IP שלכם.",
+            "Results get a tab for each planner under Earlier and Later, and open on the planner chosen above. Each search then goes to every online planner with a tab: each gets the trip's two points and time, and your IP address. On your phone plans locally. Hide a planner's tab and it isn't asked.",
+            "בתוצאות יש לשונית לכל מתכנן מתחת למוקדם יותר ומאוחר יותר, והן נפתחות על המתכנן שנבחר למעלה. כל חיפוש נשלח אז לכל המתכננים המקוונים שיש להם לשונית: כל אחד מקבל את שתי הנקודות והשעה של המסלול, ואת כתובת ה-IP שלכם. התכנון בטלפון מתבצע מקומית. מסתירים לשונית של מתכנן, והוא לא נשאל.",
         ),
     )
-    // A planner moved up or down the tabs: swapped with its neighbour among those shown.
-    fun move(s: Source, by: Int) {
-        val shown = KavPlan.tabs()
-        val other = shown.getOrNull(shown.indexOf(s) + by) ?: return
-        val order = KavPlan.tabOrder.toMutableList()
-        val a = order.indexOf(s)
-        val b = order.indexOf(other)
-        order[a] = other
-        order[b] = s
+    // The tabs in a new order: the planners offered take their new places among the slots they had, so one not offered
+    // now (your own server, until one is set up) keeps its place.
+    fun reorder(offered: List<Source>) {
+        val next = offered.iterator()
+        val order = KavPlan.tabOrder.map { if (it in offered && next.hasNext()) next.next() else it }
         KavPlan.tabOrder = order
         Prefs.setPlannerTabs(ctx, order)
     }
-    ListGroup(Modifier.animateContentSize(spring(dampingRatio = 1f, stiffness = 500f))) {
-        row {
-            ToggleRow(
-                T("A tab for each planner", "לשונית לכל מתכנן"), KavPlan.everyPlanner,
-                { Icon(Icons.Rounded.Tab, null, tint = if (KavPlan.everyPlanner) K.text else K.dim, modifier = Modifier.size(22.dp)) },
-            ) { on -> KavPlan.everyPlanner = on; Prefs.setEveryPlanner(ctx, on) }
-        }
+    // Laid out as the share page's apps (SwitchOrderRows): a switch shows or hides a planner's tab, and its handle drags it
+    // to another place. The chosen planner's tab can't be hidden, so its switch stays on, dimmed.
+    Column(Modifier.fillMaxWidth().panel(K.rCard).animateContentSize(spring(dampingRatio = 1f, stiffness = 500f))) {
+        ToggleRow(
+            T("A tab for each planner", "לשונית לכל מתכנן"), KavPlan.everyPlanner,
+            { Icon(Icons.Rounded.Tab, null, tint = toggleInk(KavPlan.everyPlanner), modifier = Modifier.size(22.dp)) },
+        ) { on -> KavPlan.everyPlanner = on; Prefs.setEveryPlanner(ctx, on) }
         if (KavPlan.everyPlanner) {
             val shown = KavPlan.tabs()
-            // Each place keeps its row; a planner moved fades into its new place as the one it swapped with fades out.
-            shown.forEachIndexed { i, s ->
-                row {
-                    Row(
-                        Modifier.fillMaxWidth().heightIn(min = 48.dp).padding(start = K.gap4, end = K.gap1),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(K.gap3),
-                    ) {
-                        Text("${i + 1}", style = K.type.subhead.tabular, color = K.textTertiary)
-                        ChangingText(sourceName(s), Modifier.weight(1f)) { Text(it, style = K.type.body, maxLines = 1) }
-                        IconButton({ move(s, -1) }, enabled = i > 0) {
-                            Icon(Icons.Rounded.KeyboardArrowUp, T("Move ${sourceName(s)} up", "הזזת ${sourceName(s)} למעלה"),
-                                tint = if (i > 0) K.text else K.dim)
-                        }
-                        IconButton({ move(s, 1) }, enabled = i < shown.lastIndex) {
-                            Icon(Icons.Rounded.KeyboardArrowDown, T("Move ${sourceName(s)} down", "הזזת ${sourceName(s)} למטה"),
-                                tint = if (i < shown.lastIndex) K.text else K.dim)
-                        }
-                    }
-                }
-            }
+            SwitchOrderRows(
+                KavPlan.offeredTabs(), { it.name }, ::sourceName,
+                on = { it in shown },
+                onToggle = { s ->
+                    val hidden = if (s in shown) KavPlan.hiddenTabs + s else KavPlan.hiddenTabs - s
+                    KavPlan.hiddenTabs = hidden
+                    Prefs.setHiddenTabs(ctx, hidden)
+                },
+                onOrder = ::reorder,
+                enabled = { it != KavPlan.source },
+            )
         }
     }
 }

@@ -100,8 +100,10 @@ fun rememberLivePulse(): State<Float> {
     )
 }
 
+// bottom: pages held to the bottom (navigation's cards over the map). A taller one draws above the height between two
+// pages, over the map, instead of losing its top mid-swipe.
 fun Modifier.pageSized(pager: PagerState, heights: Map<Int, Int>, ceiling: Int, bottom: Boolean): Modifier =
-    clipToBounds().layout { measurable, constraints ->
+    (if (bottom) this else clipToBounds()).layout { measurable, constraints ->
         val page = measurable.measure(constraints.copy(minHeight = 0, maxHeight = ceiling))
         val from = pager.currentPage
         val slide = pager.currentPageOffsetFraction
@@ -168,3 +170,12 @@ fun Modifier.glide(enabled: Boolean = true): Modifier = composed {
 // so the screen under it never shows through a fade.
 fun modalIn(): EnterTransition = slideInVertically(spring(dampingRatio = 1f, stiffness = 400f)) { it }
 fun modalOut(): ExitTransition = slideOutVertically(spring(dampingRatio = 1f, stiffness = 400f)) { it }
+
+// A list's card or row as it comes, goes or moves, the same in every list: it fades in and out and glides to its place.
+// quick: a row of a list that changes as it's typed into or picked from, which fades in as the one it replaces fades out,
+// with no pause that would leave a hole in the card.
+fun androidx.compose.foundation.lazy.LazyItemScope.listMotion(quick: Boolean = false): Modifier = Modifier.animateItem(
+    fadeInSpec = if (quick) tween(120) else tween(220, delayMillis = 60),
+    fadeOutSpec = tween(if (quick) 120 else 150),
+    placementSpec = spring(dampingRatio = 1f, stiffness = 500f, visibilityThreshold = IntOffset.VisibilityThreshold),
+)

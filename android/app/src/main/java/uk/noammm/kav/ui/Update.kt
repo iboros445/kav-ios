@@ -31,6 +31,7 @@ import androidx.compose.ui.window.Dialog
 import kotlinx.coroutines.launch
 import uk.noammm.kav.BuildConfig
 import uk.noammm.kav.KavModel
+import uk.noammm.kav.Prefs
 import uk.noammm.kav.R
 import uk.noammm.kav.data.AutoUpdate
 import uk.noammm.kav.data.StartNotice
@@ -40,9 +41,11 @@ import androidx.compose.runtime.LaunchedEffect
 @Composable
 fun UpdatePrompt(model: KavModel) {
     val release = model.update ?: return
-    if (model.updateDismissed || !Shown.updatePrompts) return
     val ctx = LocalContext.current
-    ReleasePrompt("Kav", "${Updates.installedVersion(ctx)} → ${release.version}", release, { model.updateDismissed = true }, { UpdateProgress(model) }) {
+    if (model.updateDismissed || !(Shown.updatePrompts || Prefs.autoUpdate(ctx))) return
+    ReleasePrompt("Kav", "${Updates.installedVersion(ctx)} → ${release.version}", release, { model.updateDismissed = true }, {
+        AnimatedVisibility(model.updateProgress != null || model.updateError != null, enter = opening, exit = closing) { UpdateProgress(model) }
+    }) {
         UpdateButton(model, Modifier.weight(1f)) { model.startUpdate(ctx) }
     }
 }
@@ -64,8 +67,14 @@ internal fun ReadyPrompt(notice: AutoUpdate.Notice, onLater: () -> Unit) {
         T("Kav ${notice.to} is ready 🎉", "Kav ${notice.to} מוכנה 🎉"), "${notice.from} → ${notice.to}", notice.release(),
         { if (!busy) { UpdateRun.failed = false; onLater() } },
         {
-            if (UpdateRun.failed) Text(T("It didn't install.", "ההתקנה לא הושלמה."), fontSize = 12.sp, color = K.critical)
-            else if (busy) Text(T("Installing: Kav closes when it's done.", "מתקינים: Kav תיסגר כשזה יסתיים."), fontSize = 12.sp, color = K.dim)
+            // What the install is doing opens under the notes, kept while it closes, and changes in place.
+            val failed = T("It didn't install.", "ההתקנה לא הושלמה.")
+            val now = if (UpdateRun.failed) failed else if (busy) T("Installing: Kav closes when it's done.", "מתקינים: Kav תיסגר כשזה יסתיים.") else null
+            var said by remember { mutableStateOf(now) }
+            if (now != null) said = now
+            AnimatedVisibility(now != null, enter = opening, exit = closing) {
+                LiveText(said.orEmpty(), style = androidx.compose.material3.LocalTextStyle.current.copy(fontSize = 12.sp), color = if (said == failed) K.critical else K.dim)
+            }
         },
     ) {
         KavButton(T("Install now", "להתקין עכשיו"), {
@@ -137,19 +146,35 @@ private fun ReleaseNotes(release: Updates.Release, maxHeight: androidx.compose.u
 
 @Composable
 private fun UpdateProgress(model: KavModel) {
-    model.updateProgress?.let { p ->
+    // The bar and the error are kept while they close, and one fades into the other in place.
+    var progress by remember { mutableStateOf(model.updateProgress) }
+    model.updateProgress?.let { progress = it }
+    var error by remember { mutableStateOf(model.updateError) }
+    model.updateError?.let { error = it }
+    AnimatedContent(
+        model.updateError != null && model.updateProgress == null,
+        transitionSpec = {
+            (fadeIn(tween(200, delayMillis = 60)) togetherWith fadeOut(tween(120)))
+                .using(SizeTransform(clip = false) { _, _ -> spring(dampingRatio = 1f, stiffness = 500f) })
+        },
+        label = "updateProgress",
+    ) { failed ->
+    if (failed) Text(T("Could not update: $error", "העדכון נכשל: $error"), fontSize = 12.sp, color = K.critical, lineHeight = 17.sp)
+    else progress?.let { p ->
         Column(verticalArrangement = Arrangement.spacedBy(K.gap1)) {
+            // The bar fills smoothly between ticks, and its words and percentage roll.
+            val fill by androidx.compose.animation.core.animateFloatAsState(p.coerceIn(0.02f, 1f), tween(300), label = "update")
             Box(Modifier.fillMaxWidth().height(6.dp).clip(K.capsule).background(K.surface4)) {
-                Box(Modifier.fillMaxWidth(p.coerceIn(0.02f, 1f)).fillMaxHeight().background(K.accent))
+                Box(Modifier.fillMaxWidth(fill).fillMaxHeight().background(K.accent))
             }
-            Text(
+            LiveText(
                 if (p >= 1f) T("Opening the installer…", "פותחים את ההתקנה…")
                 else T("Downloading… ${(p * 100).toInt()}%", "מורידים… ${(p * 100).toInt()}%"),
-                fontSize = 12.sp, color = K.dim,
+                style = androidx.compose.material3.LocalTextStyle.current.copy(fontSize = 12.sp), color = K.dim,
             )
         }
     }
-    model.updateError?.let { Text(T("Could not update: $it", "העדכון נכשל: $it"), fontSize = 12.sp, color = K.critical, lineHeight = 17.sp) }
+    }
 }
 
 @Composable
@@ -189,15 +214,26 @@ fun UpdateSection(model: KavModel) {
                     },
                 ) { Text(it, style = K.type.subhead, color = if (it == available) K.accentInk else K.textSecondary) }
             }
-            if (release != null) UpdateButton(model) { model.startUpdate(ctx) }
-            else KavButton(if (checking) T("Checking…", "בודקים…") else T("Check for updates", "בדקו עדכונים"), {
-                if (checking) return@KavButton
-                scope.launch {
-                    checking = true
-                    model.checkForUpdate(ctx)
-                    checking = false
-                }
-            }, style = ButtonStyle.Secondary, busy = checking)
+            // One button that turns from Check for updates into Update when a version is found: its words fade and its
+            // colours ease, rather than one button taking the other's place.
+            val updating = model.updateProgress != null
+            KavButton(
+                when {
+                    release != null -> if (updating) T("Updating…", "מעדכנים…") else T("Update", "עדכון")
+                    checking -> T("Checking…", "בודקים…")
+                    else -> T("Check for updates", "בדקו עדכונים")
+                },
+                {
+                    if (release != null) model.startUpdate(ctx)
+                    else if (!checking) scope.launch {
+                        checking = true
+                        model.checkForUpdate(ctx)
+                        checking = false
+                    }
+                },
+                style = if (release != null) ButtonStyle.Primary else ButtonStyle.Secondary,
+                busy = if (release != null) updating else checking,
+            )
         }
         // The notes, once fetched, and the download open under the row as InfoHeader's text does.
         val notes = release ?: installedNotes

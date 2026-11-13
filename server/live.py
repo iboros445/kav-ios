@@ -10,11 +10,14 @@ ministry's timetable (GTFS), read once a day. Requests are not logged.
 It also plans trips: OpenTripPlanner, next to it on the server, routes on the
 same timetable and OpenStreetMap, and this picks the few routes worth showing.
 
+It serves Israel's line alerts too, from a GTFS-Realtime feed (alerts.py), for the phone to match its lines in.
+
 Only Kav is answered: it signs each request with the key it's built with (KAV_APP_KEY here).
 
 Settings come from the environment: MOT_KEY, MOT_URL, MOT_URL_BACKUP (the ministry's test
 server, used when the main one fails), MOT_CA (the intermediate certificate the ministry leaves
-out of its chain), KAV_APP_KEY, GTFS_URL, OTP_URL (the planner), PLANNER (off for none) and PORT.
+out of its chain), KAV_APP_KEY, GTFS_URL, OTP_URL (the planner), PLANNER (off for none), PLAN_URL (a planner of your
+own, asked instead: see plan_elsewhere()), PORT, and alerts.py's ALERTS_SOURCE and the rest.
 """
 import array
 from contextlib import closing
@@ -26,7 +29,9 @@ import functools
 import gzip
 import hashlib
 import hmac
+import html
 import io
+import ipaddress
 import itertools
 import json
 import math
@@ -46,14 +51,35 @@ import zoneinfo
 from concurrent.futures import Future, ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+import alerts
+
 KEY = os.environ.get("MOT_KEY", "")
-URL = os.environ.get("MOT_URL", "")
-BACKUP = os.environ.get("MOT_URL_BACKUP", "")
+# The live source: the ministry's SIRI service (MOT_URL, with MOT_KEY), or any other that answers SIRI StopMonitoring as
+# it does (LIVE_URL, its key optional: server/LIVE.md). Without either, nothing is asked (a planner-only copy).
+LIVE_URL = os.environ.get("LIVE_URL", "")
+URL = LIVE_URL or (os.environ.get("MOT_URL", "") if KEY else "")
+BACKUP = "" if LIVE_URL else os.environ.get("MOT_URL_BACKUP", "") if KEY else ""
+# Where vehicles and trips may be: south, west, north, east. Israel's by default; a dataset elsewhere sets its own.
+AREA_BOUNDS = tuple(float(x) for x in os.environ.get("BOUNDS", "29,34,34,36").split(","))
+
+
+def inside(lat, lon):
+    south, west, north, east = AREA_BOUNDS
+    return south < lat < north and west < lon < east
 PORT = int(os.environ.get("PORT", "8080"))
 APP_KEY = os.environ.get("KAV_APP_KEY", "").encode()
+# Who may use this server (server/selfhost): "key", Kav's own, phones signing with the key the app is built with;
+# "accounts", each phone signed in by a person (accounts.py); "open", anyone.
+ACCESS = os.environ.get("ACCESS", "key").lower()
+ACCOUNTS = os.environ.get("ACCOUNTS", os.path.join(os.environ.get("HISTORY") or ".", "accounts.sqlite3"))
+OPEN_PER_MINUTE = 120  # requests an address may make a minute, on an open server
 GTFS_URL = os.environ.get("GTFS_URL", "https://gtfs.mot.gov.il/gtfsfiles/israel-public-transportation.zip")
 HISTORY = os.environ.get("HISTORY", "")  # where the stop passings are kept; none kept without it
 REALTIME = os.environ.get("REALTIME", "")  # the folder shared with the planner, for its live updates
+# A predictor of one's own anywhere, answering the predictions file at an address (server/PREDICTOR.md), asked every
+# PREDICT_EVERY seconds instead of reading ETA.
+PREDICT_URL = os.environ.get("PREDICT_URL", "")
+PREDICT_EVERY = 15
 ETA = os.environ.get("ETA", "")  # Kav's own predicted arrivals (eta/eta.py), which beat the ministry's own
 SHARED_TRIPS = os.environ.get("SHARED_TRIPS", os.path.join(HISTORY or ".", "shared-trips.sqlite3"))
 KEEP_DAYS = 70
@@ -71,9 +97,12 @@ MAX_AREA = 0.4  # degrees a side, a city or so
 OLD_POSITION = 600  # a position older than this isn't where the bus is
 AHEAD = 120  # seconds a report may be stamped after now; some buses' clocks run hours fast
 MAX_WORKING = 128  # requests worked on at once; far more than Kav's users make, so only a flood meets it
-# PLANNER=off (server/selfhost): no planner here, so no routes from this server.
+# PLANNER=off (server/selfhost): no planner here, so no routes from this server. PLANNER=own is a planner of one's own,
+# at OTP_URL or PLAN_URL, the build making none.
 NO_PLANNER = os.environ.get("PLANNER", "on").lower() in ("off", "0", "no", "false")
-OTP_URL = "" if NO_PLANNER else os.environ.get("OTP_URL", "http://kav-otp:8080/otp/gtfs/v1")
+# A planner of one's own, which plans every trip instead of OpenTripPlanner (plan_elsewhere()).
+PLAN_URL = "" if NO_PLANNER else os.environ.get("PLAN_URL", "")
+OTP_URL = "" if NO_PLANNER or PLAN_URL else os.environ.get("OTP_URL", "http://kav-otp:8080/otp/gtfs/v1")
 MAX_PLANNING = 4  # trips planned at once; each takes OpenTripPlanner a second or two
 MORE_WAIT = 5  # seconds a trip's other sections may take after its routes list
 
@@ -97,7 +126,8 @@ def reporting(at, now):
 
 
 def ask(url, query, timeout):
-    request = urllib.request.Request(f"{url}?Key={KEY}&{query}", headers={"User-Agent": "kav-live"})
+    keyed = f"Key={KEY}&" if KEY else ""
+    request = urllib.request.Request(f"{url}{'&' if '?' in url else '?'}{keyed}{query}", headers={"User-Agent": "kav-live"})
     with urllib.request.urlopen(request, context=TLS, timeout=timeout) as r:
         return json.loads(r.read())
 
@@ -131,7 +161,7 @@ def visits(doc):
                 if not where:
                     continue
                 lat, lon = float(where["Latitude"]), float(where["Longitude"])
-                if not (29 < lat < 34 and 34 < lon < 36):
+                if not inside(lat, lon):
                     continue
                 key = f'{j["LineRef"]}_{j["OriginAimedDepartureTime"]}_{j["VehicleRef"]}'
                 bearing = whole(j.get("Bearing"), 360)
@@ -162,6 +192,52 @@ class Snapshot:
         self.routes = {}
         for route, *row in rows:
             self.routes.setdefault(route, []).append(tuple(row))
+
+
+stop_codes = {}  # the ministry's stop ids to the codes on the signs, for a feed of alerts that names stops by id
+
+
+def route_name(route_id):
+    """The ministry's own name for a way of a line, by its route id: what the app finds a line's alerts by."""
+    try:
+        return catalog["lines"].get(int(route_id), [None] * 8)[7]
+    except ValueError:
+        return None
+
+
+def load_stop_codes():
+    with zipfile.ZipFile(Remote(GTFS_URL)) as z:
+        text = z.read("stops.txt").decode("utf-8-sig")
+    return {r["stop_id"]: int(r["stop_code"]) for r in csv.DictReader(io.StringIO(text)) if r.get("stop_code", "").isdigit()}
+
+
+def keep_stop_codes():
+    while True:
+        try:
+            found = load_stop_codes()
+            # In place: alerts.py holds this dict's get.
+            stop_codes.update(found)
+            for gone in set(stop_codes) - set(found):
+                del stop_codes[gone]
+            log("stop codes loaded:", len(found))
+            time.sleep(24 * 3600)
+        except Exception as e:
+            log("stop codes failing:", e)
+            time.sleep(300)
+
+
+def keep_names():
+    """The ministry's English names for the alerts' translator (alerts.names_from), from its timetable once a day."""
+    while True:
+        try:
+            with zipfile.ZipFile(Remote(GTFS_URL)) as z:
+                names = alerts.names_from(z.read("translations.txt").decode("utf-8-sig"))
+            alerts.current.translations.names = names
+            log("english names loaded:", len(names))
+            time.sleep(24 * 3600)
+        except Exception as e:
+            log("english names failing:", e)
+            time.sleep(300)
 
 
 class Remote(io.RawIOBase):
@@ -337,6 +413,16 @@ def stretch(path, stops, start=0):
     return [stops[start]] + path[at[start] + 1:at[-1]] + [stops[-1]]
 
 
+def own_road(route, geometry, stops, start=0):
+    """A ride's road: the planner's, or where it has none for the line (it joins the stops straight, across the streets),
+    the line's own from the timetable (catalog["shapes"]) between the stops, as Lines draws it. Points, not encoded."""
+    path = decode(geometry or "")
+    road_text = catalog["shapes"].get(int(route)) if str(route).isdigit() else None
+    if road_text and len(stops) - start >= 2 and len(path) <= len(stops) - start + 1:
+        return stretch(decode(road_text), stops, start)
+    return stretch(path, stops, start) if start else path
+
+
 def shapes_from(archive):
     """route id: the road its trips most often take, encoded. A shape's points come one after another in shapes.txt,
     so only one shape is held at a time."""
@@ -365,7 +451,23 @@ def shapes_from(archive):
 
 
 def load_shapes():
-    return shapes_from(zipfile.ZipFile(Remote(GTFS_URL, chunk=4 << 20)))
+    found = shapes_from(zipfile.ZipFile(Remote(GTFS_URL, chunk=4 << 20)))
+    # The feed has no road for any train: the planner's rebuild matches them to OpenStreetMap's tracks (otp/rail_shapes.py).
+    found.update({r: p for r, p in rail_shapes().items() if r not in found})
+    return found
+
+
+def rail_shapes():
+    """route id: its road, encoded, from REALTIME/rail-shapes.json; none without it."""
+    if not REALTIME:
+        return {}
+    try:
+        with open(os.path.join(REALTIME, "rail-shapes.json"), encoding="utf-8") as f:
+            doc = json.load(f)
+    except (OSError, ValueError):
+        return {}
+    roads = [encode(r) for r in doc["roads"]]
+    return {int(route): roads[i] for route, i in doc["routes"].items()}
 
 
 catalog = {"lines": {}, "numbers": {}, "shapes": {}}
@@ -1305,6 +1407,9 @@ def pb_field(number, value):
     return pb_varint(number << 3 | 2) + pb_varint(len(raw)) + raw
 
 
+PREDICTIONS_VERSION = 1
+
+
 class Predictions:
     """Kav's own predicted arrivals (eta/eta.py writes them every half minute) for the buses on their way: each
     journey's stops ahead by route and first departure, as [place on the trip, stop code, when]. They beat the
@@ -1312,18 +1417,52 @@ class Predictions:
 
     OLD = 120
 
-    def __init__(self, path):
-        self.path, self.read_at, self.runs, self.at = path, 0, {}, 0
+    def __init__(self, path, url=""):
+        self.path, self.url, self.read_at, self.runs, self.at, self.error = path, url, 0, {}, 0, None
+
+    def take(self, got):
+        """A predictions document, version 1 (server/PREDICTOR.md); a file without one is from before it was named."""
+        if not isinstance(got, dict):
+            raise ValueError("predictions document must be an object")
+        if got.get("version", 1) != PREDICTIONS_VERSION:
+            raise ValueError("predictions file version %r" % got.get("version"))
+        if not isinstance(got["at"], int) or not isinstance(got["runs"], dict):
+            raise ValueError("predictions need an integer at and a runs object")
+        self.runs, self.at, self.error = got["runs"], got["at"], got.get("error")
+
+    def fetch(self, ask=None):
+        """The predictions at PREDICT_URL, now; kept as they were when it doesn't answer, and old in time."""
+        try:
+            if ask is None:
+                req = urllib.request.Request(self.url, headers={"Accept": "application/json", "User-Agent": "Kav server"})
+                with urllib.request.urlopen(req, timeout=5) as r:
+                    got = json.load(r)
+            else:
+                got = ask(self.url)
+            self.take(got)
+        except (OSError, ValueError, KeyError, TypeError) as e:
+            self.error = repr(e)
+
+    def keep_fetching(self):
+        while True:
+            self.fetch()
+            time.sleep(PREDICT_EVERY)
+
+    def working(self, now):
+        """Whether the predictions are fresh and the predictor says nothing's wrong (the status the app shows)."""
+        return now - self.at <= self.OLD and not self.error
 
     def runs_now(self, now):
+        if self.url:
+            return self.runs if now - self.at <= self.OLD else {}
         if not self.path:
             return {}
         try:
             changed = os.path.getmtime(self.path)
             if changed != self.read_at:
                 with open(self.path) as f:
-                    got = json.load(f)
-                self.runs, self.at, self.read_at = got["runs"], got["at"], changed
+                    self.take(json.load(f))
+                self.read_at = changed
         except (OSError, ValueError, KeyError):
             return {}
         return self.runs if now - self.at <= self.OLD else {}
@@ -1338,7 +1477,7 @@ class Predictions:
         return min(times) if times else None
 
 
-predictions = Predictions(ETA)
+predictions = Predictions(ETA, PREDICT_URL)
 
 
 PREVIEW = 5400  # how far ahead a stop's arrivals go, as the ministry is asked for them (PT90M)
@@ -2710,7 +2849,7 @@ def arrivals(doc):
                 lat = lon = None
                 if where and reporting(recorded, now):
                     lat, lon = round(float(where["Latitude"]), 6), round(float(where["Longitude"]), 6)
-                    if not (29 < lat < 34 and 34 < lon < 36):
+                    if not inside(lat, lon):
                         lat = lon = None
                 bearing = whole(j.get("Bearing"), 360) if lat is not None else None
                 platform = str(call.get("ArrivalPlatformName") or call.get("DeparturePlatformName") or "").strip()
@@ -2821,7 +2960,7 @@ FOLLOW = re.compile(r"^/live/v1/follow/([0-9]{1,9}(?:,[0-9]{1,9}){0,%d})$" % (MA
 # From, to, when (epoch seconds, then d to leave then, n to leave now, a to arrive by or l for the last way there that
 # night), the route types allowed (all if none), and up to three places to go by on the way.
 PLAN = re.compile(r"^/live/v1/plan/(\d\d\.\d{1,6}),(\d\d\.\d{1,6}),(\d\d\.\d{1,6}),(\d\d\.\d{1,6})/(\d{10})([adnl])"
-                  r"(?:/([0-7](?:,[0-7]){0,7}))?(?:/via/(\d\d\.\d{1,6},\d\d\.\d{1,6}(?:;\d\d\.\d{1,6},\d\d\.\d{1,6}){0,2}))?$")
+                  r"(?:/([0-7](?:,[0-7]){0,7}))?(?:/via/(\d\d\.\d{1,6},\d\d\.\d{1,6}(?:,\d{1,3})?(?:;\d\d\.\d{1,6},\d\d\.\d{1,6}(?:,\d{1,3})?){0,2}))?$")
 MODES = {0: "TRAM", 1: "SUBWAY", 2: "RAIL", 3: "BUS", 4: "FERRY", 5: "CABLE_CAR", 6: "GONDOLA", 7: "FUNICULAR"}
 BIKES_ON = (0, 2)  # light rail and trains, which take a bike along
 # The answer's sections by the app's ids: the routes list, the timetable card, walking or cycling all the way, transit
@@ -2844,6 +2983,7 @@ NIGHT_LEAN, NIGHT_LEAN_FROM = 150, 21
 # platforms at any station.
 TRAIN_CHANGE = 180
 DIRECT_MOST = 3600  # walking or cycling all the way is offered for an hour at most
+BIKE_SOONER = 300  # how much sooner than every route listed a bike along on the train gets there, to be offered
 # The routes list: no walk longer than 1.5 km in one go, three routes at
 # least, the later ones arriving at most 1.7 times the quickest route's time after it. The third route is taken
 # from those costing no more than half as much again as the quickest, with no more changes, arriving
@@ -2868,11 +3008,11 @@ query($o: PlanLabeledLocationInput!, $d: PlanLabeledLocationInput!, $t: PlanDate
       start end generalizedCost systemNotices { tag }
       legs {
         mode start { scheduledTime estimated { time } } end { scheduledTime estimated { time } } distance headsign
-        legGeometry { points } steps { distance streetName bogusName }
+        legGeometry { points } steps { distance streetName bogusName relativeDirection lat lon }
         from { lat lon stop { gtfsId } }
         to { lat lon stop { gtfsId } }
         route { gtfsId shortName longName type agency { gtfsId name } }
-        serviceDate trip { gtfsId departureStoptime { scheduledDeparture } }
+        serviceDate trip { gtfsId wheelchairAccessible departureStoptime { scheduledDeparture } }
         stopCalls {
           stopLocation { ... on Stop { gtfsId code name lat lon platformCode } }
           schedule { time { ... on ArrivalDepartureTime { arrival departure } } }
@@ -3170,7 +3310,10 @@ def post_plan(url, variables, wait):
     body = json.dumps({"query": PLAN_QUERY, "variables": variables}).encode()
     req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=wait) as r:
-        return json.load(r)
+        doc = json.load(r)
+    if url == OTP_URL and (doc.get("data") or {}).get("planConnection") is not None:
+        planner_seen["at"] = time.time()
+    return doc
 
 
 # A trip by places on the way is planned a part at a time, each part the planner's own question: from where it starts
@@ -3179,6 +3322,9 @@ def post_plan(url, variables, wait):
 # fails. Each route to a place goes on with each route from it setting out after the rider arrives, and the routes kept
 # are those no other beats in every way, as the planner keeps its own (pareto()). The walk from a place sets out
 # FIRST_LEAN earlier, as a trip's first walk does (lean_first()), and the time at the place costs what waiting does.
+# A place the rider stays at (its third value, seconds) is left that much after getting there at the soonest: the stay
+# costs nothing. The first leg on from each place says which place it is ("via", counted from 1) and the stay asked for
+# there ("stay"), for the app to show the place in the trip.
 # Each part after the first is asked over the times the rider is at its place, and VIA_WINDOW more. A part where
 # walking beats every ride, whose rides the planner's filters drop, is walked: on from a place as soon as the rider is
 # there, to a place to be there just in time for the route on (joined()).
@@ -3192,13 +3338,19 @@ def through(variables, post):
     asked = {k: v for k, v in variables.items() if k != "via"}
     places = [asked["o"]] + [{"location": {"coordinate": {"latitude": p[0], "longitude": p[1]}}} for p in variables["via"]]
     parts = list(zip(places, places[1:] + [asked["d"]]))
+    stays = [p[2] if len(p) > 2 else 0 for p in variables["via"]]
     # Whether a route gets to a place in time for one from it: a walk moves to fit, leaving at a time only later.
-    before = lambda there, on: walk_only(on) or arrive and walk_only(there) or epoch(there["end"]) <= epoch(on["start"]) - FIRST_LEAN
+    before = lambda there, on, stay: (walk_only(on) or arrive and walk_only(there)
+                                      or epoch(there["end"]) + stay <= epoch(on["start"]) - FIRST_LEAN)
     routes = None
-    for o, d in parts[::-1] if arrive else parts:
+    for n, (o, d) in list(enumerate(parts))[::-1] if arrive else enumerate(parts):
         part = dict(asked, o=o, d=d)
         if routes is not None:
-            at = sorted(epoch(r["start"]) - FIRST_LEAN if arrive else epoch(r["end"]) + FIRST_LEAN for r in routes)
+            # The place this part meets the parts planned so far at: where it ends, planned from the last back, else
+            # where it starts.
+            place = n + 1 if arrive else n
+            stay = stays[place - 1]
+            at = sorted(epoch(r["start"]) - FIRST_LEAN - stay if arrive else epoch(r["end"]) + FIRST_LEAN + stay for r in routes)
             stamp = datetime.datetime.fromtimestamp(at[-1] if arrive else at[0], datetime.timezone.utc).isoformat()
             part.update(t={"latestArrival" if arrive else "earliestDeparture": stamp},
                         window="PT%dM" % -(-(at[-1] - at[0] + VIA_WINDOW) // 60))
@@ -3212,7 +3364,7 @@ def through(variables, post):
             routes = got
         else:
             first, then = (got, routes) if arrive else (routes, got)
-            routes = pareto([r for a in first for r in pareto([joined(a, b) for b in then if before(a, b)])])
+            routes = pareto([r for a in first for r in pareto([joined(a, b, stay, place) for b in then if before(a, b, stay)])])
         if not routes:
             break
     return {"data": {"planConnection": {"routingErrors": errors, "edges": [{"node": r} for r in routes]}}}
@@ -3235,18 +3387,23 @@ def walk_only(route):
     return all(l["mode"] in ("WALK", "BICYCLE", "CAR") for l in route["legs"])
 
 
-def joined(there, on):
-    """A route to a place and one on from it as one route (through()); a walked one moved to fit the other."""
+def joined(there, on, stay=0, place=None):
+    """A route to a place and one on from it as one route (through()); a walked one moved to fit the other. The first
+    leg on from the place carries which place it is (place, counted from 1) and stay, the seconds the rider asked to be
+    there."""
     if walk_only(on):
-        on = shifted(on, epoch(there["end"]) - epoch(on["start"]))
+        on = shifted(on, epoch(there["end"]) + stay - epoch(on["start"]))
     elif walk_only(there):
-        there = shifted(there, epoch(on["start"]) - FIRST_LEAN - epoch(there["end"]))
+        there = shifted(there, epoch(on["start"]) - FIRST_LEAN - stay - epoch(there["end"]))
     ride = next((i for i, l in enumerate(on["legs"]) if l["mode"] not in ("WALK", "BICYCLE", "CAR")), len(on["legs"]))
     lean = FIRST_LEAN if ride < len(on["legs"]) else 0
-    stay = epoch(on["start"]) - lean - epoch(there["end"])
-    return dict(on, start=there["start"], generalizedCost=there["generalizedCost"] + stay + on["generalizedCost"],
+    spent = epoch(on["start"]) - lean - epoch(there["end"])
+    legs = [moved(l, -lean) for l in on["legs"][:ride]] + on["legs"][ride:]
+    if place:
+        legs[0] = dict(legs[0], via=place, **({"stay": stay} if stay else {}))
+    return dict(on, start=there["start"], generalizedCost=there["generalizedCost"] + spent - stay + on["generalizedCost"],
                 systemNotices=(there.get("systemNotices") or []) + (on.get("systemNotices") or []),
-                legs=there["legs"] + [moved(l, -lean) for l in on["legs"][:ride]] + on["legs"][ride:])
+                legs=there["legs"] + legs)
 
 
 def shifted(route, by):
@@ -3433,6 +3590,8 @@ def itineraries(doc, stops, lines, agencies):
             if leg["mode"] in ("WALK", "BICYCLE", "CAR"):
                 legs.append({"k": {"WALK": "w", "BICYCLE": "b", "CAR": "t"}[leg["mode"]], "dep": dep, "arr": arr,
                              "m": round(leg["distance"] or 0), "shape": shape})
+                if leg["mode"] == "WALK" and leg.get("steps"):
+                    legs[-1]["turns"] = walk_turns(leg["steps"])
                 inside[len(legs) - 1] = round(sum(s.get("distance") or 0 for s in leg.get("steps") or []
                                                   if s.get("bogusName") and s.get("streetName") == STATION_PATHWAY))
                 ends[len(legs) - 1] = [round(sum(s.get("distance") or 0 for s in itertools.takewhile(
@@ -3440,6 +3599,7 @@ def itineraries(doc, stops, lines, agencies):
                     for steps in (leg.get("steps") or [], (leg.get("steps") or [])[::-1])]
                 if leg["mode"] == "CAR":
                     legs[-1].update({"from": [leg["from"]["lat"], leg["from"]["lon"]], "to": [leg["to"]["lat"], leg["to"]["lon"]]})
+                legs[-1].update({k: leg[k] for k in ("via", "stay") if leg.get(k)})
                 continue
             route = leg["route"]
             line = local_id(route["gtfsId"])
@@ -3464,9 +3624,15 @@ def itineraries(doc, stops, lines, agencies):
             if live and route["type"] == 2 and first == sdep:
                 reporting = reporting_runs(time.time()) if reporting is None else reporting
                 live = line.isdigit() and (int(line), first) in reporting
+            # A line the planner has no road for comes as straight lines between its stops: its own road instead.
+            placed = [(stops[c][2], stops[c][3]) for c in calls if stops[c][2] is not None and stops[c][3] is not None]
+            shape = encode(own_road(line, shape, placed)) if len(placed) >= 2 else shape
             legs.append({"k": "r", "line": line, "trip": local_id(leg["trip"]["gtfsId"]).split("~")[0], "dep": dep, "arr": arr,
                          "sdep": sdep, "sarr": sarr, "live": live, "first": first,
-                         "stops": stops_once(calls), "shape": shape, "next": nxt, "head": leg.get("headsign") or ""})
+                         "stops": stops_once(calls), "shape": shape, "next": nxt, "head": leg.get("headsign") or "",
+                         # A trip the timetable marks wheelchair accessible (trains are marked neither way).
+                         "acc": (leg.get("trip") or {}).get("wheelchairAccessible") == "POSSIBLE"})
+            legs[-1].update({k: leg[k] for k in ("via", "stay") if leg.get(k)})
         from_the_door(legs, ends)
         walk_at_pace(legs, inside)
         lean_first(legs)
@@ -3475,6 +3641,28 @@ def itineraries(doc, stops, lines, agencies):
         found.append({"dep": legs[0]["dep"], "arr": legs[-1]["arr"], "cost": node["generalizedCost"], "rides": rides,
                       "walk": sum(l["arr"] - l["dep"] for l in legs if l["k"] == "w"), "legs": legs})
     return found
+
+
+def accessible(it):
+    """Whether a route can be taken in a wheelchair: it has rides, and every one, each line offered for it included, is on
+    a trip the timetable marks wheelchair accessible. The timetable says nothing of stops and walks."""
+    rides = [leg for l in it["legs"] if l["k"] == "r" for leg in [l] + l.get("alts", [])]
+    return bool(rides) and all(leg.get("acc") for leg in rides)
+
+
+def walk_turns(steps):
+    """A walk's turns as the app says them: [the way to turn, the street, metres on it, lat, lon], from each
+    step of OpenTripPlanner's. A way with no name of its own (a path, stairs) has none; going on along the same way is
+    one step, its metres added up."""
+    turns = []
+    for st in steps:
+        name = "" if st.get("bogusName") else (st.get("streetName") or "")
+        way = st.get("relativeDirection") or "CONTINUE"
+        if turns and way == "CONTINUE" and name == turns[-1][1]:
+            turns[-1][2] += round(st.get("distance") or 0)
+            continue
+        turns.append([way, name, round(st.get("distance") or 0), round(st.get("lat") or 0, 6), round(st.get("lon") or 0, 6)])
+    return turns
 
 
 def lean_first(legs, lean=FIRST_LEAN):
@@ -3569,7 +3757,7 @@ ALTERNATIVE_STOP = """s%d: stop(id: "1:%s") { stoptimesForPatterns(startTime: %d
 # minutes before are all gone by its own, which would leave it no next one.
 ALTERNATIVE_TIMES = """r%d: stop(id: "1:%s") { stoptimesForPatterns(startTime: %d, timeRange: %d, numberOfDepartures: 12,
   omitNonPickups: true) { pattern { id } stoptimes { serviceDay scheduledDeparture realtimeDeparture realtime stopPosition headsign
-  trip { gtfsId departureStoptime { scheduledDeparture } } } } }"""
+  trip { gtfsId wheelchairAccessible departureStoptime { scheduledDeparture } } } } }"""
 ALTERNATIVE_TRIP = """t%d: trip(id: "1:%s") { stoptimesForDate(serviceDate: "%s") { stop { gtfsId } serviceDay scheduledArrival
   realtimeArrival realtimeDeparture } }"""
 # A route's first ride's departures between the time asked about and five minutes before its own: the card lists a
@@ -3717,7 +3905,9 @@ def alternatives(routes, stops, lines, agencies, ask=ask_graphql, since=None):
             calls = order[at:order.index(alight, at + 1) + 1]
             # The road it takes there, its stops placed from the start of its run so one it passes twice is placed right.
             run = [(x["lat"], x["lon"]) for x in p["pattern"]["stops"][:at + len(calls)]]
-            path = stretch(decode((p["pattern"].get("patternGeometry") or {}).get("points") or ""), run, at)
+            path = own_road(route, (p["pattern"].get("patternGeometry") or {}).get("points"), run, at)
+            if len(path) < 2:
+                path = stretch([], run, at)
             for x in p["pattern"]["stops"]:
                 sid = local_id(x["gtfsId"])
                 if sid in calls:
@@ -3734,7 +3924,8 @@ def alternatives(routes, stops, lines, agencies, ask=ask_graphql, since=None):
             alt = {"line": route, "trip": trip.split("~")[0], "dep": when(first),
                    "sdep": first["serviceDay"] + first["scheduledDeparture"], "live": bool(first["realtime"]), "arr": None,
                    "first": set_out(first), "head": first.get("headsign") or "",
-                   "stops": stops_once(calls), "shape": encode(path), "next": [departure(t, st) for t, st in later[:5]]}
+                   "stops": stops_once(calls), "shape": encode(path), "next": [departure(t, st) for t, st in later[:5]],
+                   "acc": first["trip"].get("wheelchairAccessible") == "POSSIBLE"}
             if k in earlier:
                 alt["before"] = before(choices, when(first), trip.split("~")[0])
             leg["alts"].append(alt)
@@ -3760,10 +3951,32 @@ def alternatives(routes, stops, lines, agencies, ask=ask_graphql, since=None):
             off = next((n for n in range(on + 1, len(ids)) if ids[n] == alight), None)
             if off is not None:
                 alt["arr"] = times[off]["serviceDay"] + times[off]["realtimeArrival"]
-    # One that never says when it gets there, or gets there before it leaves, isn't offered; the rest as the card
-    # lists them, by when they leave.
+    # The latest each ride may get there and still make the ride after it, the way between as long as the route's own:
+    # the rest of the route waits for no option (else a card can offer three buses to Friday's last train, two of them
+    # getting there over ten minutes after it leaves).
+    deadline = {}
+    for it in routes:
+        legs = it["legs"]
+        for i, leg in enumerate(legs):
+            j = next((j for j in range(i + 1, len(legs)) if legs[j]["k"] == "r"), None)
+            if leg["k"] == "r" and j is not None:
+                deadline[id(leg)] = legs[j]["dep"] - sum(l["arr"] - l["dep"] for l in legs[i + 1:j])
+    # One that never says when it gets there, or gets there before it leaves, isn't offered, nor one that isn't the same
+    # choice as the ride (crossed()), nor one too late for the next ride; the rest as the card lists them, by when they leave.
     for leg in rides:
-        leg["alts"] = sorted((a for a in leg["alts"] if a["arr"] is not None and a["arr"] > a["dep"]), key=lambda a: a["dep"])
+        leg["alts"] = sorted((a for a in leg["alts"] if a["arr"] is not None and a["arr"] > a["dep"] and not crossed(a, leg)
+                              and a["arr"] <= deadline.get(id(leg), a["arr"])),
+                             key=lambda a: a["dep"])
+
+
+OVERTAKE = 120  # seconds sooner there that make a later departure a better choice than an earlier one, past predictions' noise
+
+
+def crossed(a, b):
+    """Whether one of two rides or routes leaves after the other and still gets there more than OVERTAKE sooner. A card's
+    lines are one choice only when taking whichever comes first is right: the 90 at 14:35, there at 15:04, and the 249
+    at 14:39, there at 15:00, aren't."""
+    return a["dep"] >= b["dep"] and a["arr"] < b["arr"] - OVERTAKE or b["dep"] >= a["dep"] and b["arr"] < a["arr"] - OVERTAKE
 
 
 def first_departure(leg):
@@ -3807,7 +4020,7 @@ def tag(routes, arrive=False):
     """What each route is: its labels, from the routes' own facts. Each route is a dict with dep, arr, rides,
     walk (seconds on foot), walk_m (metres), slack (the least spare time at a change, None without one), wait (the
     longest wait at a change), headway (seconds between the first line's departures, None if unknown), last (rides
-    the last trip of a line that day) and choices (every ride could be taken on another line too). Tags lists."""
+    the last trip of a line for a while) and choices (every ride could be taken on another line too). Tags lists."""
     if not routes:
         return []
     found = [[] for _ in routes]
@@ -3818,7 +4031,9 @@ def tag(routes, arrive=False):
             found[i].append("long_walk")
         if r["wait"] >= LONG_WAIT:
             found[i].append("long_wait_time")
-        if r["last"]:
+        # A line's last trip for a while, where no listed route sets out after it: beside later ones a rider reads
+        # "Last trip" as the last way there, and it isn't.
+        if r["last"] and not any(o["dep"] > r["dep"] for o in routes):
             found[i].append("last_departure")
         if r["headway"] is not None and r["headway"] <= FREQUENT:
             found[i].append("high_frequency")
@@ -3882,9 +4097,23 @@ DIRECT_WINDOW = "PT2H"
 # costing at most LIST_TIE more than the dearest of them, when it arrives LIST_SOONER_SIMPLE or more before all of
 # them. A one-line route is listed at its next run: the copy getting there LIST_SOONER or more before the cheapest,
 # when it costs at most LIST_NEXT_RUN more.
+# The cheapest few can all change where one bus goes all the way, or all walk far where another route hardly walks,
+# and the app sorts the list by fewest changes and by least walking. So the list also holds the route of two more
+# riders: the one who minds a change LIST_MINDED times as much, when the route cheapest for them has fewer rides than
+# every listed one, and the one who minds walking as much more, when theirs walks LIST_LESS_WALK seconds less than
+# every listed one. Each joins only when it costs that rider no more than every listed route does and gets there
+# within LIST_REACH seconds of the list's soonest, or LIST_REACH_SHARE of the list's quickest trip where that is
+# longer: a bus all the way with half an hour on foot, or one an hour later, is nobody's choice.
 ROUTE_COST = {"ride": 1.0, "change_wait": 0.85, "walk": 3.25, "before": 0.5, "change": 21.5, "train": -22.0, "light_rail": -20.0}
 LIST_END_WALK, LIST_CHANGE_WALK, LIST_RIDES, LIST_SHOWN, LIST_ONE_MORE = 2000, 1000, 5, 3, 20
 LIST_SOONER, LIST_NEXT_RUN, LIST_SOONER_SIMPLE, LIST_TIE = 300, 10, 60, 5
+LIST_MINDED, LIST_LESS_WALK, LIST_REACH, LIST_REACH_SHARE = 2, 180, 900, 0.5
+# A change with under LIST_TIGHT_SPARE seconds to spare is missed about twice as often as one with more, and its route
+# gets the rider there minutes further behind its promise (on the buses' real passings 45% of such
+# one-change routes missed a bus and they came 10.8 minutes late on average, 24% and 4.3 with more room). So the list
+# doesn't lead with one when a route with room at its changes is about as good: one costing at most LIST_TIGHT more
+# and getting there at most LIST_TIGHT minutes later leads instead (led()). The cards are the same.
+LIST_TIGHT, LIST_TIGHT_SPARE = 8, 180
 
 
 def rank(it):
@@ -3892,11 +4121,12 @@ def rank(it):
     return it["arr"] + RANK_CHANGE * max(it["rides"] - 1, 0) + RANK_WALK * it["walk"]
 
 
-def route_cost(it, when, lines, arrive=False):
+def route_cost(it, when, lines, arrive=False, weights=None):
     """ROUTE_COST of a route asked about at when, in minutes: riding, 0.85 for each minute waiting at a change, 3.25 for
     each minute on foot and 0.5 for each minute from when to setting out, plus 21.5 a change, less 22 with a train and 20
-    with the light rail. Arriving by when (the last way there too), the wait counted is from getting there to when."""
-    w = ROUTE_COST
+    with the light rail. Arriving by when (the last way there too), the wait counted is from getting there to when.
+    weights: another rider's, where not ROUTE_COST (recipe_list())."""
+    w = weights or ROUTE_COST
     legs = it["legs"]
     rides = [n for n, l in enumerate(legs) if l["k"] == "r"]
     if not rides:
@@ -3908,6 +4138,21 @@ def route_cost(it, when, lines, arrive=False):
     kinds = {(lines.get(legs[n]["line"]) or [None] * 7)[6] for n in rides}
     return (w["ride"] * riding + w["change_wait"] * at_changes + w["walk"] * on_foot(legs) + w["before"] * before) / 60 + \
         w["change"] * (len(rides) - 1) + (w["train"] if 2 in kinds else 0) + (w["light_rail"] if 0 in kinds else 0)
+
+
+def led(picks, when, lines):
+    """The recipe's list in the order shown: by ROUTE_COST, and when the cheapest has a tight change (LIST_TIGHT_SPARE),
+    the cheapest route with room at its changes first, if it costs at most LIST_TIGHT more and gets there at most
+    LIST_TIGHT minutes after it."""
+    cost = lambda i: route_cost(i, when, lines)
+    tight = lambda i: facts(i)["slack"] is not None and facts(i)["slack"] < LIST_TIGHT_SPARE
+    picks = sorted(picks, key=cost)
+    if picks and tight(picks[0]):
+        roomy = [i for i in picks[1:] if not tight(i) and cost(i) <= cost(picks[0]) + LIST_TIGHT and
+                 i["arr"] <= picks[0]["arr"] + LIST_TIGHT * 60]
+        if roomy:
+            return roomy[:1] + [i for i in picks if i is not roomy[0]]
+    return picks
 
 
 def told_apart(routes, lines, stops, first):
@@ -3924,8 +4169,9 @@ def told_apart(routes, lines, stops, first):
 
 
 def recipe_list(pool, when, lines, stops):
-    """The routes of pool the recipe lists (ROUTE_COST and the rules beside it), cheapest first and the soonest
-    last when it joins: a route no listed one shares a line sequence or a card with."""
+    """The routes of pool the recipe lists (ROUTE_COST and the rules beside it), cheapest first, then the soonest when
+    it joins, then the route with fewer rides and the one walking less of the riders who mind those more (LIST_MINDED):
+    each a route no listed one shares a line sequence or a card with."""
     def walks_ok(it):
         legs = it["legs"]
         at = [n for n, l in enumerate(legs) if l["k"] == "r"]
@@ -3968,11 +4214,18 @@ def recipe_list(pool, when, lines, stops):
     soonest = min(pool, key=lambda i: (i["arr"], i["rides"], cost(i)))
     if soonest["arr"] <= first - LIST_SOONER * max(1, soonest["rides"] - fewest) and new(soonest):
         shown.append(soonest)
-        return shown
-    simple = [i for i in pool if i["rides"] <= fewest and cost(i) <= dearest + LIST_TIE and
-              i["arr"] <= first - LIST_SOONER_SIMPLE and new(i)]
-    if simple:
-        shown.append(min(simple, key=lambda i: (i["arr"], i["rides"], cost(i))))
+    else:
+        simple = [i for i in pool if i["rides"] <= fewest and cost(i) <= dearest + LIST_TIE and
+                  i["arr"] <= first - LIST_SOONER_SIMPLE and new(i)]
+        if simple:
+            shown.append(min(simple, key=lambda i: (i["arr"], i["rides"], cost(i))))
+    reach = min(i["arr"] for i in shown) + max(LIST_REACH, LIST_REACH_SHARE * min(i["arr"] - i["dep"] for i in shown))
+    for minded, less in (("change", lambda i: i["rides"] < min(s["rides"] for s in shown)),
+                         ("walk", lambda i: i["walk"] <= min(s["walk"] for s in shown) - LIST_LESS_WALK)):
+        theirs = lambda i: route_cost(i, when, lines, weights=dict(ROUTE_COST, **{minded: ROUTE_COST[minded] * LIST_MINDED}))
+        wanted = [i for i in pool if i["arr"] <= reach and less(i) and new(i)]
+        if wanted and theirs(min(wanted, key=theirs)) <= min(theirs(s) for s in shown):
+            shown.append(min(wanted, key=theirs))
     return shown
 
 
@@ -4044,15 +4297,20 @@ def shown_order(it):
     return rank(it) + (SHOWN_CHANGE - RANK_CHANGE) * max(it["rides"] - 1, 0)
 
 
-def choose(found, when, arrive, lines, stops, most=MOST_SHOWN, last=None, fill=False):
+def choose(found, when, arrive, lines, stops, most=MOST_SHOWN, last=None, fill=False, now=None):
     """The few routes worth showing: the earliest arrival, the best without a change,
     the least walking, then the best of the rest by the list's own order (rank()), none the same as another; three at
     least, the best of those a little later when too few arrive soon enough after the best. A route
     with a walk longer than WALK_MOST only when every one has. Arriving by a time, the rest by
     OpenTripPlanner's cost; leaving at a time, by rank(), since that cost leaves out the wait before setting out. last:
     for the last way there tonight, the time it was asked at. fill: leaving at a time, still fewer than three, the rest
-    by the list's order with no more changes than the best (plan_answer(), once nothing else is asked)."""
+    by the list's order with no more changes than the best (plan_answer(), once nothing else is asked). now: arriving
+    by a time, when it was asked."""
     transit = [i for i in found if i["rides"]]
+    if arrive and now is not None:
+        # The planner counts back from the arrival only: the routes that set out over a minute before it was asked go,
+        # while one is still to come (asked to be at Haifa Hadar by 16:34, it can give routes that left at 13:04).
+        transit = [i for i in transit if i["dep"] >= now - 60] or transit
     if not transit:
         return found[:1]
     short = [i for i in transit if longest_walk(i) <= WALK_MOST]
@@ -4107,7 +4365,8 @@ def choose(found, when, arrive, lines, stops, most=MOST_SHOWN, last=None, fill=F
 def merged(picks, lines, stops, arrive=False):
     """Routes whose every ride can be taken on the same lines, once each ride's other lines are known, as one: they
     show in one card, the lines side by side. The card is the one setting out first (last, arriving by a time),
-    leading with the first bus of any of its lines."""
+    leading with the first bus of any of its lines. One that gets there sooner, setting out later, is a card of its own
+    (crossed())."""
     out, seen = [], {}
     first = lambda it: next((l["dep"] for l in it["legs"] if l["k"] == "r"), it["dep"])
     for it in picks:
@@ -4118,11 +4377,12 @@ def merged(picks, lines, stops, arrive=False):
             taken = {tuple((lines.get(x["line"]) or [""] * 7)[i] for i in (6, 0)) for x in [l] + l.get("alts", [])}
             key.append(frozenset(taken) if all(n for _, n in taken) else signature({"legs": [l]}, lines, stops))
         key = tuple(key)
-        if key not in seen:
-            seen[key] = len(out)
+        card = next((n for n in seen.get(key, []) if not crossed(it, out[n])), None)
+        if card is None:
+            seen.setdefault(key, []).append(len(out))
             out.append(it)
-        elif (first(it) > first(out[seen[key]])) if arrive else (first(it) < first(out[seen[key]])):
-            out[seen[key]] = it
+        elif (first(it) > first(out[card])) if arrive else (first(it) < first(out[card])):
+            out[card] = it
     return out
 
 
@@ -4159,6 +4419,10 @@ def facts(it):
         before = [j for j in range(i) if it["legs"][j]["k"] == "r"]
         if before:
             prev = it["legs"][before[-1]]
+            # Not from a ride to one after a place the rider stays at (through()): they leave the place when they
+            # choose, so there's no change to make or miss, and the time there isn't a wait.
+            if any(l.get("stay") for l in it["legs"][before[-1] + 1:i + 1]):
+                continue
             moving = sum(l["arr"] - l["dep"] for l in it["legs"][before[-1] + 1:i] if l["k"] == "w")
             spare = leg["dep"] - prev["arr"] - moving
             slack = spare if slack is None else min(slack, spare)
@@ -4367,7 +4631,8 @@ def on_kavs_times(found, when, lines, ask):
 
 
 def plan_answer(doc, when, arrive, ask=None, more=None, frm=None, to=None, again=None, last=None, morning=None,
-                earlier=None, reluctant=None, wider=None, official=None, direct=None, weighed=None, rested=None, off=None):
+                earlier=None, reluctant=None, wider=None, official=None, direct=None, weighed=None, rested=None, off=None,
+                now=None):
     """Kav's answer: the routes list from doc, OpenTripPlanner's answer for it; and from more, its answers for the
     other kinds of question (plan_kinds, and "taxi" for leaving now), the sections shown besides, each route
     marked with its section's id. again(routes) asks the routes list's question again without those routes. last: for
@@ -4383,7 +4648,7 @@ def plan_answer(doc, when, arrive, ask=None, more=None, frm=None, to=None, again
     stops, lines, agencies = {}, {}, {}
     found = itineraries(doc, stops, lines, agencies)
     errors = [e["code"] for e in ((doc.get("data") or {}).get("planConnection") or {}).get("routingErrors") or []]
-    picks = choose(found, when, arrive, lines, stops, last=last)
+    picks = choose(found, when, arrive, lines, stops, last=last, now=now)
     # The last way tonight with no route found walking no more than WALK_MOST in one go: the last ones that do, from
     # earlier in the day. The lines found are left out of that question, or on a Friday night they fill the planner's
     # forty routes where the afternoon's last buses were. Nothing is asked after it: the five hours have no route walking
@@ -4394,7 +4659,7 @@ def plan_answer(doc, when, arrive, ask=None, more=None, frm=None, to=None, again
             day = itineraries(earlier(excluded([i for i in found if i["rides"]], lines)), stops, lines, agencies)
             if any(i["rides"] and longest_walk(i) <= WALK_MOST for i in day):
                 found += day
-                picks = choose(found, when, arrive, lines, stops, last=last)
+                picks = choose(found, when, arrive, lines, stops, last=last, now=now)
         except Exception as e:
             log("planner failed on the earlier last ways:", repr(e))
     # Nothing to ride in the planner's own window: the same question over WIDER_WINDOW, and nothing asked after it.
@@ -4402,7 +4667,7 @@ def plan_answer(doc, when, arrive, ask=None, more=None, frm=None, to=None, again
         again = None
         try:
             found += itineraries(wider(), stops, lines, agencies)
-            picks = choose(found, when, arrive, lines, stops, last=last)
+            picks = choose(found, when, arrive, lines, stops, last=last, now=now)
         except Exception as e:
             log("planner failed on a wider window:", repr(e))
     # Fewer routes than LEAST_SHOWN: the planner's answer can be the same lines' trips one after another (sixteen light
@@ -4410,13 +4675,13 @@ def plan_answer(doc, when, arrive, ask=None, more=None, frm=None, to=None, again
     if again is not None and len(picks) < LEAST_SHOWN and any(i["rides"] for i in picks):
         try:
             found += itineraries(again(excluded(picks, lines)), stops, lines, agencies)
-            picks = choose(found, when, arrive, lines, stops, last=last)
+            picks = choose(found, when, arrive, lines, stops, last=last, now=now)
         except Exception as e:
             log("planner failed on other lines:", repr(e))
     # Still fewer than three leaving at a time, after the other lines: the rest to three, even
     # those that cost more than half as much again as the quickest.
     if not arrive and len(picks) < LEAST_SHOWN and any(i["rides"] for i in picks):
-        picks = choose(found, when, arrive, lines, stops, last=last, fill=True)
+        picks = choose(found, when, arrive, lines, stops, last=last, fill=True, now=now)
     # Routes riding somewhere but none within WALK_MOST: asked again with walking costing more, which finds
     # routes riding further. Not from midnight to MORNING, when the soonest routes are the next morning's first, which
     # the morning's question times.
@@ -4427,7 +4692,7 @@ def plan_answer(doc, when, arrive, ask=None, more=None, frm=None, to=None, again
     if reluctant is not None and rode and not small_hours and not arrive and not any(i["rides"] and longest_walk(i) <= WALK_MOST for i in picks):
         try:
             found += itineraries(reluctant(), stops, lines, agencies)
-            picks = choose(found, when, arrive, lines, stops, last=last)
+            picks = choose(found, when, arrive, lines, stops, last=last, now=now)
             walked_less = any(i["rides"] and longest_walk(i) <= WALK_MOST for i in picks)
         except Exception as e:
             log("planner failed walking less:", repr(e))
@@ -4437,7 +4702,7 @@ def plan_answer(doc, when, arrive, ask=None, more=None, frm=None, to=None, again
         try:
             early = itineraries(morning(), stops, lines, agencies)
             if any(i["rides"] for i in early):
-                first = choose(early, when, arrive, lines, stops)
+                first = choose(early, when, arrive, lines, stops, now=now)
                 picks = picks[:MOST_SHOWN - 1] + first[:1] if walked_less else first
                 dawned = True
         except Exception as e:
@@ -4458,7 +4723,7 @@ def plan_answer(doc, when, arrive, ask=None, more=None, frm=None, to=None, again
     # Routes on the ministry's own times that the predicted ones missed, at Kav's times and margins (on_kavs_times()):
     # after Kav's own, to MOST_SHOWN, never first.
     added, also = [], []  # the official planner's routes at Kav's times and the one-line ones, for the recipe
-    if official is not None and ask is not None and not arrive and len(picks) < MOST_SHOWN and after is None:
+    if official is not None and ask is not None and not arrive and after is None:
         try:
             have = {signature(i, lines, stops) for i in picks}
             fresh = [i for i in itineraries(official(), stops, lines, agencies) if i["rides"] and signature(i, lines, stops) not in have]
@@ -4502,11 +4767,16 @@ def plan_answer(doc, when, arrive, ask=None, more=None, frm=None, to=None, again
         got = itineraries(more.get(kind) or {}, stops, lines, agencies)[:1]
         if got and got[0]["arr"] - got[0]["dep"] <= DIRECT_MOST:
             extra.append(dict(got[0], sec=WALK_BIKE))
-    # The best way with a bike along on the train or light rail, unless cycling all the way takes less than half as long.
+    # The best way with a bike along on the train or light rail, unless cycling all the way takes less than half as long,
+    # and only when it gets there BIKE_SOONER sooner than every route listed (leaves that much later, arriving by a time):
+    # a bike for the walks to and from the stations alone isn't a way of its own (Be'er Sheva to HaHagana: the train
+    # with 93 m cycled to it and 85 m from it, there two minutes after the train alone).
     biked = [i for i in itineraries(more.get("bike") or {}, stops, lines, agencies)
              if i["rides"] and any(l["k"] == "b" for l in i["legs"])]
     cycled = [i["arr"] - i["dep"] for i in extra if i["legs"][0]["k"] == "b"]
-    if biked and (not cycled or min(biked, key=best)["arr"] - min(biked, key=best)["dep"] <= 2 * cycled[0]):
+    sooner = lambda i: not picks or (i["dep"] >= max(p["dep"] for p in picks) + BIKE_SOONER if arrive
+                                     else i["arr"] <= min(p["arr"] for p in picks) - BIKE_SOONER)
+    if biked and sooner(min(biked, key=best)) and (not cycled or min(biked, key=best)["arr"] - min(biked, key=best)["dep"] <= 2 * cycled[0]):
         extra.append(dict(min(biked, key=best), sec=BIKE_TRANSIT))
     # A route on East Jerusalem's operators, when it beats every route in the list.
     east = [i for i in itineraries(more.get("all") or {}, stops, lines, agencies) if operators(i, lines) & set(EAST_JERUSALEM)]
@@ -4519,7 +4789,10 @@ def plan_answer(doc, when, arrive, ask=None, more=None, frm=None, to=None, again
     if ask is not None:
         alternatives(picks + added + [i for i in extra if i["rides"]], stops, lines, agencies, ask, None if arrive else when)
         picks = merged(picks, lines, stops, arrive)
-    picks.sort(key=(lambda i: route_cost(i, when, lines, arrive)) if arrive or recipe else shown_order)
+    if recipe:
+        picks = led(picks, when, lines)
+    else:
+        picks.sort(key=(lambda i: route_cost(i, when, lines, arrive)) if arrive else shown_order)
     picks += added
     after = after or (off and (off[0], "after_shabbat" if off[1] else "after_holiday"))
     # A route whose first ride sets out after the days off is tagged so first, and those riding during them come before it.
@@ -4537,8 +4810,9 @@ def plan_answer(doc, when, arrive, ask=None, more=None, frm=None, to=None, again
     used_stops = {s for it in shown for l in it["legs"] if l["k"] == "r" for leg in [l] + l.get("alts", []) for s in leg["stops"]}
     used_lines = {leg["line"] for it in shown for l in it["legs"] if l["k"] == "r" for leg in [l] + l.get("alts", [])}
     return {
-        "it": [{"dep": it["dep"], "arr": it["arr"], "tags": t, "legs": it["legs"]} for it, t in zip(picks, tags)] +
-              [{"dep": it["dep"], "arr": it["arr"], "tags": [], "legs": it["legs"], "sec": it["sec"]} for it in extra],
+        "it": [{"dep": it["dep"], "arr": it["arr"], "tags": t, "legs": it["legs"], "access": accessible(it)} for it, t in zip(picks, tags)] +
+              [{"dep": it["dep"], "arr": it["arr"], "tags": [], "legs": it["legs"], "sec": it["sec"], "access": accessible(it)}
+               for it in extra],
         "stops": {k: v for k, v in stops.items() if k in used_stops},
         "lines": {k: v for k, v in lines.items() if k in used_lines},
         "agencies": {str(lines[k][5]): agencies.get(str(lines[k][5]), "") for k in used_lines},
@@ -4550,15 +4824,38 @@ AREA = re.compile(r"^/live/v1/area/(\d{1,2}\.\d{1,4}),(\d{1,2}\.\d{1,4}),(\d{1,2
 STOPS = re.compile(r"^/live/v1/stops/([0-9]{1,6}(?:,[0-9]{1,6}){0,%d})$" % (MAX_STOPS - 1))
 LINE = re.compile(r"^/live/v1/line/([^/]{1,40})$")
 SHAPE = re.compile(r"^/live/v1/shape/([0-9]{1,9})$")
+ALERTS = re.compile(r"^/live/v1/alerts/(he|en)$")
 # The app's own timetable for the seven days from today (rebuild.sh builds it each night, tools/export_web_bundle.py
 # KAV_FROM), what it is (manifest.json: its first day, its sha256 and size) and the manifest's signature with the key
 # whose public half the app pins (data/Timetable.kt): a phone takes the file only when both check out.
 BUNDLE_FILE = re.compile(r"^/live/v1/bundle/(manifest\.json|manifest\.json\.sig|il\.kav\.gz)$")
 BUNDLE_TYPES = {"manifest.json": "application/json", "manifest.json.sig": "text/plain", "il.kav.gz": "application/gzip"}
 NUMBER = re.compile(r"^[0-9A-Za-z\u05d0-\u05ea]{1,8}$")
-# Line and stop links lead browsers to the releases; short trip codes open the saved-trip page.
+# Line and stop links lead browsers to the download page; short trip codes open the saved-trip page.
 LINK = re.compile(r"^/[tls](/.*)?$")
-RELEASES = "https://github.com/ImNoammm/kav/releases/latest"
+# Kav's download page, which always offers the newest APK from GitHub.
+RELEASES = "https://kavapp.link/download"
+# Where this server's trip links are: Kav's own, or a copy's (server/selfhost's PUBLIC_URL), by its https address.
+PUBLIC_URL = os.environ.get("PUBLIC_URL", "https://kav.noammm.uk").rstrip("/")
+PUBLIC_HOST = urllib.parse.urlsplit(PUBLIC_URL).netloc
+# Kav's own domain: the site on kavapp.link, the app's API on api.kavapp.link, links on
+# share.kavapp.link. A link asked for through any of them is made on share.kavapp.link; the apps that ask kav.noammm.uk
+# keep getting links there, the only ones their check accepts.
+SHARE_SITE = "https://share.kavapp.link"
+
+
+def link_site(host):
+    """Where a link asked for through host goes."""
+    host = (host or "").split(":")[0].lower()
+    own = PUBLIC_URL == "https://kav.noammm.uk" and (host == "kavapp.link" or host.endswith(".kavapp.link"))
+    return SHARE_SITE if own else PUBLIC_URL
+
+
+# Opening a link in the app: Kav's own domain is verified for it, so its https link opens Kav; a copy's isn't, so its page
+# opens the app with kav://trip?host=...&id=..., which names the server the trip is on.
+APP_OPEN = ("intent://" + PUBLIC_HOST + "/CODE#Intent;scheme=https;package=uk.noammm.kav;end"
+            if PUBLIC_HOST == "kav.noammm.uk" else
+            "intent://trip?host=" + PUBLIC_HOST + "&id=CODE#Intent;scheme=kav;package=uk.noammm.kav;end")
 # Embedded app icons avoid extra image requests.
 KAV_ICON = (
     "iVBORw0KGgoAAAANSUhEUgAAAJAAAACQCAYAAADnRuK4AAAeDUlEQVR42u19fXCU1d32dc79tZvNfiQkgUQhxIyWiaIP5UMY0CiCOOXTyiIRBIVG"
@@ -4654,27 +4951,6 @@ KAV_ICON = (
     "O3fu7My+d+f9HfrqWoQ2Ek/cc889Y3Rdn2Wa5nTDMK60bdtvmiZ0XYdhGGmNJIS2A6LzA4+YThUaR1VVUfiOKIpyQJKkvZqm/f7pp5/+MGvTn5PW"
     "6W8ApT8vFApJqTbZ9Jdramqqtm17vG3bYy3LquOcj2SMVdi2PQSA4uig89dAnHNTkqRvCSEdkiT9k1LaTin9q6qqf9mxY8ehzLfU19dLqUawPlvo"
     "/w+esQb3B57cHwAAAABJRU5ErkJggg=="
-)
-MOOVIT_ICON = (
-    "iVBORw0KGgoAAAANSUhEUgAAAGAAAABgCAMAAADVRocKAAABIFBMVEX///////7///3//v///v7//v3//vz//f3//fz//fv//fr+/v79/f3//P3/"
-    "/Pv//Pr8/P38/Pz9+vn4+Pj/8+//8Ozz8/P37er/5d3/28/n5+fe3t7/1MT/zLf/wqb/up7Pz8+/v7//tZf/sI7/rYf/poD/oniwsLClpaX/nW//"
-    "lWL/jVX/hEX/fTn/dzP/byf/aRT/aASGhob/ZxH/ZwT/ZgT/ZwP/ZgP/ZQP/ZwL/ZgL/ZgH/ZQL/ZQH/ZQD/ZAf/ZAH/ZABkZGT/Ygb/YwD/YQD/"
-    "XwX/YAD/XgH/XQP/XQD/XAL/XAD/WwD/WgD/WQL/WQD/WAH/WAD/VwD/VgD/VQBSUlI1NTUfHx8NDQ0HBwgDAwQCAgMBAQIAAAIAAABNBrO5AAAE"
-    "zklEQVR42u2ZeVPiSBTAX9ZkCJtMXOQoEDm8kBuVmIwYMDAoiqBsghyik+//Lbajw5BAwG7AP7aKV6UFXcX7db+j+/VrqH6xwAawAWwAG8D/D6Ai"
-    "+SqAKoviVaVarVREUVbXDVDFUr3ZfW7f3d7etbrPrfqVWF4joCxVO4/X2dRxJIQkcpTKFNta/VJZE0CVbrTrdNQPFvFF0kW9IZXXAZCreuEoaGp1"
-    "b7MuhnGx2wKFvvlj+e6NuDpAav1MoMkzLG1dAc2yADsHp51LdTVAWdZzITR3m/bfDAEgmNHV0ioARdUT30FwUG8K5QY4aN6UlgeUlccYMC6YK4wb"
-    "IqeN0rKAsvIUBTcFi8QNocWEBQD1hx6FbfhEBAgV68pSAEk/RD+HzwmRfy/UJQCSlgGBAhzCkS6RA5Sbgp9hMPSbOZFrlogBkhYFFrDEBaHbskoI"
-    "kNtZXP1mKKV0kRBQetqjsAEMHSzOO4jmAORWdosBbGEh9XRBBtBiaOH4ACrUrpAA1HrRDzQ+AKjt/J1CALjoZIDAQmYuHM9xM8yJ0QNLEvMe3kkp"
-    "ZxlmYe/eOVIdAWrlPjRZgamGm9VvG6bBf10nANSvJy7gIHwSd5g/7FqGKaBzzk5wBCiN3PfxTz1wMjRez6fXwMP+wHir8eNhBtIdERsgtzNAjSfq"
-    "HRgjw4gjkm0B5vAvY388jJK5iw+4eEyPXYAsMRq9jt6SdgAHgZfR6wtamWccRolnAoD2B4Cm2jfeDCM8ZSP+n545HAd+AjjDB3QmAB7i/eEgCfy0"
-    "D8K2YTKA6YO/JtbwhAMoF+wmQt7l0bAl01IEJpKbWdoe8O9//OzQn5FvkNZEgjwo+ixbEYdUB86TKGQ9HAcchxbjjQfQB5tbsk2ZIJNvg7a9yAM1"
-    "w+hN8mq//9oPWPXT4DslyOTqZSdmKyg80DNejJfa/q4XvLsntTcUQWGr39GpeV8hAIgoTq3nGc+F+8YvFJbDQW8wNIxXw6h5rCsQ4JBoN0UlxQ5Q"
-    "tsTyng+MifST9rygt7ItmeREu3qcOpKROQLJ3hBN3RgNe0mvPS8YCN5WVRKAhGzkmtr90b/d+EnyJL777hX7mXyoyURnsnlmUgzMIn5/4mZPzBJZ"
-    "2SJ1jxzqIg4ltIefOX0EKqpJhHURcrOPxj32ma3sg0xaOl6i2prFrYoiT+S1qVI/9dNYlcUWI+Sb8jLlewJvCSzE9Msl7geqgkoLF4YDGP/pjbLM"
-    "DafUygksjVFap3VxuUug6Wc3jocXNV8W3jJ/3Ac/MxIyUKGhLHtPLjXzO4uNhO7iGU1c/qYv6qnFRhLgoCut0EpQRX3hPQHVvA9KeaVmiIpidW42"
-    "MIAcsFIzBLmhUfDPczTN7OQepZX7Re28z3nLoJGD9bPVO15nWvbvb7Rjhh1319DxQgQdVQCUQwAddiV1HYCq2E3MEtwoQHHap1htTal7PE0Q0Baq"
-    "4LROsQDqO4G2zT/2jKUfs/P7TmBoq368+eO3liU9AeNylUZVSldZZ2v5w9Pp7Y+cRrXA0XMJUz9B913Usj5zX3LBVkrH1k/yfnDWyQeBFcCX1aW1"
-    "t/c/CK3CHkAw//n+sOwLiNR4iEYKLRL9hE8spXrzriF/5RtOuVxRql8J2LyjbQAbwAawATjKf97RGCm42pbGAAAAAElFTkSuQmCC"
 )
 EGG_ICON = (
     "iVBORw0KGgoAAAANSUhEUgAAAGAAAABgCAMAAADVRocKAAABIFBMVEX///////7+/////v/+/v/+/v79/v7+/f79/f/9/f79/f39/P38/f78/P78"
@@ -5129,7 +5405,7 @@ TRIP_PAGE = """<!doctype html>
 <meta name="theme-color" content="#000000">
 <meta property="og:type" content="website"><meta property="og:title" content="A trip shared with you · Kav">
 <meta property="og:description" content="See the route and stops. Choose your transit app and go.">
-<meta property="og:image" content="https://kav.noammm.uk/t/preview.png">
+<meta property="og:image" content="PUBLIC_URL/t/preview.png">
 <meta property="og:image:width" content="1200"><meta property="og:image:height" content="630">
 <meta property="og:image:alt" content="Kav. Your trip, ready to go.">
 <meta name="twitter:card" content="summary_large_image">
@@ -5149,7 +5425,7 @@ h2{width:100%;font-size:27px;line-height:1.25;letter-spacing:-.6px;font-weight:6
 a.go{display:flex;align-items:center;gap:14px;width:100%;padding:14px 16px;margin:0 0 12px;border-radius:18px;
 background:#111113;border:1px solid #2c2c2e;color:inherit;text-decoration:none;font-size:18px;font-weight:600}
 a.go{transition:background .18s,border-color .18s,transform .18s}a.go:hover{background:#1c1c1e;border-color:#48484a}a.go:active{background:#252528;transform:scale(.985)}.mark{width:40px;height:40px;border-radius:10px;flex:none;display:block}
-.go span{flex:1}.go small{display:block;color:#a1a1aa;font-size:12px;font-weight:400;margin-top:3px}.go svg.chev{flex:none;opacity:.6}[dir=rtl] .go svg.chev{transform:scaleX(-1)}
+.go span{flex:1}.go svg.chev{flex:none;opacity:.6}[dir=rtl] .go svg.chev{transform:scaleX(-1)}
 .get{color:#8e8e93;font-size:14px;text-align:center;margin:16px 0 0}.get a{color:#bf5af2}
 #preview{width:100%;flex:1 1 320px;min-height:120px;max-height:322px;border-radius:22px;overflow:hidden;border:1px solid #2c2c2e;background:#000}
 #map{height:100%;width:100%;background:#000;isolation:isolate}
@@ -5189,7 +5465,7 @@ a.go{margin:0;padding:10px;font-size:16px}.mark{width:32px;height:32px}#preview{
 :root[data-theme=dark]{--page:#101012;--card:#1c1c1f;--edge:#ffffff1f;--hover:#26262a}
 :root[data-theme=light]{--page:#f2f2ef;--ink:#16161a;--muted:#494951;--card:#fff;--edge:#dcdcd9;--hover:#e6e6e2;--link:color-mix(in srgb,var(--accent) 45%,#000)}
 html,body,#preview,#map{background:var(--page)}body,dialog{color:var(--ink)}
-.via,.go small,.get,#trip-note,dialog button{color:var(--muted)}
+.via,.get,#trip-note,dialog button{color:var(--muted)}
 a.go,dialog{background:var(--card);border-color:var(--edge)}a.go:hover,a.go:active{background:var(--hover);border-color:var(--edge)}
 .get a,dialog a{color:var(--link)}.end-icon{background:var(--accent)}
 .go svg.chev path{stroke:currentColor}a:focus-visible,dialog button:focus-visible{outline-color:var(--link)}
@@ -5226,7 +5502,7 @@ a.go,dialog{background:var(--card);border-color:var(--edge)}a.go:hover,a.go:acti
   var root = document.documentElement, theme = /^(oled|dark|light)$/.test(p.theme || "") ? p.theme : "oled";
   root.dataset.theme = theme; root.style.colorScheme = theme === "light" ? "light" : "dark";
   document.querySelector('meta[name="theme-color"]').content = theme === "light" ? "#f2f2ef" : theme === "dark" ? "#101012" : "#000000";
-  var shownApps = Object.prototype.hasOwnProperty.call(p, "apps") ? p.apps.split(",").filter(function (v, i, a) { return ["moovit", "egg", "bnb", "kav"].indexOf(v) >= 0 && a.indexOf(v) === i; }) : ["moovit", "egg", "bnb", "kav"];
+  var shownApps = Object.prototype.hasOwnProperty.call(p, "apps") ? p.apps.split(",").filter(function (v, i, a) { return ["egg", "bnb", "kav"].indexOf(v) >= 0 && a.indexOf(v) === i; }) : ["egg", "bnb", "kav"];
   var fromName = (p.fromName || "").slice(0, 120), toName = (p.toName || "").slice(0, 120);
   function t(en, hb) { return he ? hb : en; }
   var releases = "RELEASES";
@@ -5236,9 +5512,9 @@ a.go,dialog{background:var(--card);border-color:var(--edge)}a.go:hover,a.go:acti
   if (!to) { title.textContent = unavailable ? t("This link has expired or is unavailable", "הקישור הזה פג תוקף או אינו זמין") : t("Get Kav", "\\u05dc\\u05d4\\u05d5\\u05e8\\u05d3\\u05ea Kav"); return; }
   title.hidden = true;
   document.title = fromName + " → " + toName + " · Kav";
-  var tripUrl = "https://kav.noammm.uk/" + code;
+  var tripUrl = "PUBLIC_URL/" + code;
   var android = /Android/.test(navigator.userAgent);
-  var kav = android ? "intent://kav.noammm.uk/" + code + "#Intent;scheme=https;package=uk.noammm.kav;end" : null;
+  var kav = android ? "APP_OPEN".replace("CODE", code) : null;
   var opening = document.getElementById("opening"), timer, launchTimer, closeTimer;
   function closeOpening() {
     clearTimeout(timer); clearTimeout(launchTimer);
@@ -5268,9 +5544,9 @@ a.go,dialog{background:var(--card);border-color:var(--edge)}a.go:hover,a.go:acti
     el("path", { d: "M9 5l7 7-7 7", fill: "none", stroke: "#fff", "stroke-width": 2.2, "stroke-linecap": "round", "stroke-linejoin": "round" }, c);
     return c;
   }
-  function app(key, href, label, icon, name, native, detail, install) {
+  function app(key, href, label, icon, name, native, install) {
     if (shownApps.indexOf(key) < 0) return;
-    var packages = {moovit: "com.tranzmate", egg: "com.egged.egg", bnb: "com.mosko.bus"};
+    var packages = {egg: "com.egged.egg", bnb: "com.mosko.bus"};
     if (android && packages[key] && native) {
       var scheme = native.split("://")[0];
       native = "intent://" + native.slice(scheme.length + 3) + "#Intent;scheme=" + scheme + ";package=" + packages[key] +
@@ -5283,7 +5559,6 @@ a.go,dialog{background:var(--card);border-color:var(--edge)}a.go:hover,a.go:acti
     m.className = "mark"; m.alt = ""; m.src = icon;
     var s = document.createElement("span");
     s.textContent = label;
-    if (detail) { var sub = document.createElement("small"); sub.textContent = detail; s.appendChild(sub); }
     a.appendChild(m); a.appendChild(s); a.appendChild(chevron());
     a.onclick = function (e) {
       e.preventDefault(); clearTimeout(timer); clearTimeout(launchTimer); clearTimeout(closeTimer);
@@ -5307,28 +5582,16 @@ a.go,dialog{background:var(--card);border-color:var(--edge)}a.go:hover,a.go:acti
     };
     document.getElementById("apps").appendChild(a);
   }
-  var sharedMoovit;
-  try { var mv = new URL(p.moovit); if (mv.protocol === "https:" && /^(www\\.)?moovitapp\\.com$/.test(mv.hostname) && /^\\/(?:tripplan\\/)?i\\/[A-Za-z0-9_-]+$/.test(mv.pathname)) sharedMoovit = mv; } catch (e) {}
-  if (sharedMoovit) app("moovit", sharedMoovit.href, t("Open in Moovit", "פתיחה ב-Moovit"), "data:image/png;base64,MOOVIT_ICON", "Moovit",
-    "moovit://i/" + sharedMoovit.pathname.split("/").pop());
-  else {
-    var directions = "directions?dest_lat=" + to[0] + "&dest_lon=" + to[1] + "&dest_name=" + encodeURIComponent(toName);
-    if (from) directions += "&orig_lat=" + from[0] + "&orig_lon=" + from[1] + "&orig_name=" + encodeURIComponent(fromName);
-    if (/^[0-9]{1,10}$/.test(p.at || "")) directions += "&date=" + Number(p.at) * 1000;
-    app("moovit", "https://moovitapp.com/" + directions, t("Search in Moovit", "חיפוש ב-Moovit"), "data:image/png;base64,MOOVIT_ICON", "Moovit",
-      "moovit://" + directions, t("Find routes for this journey", "חיפוש מסלולים לנסיעה"));
-  }
   function id(v) { return /^[A-Za-z0-9]{4,32}$/.test(v || "") ? v : null; }
   var query = "?to_ll=" + to.join("_") + "&to=" + encodeURIComponent(toName) + "&locale=" + (he ? "he" : "en");
   if (from) query += "&from_ll=" + from.join("_") + "&from=" + encodeURIComponent(fromName);
-  var searchNote = t("Find routes for this journey", "חיפוש מסלולים לנסיעה");
   app("egg", id(p.egg) ? "https://egg.hopon.co/itinerary/" + p.egg : "https://egg.hopon.co/" + query,
     id(p.egg) ? t("Open in EGG", "פתיחה ב-EGG") : t("Search in EGG", "חיפוש ב-EGG"), "data:image/png;base64,EGG_ICON", "EGG",
-    id(p.egg) ? "egged://itinerary/" + p.egg : "egged://" + query, id(p.egg) ? null : searchNote,
+    id(p.egg) ? "egged://itinerary/" + p.egg : "egged://" + query,
     android && id(p.egg) ? "https://play.google.com/store/apps/details?id=com.egged.egg" : null);
   app("bnb", id(p.bnb) ? "https://busnearby.co.il/itinerary/" + p.bnb : "https://busnearby.co.il/plan" + query,
     id(p.bnb) ? t("Open in Bus Nearby", "פתיחה ב-אוטובוס קרוב") : t("Search in Bus Nearby", "חיפוש באוטובוס קרוב"), "data:image/png;base64,BUS_NEARBY_ICON", t("Bus Nearby", "אוטובוס קרוב"),
-    id(p.bnb) ? "busnearby://itinerary/" + p.bnb : "busnearby://" + query, id(p.bnb) ? null : searchNote,
+    id(p.bnb) ? "busnearby://itinerary/" + p.bnb : "busnearby://" + query,
     android && id(p.bnb) ? "https://play.google.com/store/apps/details?id=com.mosko.bus" : null);
   app("kav", android ? tripUrl : releases, t("Open in Kav", "פתיחה ב-Kav"), document.querySelector("img.icon").src, "Kav", kav);
   var apps = document.getElementById("apps");
@@ -5411,7 +5674,7 @@ a.go,dialog{background:var(--card);border-color:var(--edge)}a.go:hover,a.go:acti
   }
 })();
 </script></body></html>
-""".replace("RELEASES", RELEASES).replace("KAV_ICON", KAV_ICON).replace("MOOVIT_ICON", MOOVIT_ICON).replace(
+""".replace("RELEASES", RELEASES).replace("APP_OPEN", APP_OPEN).replace("PUBLIC_URL", PUBLIC_URL).replace("KAV_ICON", KAV_ICON).replace(
     "EGG_ICON", EGG_ICON).replace("BUS_NEARBY_ICON", BUS_NEARBY_ICON).replace("MODE_PATHS", json.dumps(TRIP_MODES)).encode()
 ASSET_LINKS = json.dumps([{"relation": ["delegate_permission/common.handle_all_urls"], "target": {
     "namespace": "android_app", "package_name": "uk.noammm.kav", "sha256_cert_fingerprints": [
@@ -5428,18 +5691,24 @@ class SharedTrips:
         db.execute("PRAGMA auto_vacuum = FULL")
         db.execute("CREATE TABLE IF NOT EXISTS trips (code TEXT PRIMARY KEY, expires INTEGER NOT NULL, payload TEXT NOT NULL)")
         db.execute("CREATE INDEX IF NOT EXISTS trips_expiry ON trips(expires)")
+        # A trip's card as the phone that shared it drew it, for chats to show with its link; it goes when the trip does.
+        db.execute("CREATE TABLE IF NOT EXISTS cards (code TEXT PRIMARY KEY, expires INTEGER NOT NULL, image BLOB NOT NULL)")
+        db.execute("CREATE INDEX IF NOT EXISTS cards_expiry ON cards(expires)")
         return db
 
-    def put(self, trip, days):
+    def put(self, trip, days, card=None, site=PUBLIC_URL):
         expires = int(time.time()) + days * 86400
         payload = json.dumps(trip, separators=(",", ":"))
         with self.lock, closing(self.connect()) as db, db:
             db.execute("DELETE FROM trips WHERE expires <= ?", (int(time.time()),))
+            db.execute("DELETE FROM cards WHERE expires <= ?", (int(time.time()),))
             for _ in range(10):
                 code = "".join(secrets.choice("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789") for _ in range(7))
                 try:
                     db.execute("INSERT INTO trips VALUES (?, ?, ?)", (code, expires, payload))
-                    return {"url": "https://kav.noammm.uk/" + code, "expiresAt": expires}
+                    if card:
+                        db.execute("INSERT OR REPLACE INTO cards VALUES (?, ?, ?)", (code, expires, card))
+                    return {"url": site + "/" + code, "expiresAt": expires}
                 except sqlite3.IntegrityError:
                     continue
         raise RuntimeError("Could not allocate a shared link")
@@ -5447,23 +5716,167 @@ class SharedTrips:
     def get(self, code):
         with self.lock, closing(self.connect()) as db, db:
             db.execute("DELETE FROM trips WHERE code = ? AND expires <= ?", (code, int(time.time())))
+            db.execute("DELETE FROM cards WHERE code = ? AND expires <= ?", (code, int(time.time())))
             row = db.execute("SELECT payload FROM trips WHERE code = ?", (code,)).fetchone()
             return json.loads(row[0]) if row else None
+
+    def card(self, code):
+        """The trip's card and when its link goes, or None for a link shared without one, or gone."""
+        with self.lock, closing(self.connect()) as db, db:
+            row = db.execute("SELECT image, expires FROM cards WHERE code = ? AND expires > ?", (code, int(time.time()))).fetchone()
+            return (bytes(row[0]), row[1]) if row else None
 
     def purge(self):
         with self.lock, closing(self.connect()) as db, db:
             db.execute("DELETE FROM trips WHERE expires <= ?", (int(time.time()),))
+            db.execute("DELETE FROM cards WHERE expires <= ?", (int(time.time()),))
 
 
 shared_trips = SharedTrips(SHARED_TRIPS)
 SHORT_LINK = re.compile(r"^/[A-Za-z0-9]{7}$")
 SHARE_API = re.compile(r"^/api/share/([A-Za-z0-9]{7})$")
+SHARE_CARD = re.compile(r"^/t/([A-Za-z0-9]{7})\.jpg$")
+CARD_LIMIT = 300 * 1024  # bytes of a shared trip's card, a 1200 x 630 JPEG
+
+# What the trip page tells a chat it's linked in until the trip is known: replaced, each once, with a link's own.
+TRIP_TITLE = b"<title>A trip shared with you \xc2\xb7 Kav</title>"
+TRIP_DESCRIPTION = b'<meta name="description" content="See the route, stops and map. Open your trip in Kav or your transit app.">'
+TRIP_OG_TITLE = b'<meta property="og:title" content="A trip shared with you \xc2\xb7 Kav">'
+TRIP_OG_DESCRIPTION = b'<meta property="og:description" content="See the route and stops. Choose your transit app and go.">'
+TRIP_OG_IMAGE = b'<meta property="og:image" content="%s/t/preview.png">' % PUBLIC_URL.encode()
+TRIP_OG_ALT = b'<meta property="og:image:alt" content="Kav. Your trip, ready to go.">'
+WEEKDAYS = {False: ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"),
+            True: ("יום ב׳", "יום ג׳", "יום ד׳", "יום ה׳", "יום ו׳", "שבת", "יום א׳")}
+MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 
 
-def signed(path, mark, now=None):
+def kind_name(route_type, he):
+    """A kind of line by name, as Kav's typeName says it."""
+    names = {711: ("Shuttle", "שאטל"), 7: ("Carmelit", "כרמלית"), 5: ("Rakavlit", "רכבלית"), 6: ("Rakavlit", "רכבלית"),
+             0: ("Light rail", "רכבת קלה"), 12: ("Light rail", "רכבת קלה"), 1: ("Metro", "מטרו"), 2: ("Train", "רכבת"),
+             3: ("Bus", "אוטובוס"), 11: ("Bus", "אוטובוס"), 4: ("Ferry", "מעבורת"), 8: ("Share taxi", "מונית שירות"),
+             715: ("Share taxi", "מונית שירות")}
+    return names.get(route_type, ("Other", "אחר"))[he]
+
+
+def trip_said(trip, now=None):
+    """A shared trip in words for a chat's preview of its link, in its page's language and as the card in Kav's Share
+    sheet says it: from where to where, then when it leaves (with the day, where that isn't today) and gets there, and
+    its lines, each ride's choices as its badge shows them ("Bus 90 / 29"). None where the trip can't be read."""
+    he = trip.get("lang") == "he"
+    try:
+        data = trip["data"]
+        raw = gzip.GzipFile(fileobj=io.BytesIO(base64.urlsafe_b64decode(data + "=" * (-len(data) % 4)))).read(2_000_001)
+        if len(raw) > 2_000_000:
+            return None
+        saved = json.loads(raw)
+        (journey,) = saved["trips"]
+        lines, types = saved.get("lines") or {}, saved.get("types") or {}
+        leave, arrive = (datetime.datetime.fromtimestamp(int(journey[k]), ISRAEL) for k in ("dep", "arr"))
+        rides = []
+        for leg in journey.get("legs") or []:
+            if leg.get("kind") != "RIDE":
+                continue
+            options = leg.get("alts") or [leg]
+            choices = [o.get("line") for o in sorted(options, key=lambda o: o.get("dep") or 0)] + list(leg.get("altLines") or [])
+            labels = []
+            for line in dict.fromkeys(choices):
+                label = next((o.get("name") for o in options if o.get("line") == line and o.get("name")), None) or \
+                    (lines.get(str(line)) or {}).get("number")
+                if label and label not in labels:
+                    labels.append(str(label))
+            kind = types.get(str((lines.get(str(leg.get("line"))) or {}).get("agency")), 3)
+            rides.append(kind_name(kind, he) + (" " + " / ".join(labels) if labels else ""))
+    except Exception:
+        return None
+    ends = [str(trip.get("fromName") or "")[:120], str(trip.get("toName") or "")[:120]]
+    if not all(ends):
+        return None
+    # Each name isolated and the line set in the page's direction, so neither name's own script turns the arrow round.
+    title = ("‏⁨%s⁩ ← ⁨%s⁩" if he else "‎⁨%s⁩ → ⁨%s⁩") % tuple(ends)
+    hm = "%H:%M"
+    said = [("יציאה " if he else "Leave ") + leave.strftime(hm), ("הגעה " if he else "arrive ") + arrive.strftime(hm)]
+    if leave.date() != datetime.datetime.fromtimestamp(time.time() if now is None else now, ISRAEL).date():
+        day = WEEKDAYS[he][leave.weekday()]
+        said.insert(0, f"{day} {leave.day}.{leave.month}" if he else f"{day} {leave.day} {MONTHS[leave.month - 1]}")
+    if rides:
+        said.append(", ".join(rides))
+    return title, " · ".join(said)
+
+
+def trip_page(code):
+    """The trip page for code's link: chats that show a preview of it see the trip's own words, and its card where the
+    phone that shared it sent one. A link that's gone, or unreadable, keeps the page's general ones."""
+    trip = shared_trips.get(code)
+    said = trip_said(trip) if trip else None
+    if said is None:
+        return TRIP_PAGE
+    title, description = said
+    alt = title + ". " + description
+
+    def tag(text):
+        return html.escape(text, quote=True).encode()
+    page = TRIP_PAGE.replace(TRIP_TITLE, b"<title>" + tag(title + " · Kav") + b"</title>", 1)
+    page = page.replace(TRIP_DESCRIPTION, b'<meta name="description" content="' + tag(description) + b'">', 1)
+    page = page.replace(TRIP_OG_TITLE, b'<meta property="og:title" content="' + tag(title) + b'">', 1)
+    page = page.replace(TRIP_OG_DESCRIPTION, b'<meta property="og:description" content="' + tag(description) + b'">', 1)
+    if shared_trips.card(code):
+        page = page.replace(TRIP_OG_IMAGE, b'<meta property="og:image" content="%s/t/%s.jpg">' % (PUBLIC_URL.encode(), code.encode()), 1)
+        page = page.replace(TRIP_OG_ALT, b'<meta property="og:image:alt" content="' + tag(alt) + b'">', 1)
+    return page
+
+
+people = None  # accounts.Store, on a server with ACCESS=accounts
+
+
+def account_store():
+    global people
+    if people is None:
+        import accounts
+        people = accounts.Store(ACCOUNTS)
+    return people
+
+
+asked_by = {}  # an open server's requests by address this minute: {address: (minute, count)}
+
+
+def caller(address, headers):
+    """Who asked, for the open server's share of requests (ACCESS=open): the address a proxy on this machine's own
+    network (the self-hosted HTTPS service) says it forwarded for, else the connection's. Kept in memory only."""
+    try:
+        nearby = ipaddress.ip_address(address).is_private
+    except ValueError:
+        nearby = False
+    forwarded = (headers.get("X-Forwarded-For") or "").split(",")[-1].strip()
+    return forwarded if nearby and forwarded else address
+
+
+def allowed(path, headers, address, now=None):
+    """Whether this request may be answered, by the server's ACCESS: signed with the app key, signed by a signed-in
+    phone with its own token, or, open, within the address's share of requests."""
+    now = time.time() if now is None else now
+    if ACCESS == "open":
+        minute = int(now // 60)
+        was, count = asked_by.get(address, (minute, 0))
+        count = count + 1 if was == minute else 1
+        if len(asked_by) > 10000:
+            asked_by.clear()
+        asked_by[address] = (minute, count)
+        return count <= OPEN_PER_MINUTE
+    if ACCESS == "accounts":
+        # The server's own services (kav-eta asking for the buses on the road) sign with its internal key, as before.
+        if APP_KEY and signed(path, headers.get("X-Kav"), now):
+            return True
+        token = account_store().token(headers.get("X-Kav-Device"), now)
+        return token is not None and signed(path, headers.get("X-Kav"), now, token.encode())
+    return signed(path, headers.get("X-Kav"), now)
+
+
+def signed(path, mark, now=None, key=None):
     """Whether Kav asked: the ten minutes it asked in and an HMAC of them with the path, made with the key it's built
     with. Three hours either way, for a phone whose clock is off."""
-    if not APP_KEY:
+    key = APP_KEY if key is None else key
+    if not key:
         return True
     try:
         slot, mac = mark.split(".", 1)
@@ -5473,7 +5886,7 @@ def signed(path, mark, now=None):
     now = time.time() if now is None else now
     if abs(slot - int(now // 600)) > 18:
         return False
-    want = hmac.new(APP_KEY, f"{slot}:{urllib.parse.unquote(path)}".encode(), hashlib.sha256).hexdigest()[:32]
+    want = hmac.new(key, f"{slot}:{urllib.parse.unquote(path)}".encode(), hashlib.sha256).hexdigest()[:32]
     return hmac.compare_digest(want, mac)
 
 
@@ -5481,10 +5894,51 @@ SERVED_EVERY = 60  # seconds the server's account of its other parts is good for
 served_state = {"at": 0, "parts": {}}
 
 
+def plan_elsewhere(frm, to, when, way, modes, via, ask=None):
+    """A trip asked of a planner of one's own (PLAN_URL), as Kav's routes. It's asked
+        GET PLAN_URL?from=<lat>,<lon>&to=<lat>,<lon>&time=<unix seconds>&way=<d|a|n|l>[&modes=0,3][&via=<lat>,<lon>;...]
+    way: d to leave at the time, a to arrive by it, n to leave now, l for the last way there that night; modes: the GTFS
+    route types the rider allows (all when left out). It answers what the app takes from this server (server/API.md):
+    {"it": [routes], "stops": {...}, "lines": {...}, "agencies": {...}, "errors": [...]}."""
+    q = {"from": "%.6f,%.6f" % frm, "to": "%.6f,%.6f" % to, "time": str(when), "way": way}
+    if modes:
+        q["modes"] = modes
+    if via:
+        q["via"] = ";".join("%.6f,%.6f" % p[:2] for p in via)
+    url = PLAN_URL + ("&" if "?" in PLAN_URL else "?") + urllib.parse.urlencode(q)
+    if ask is None:
+        with urllib.request.urlopen(urllib.request.Request(url, headers={"Accept": "application/json"}), timeout=30) as r:
+            answer = json.load(r)
+    else:
+        answer = ask(url)
+    if not isinstance(answer, dict) or not isinstance(answer.get("it"), list):
+        raise ValueError("the planner's answer has no routes list (it)")
+    for key in ("stops", "lines", "agencies"):
+        answer.setdefault(key, {})
+    answer.setdefault("errors", [])
+    return answer
+
+
+# When Kav's planner last planned a trip: it answers then, though a planner on a small machine, busy with a search,
+# can be too slow for planner_answers()'s quick question.
+planner_seen = {"at": 0.0}
+PLANNER_SEEN = 120
+
+
 def planner_answers(now):
-    """Whether the planner answers, with a timetable that hasn't run out; None for a server run without one."""
+    """Whether the planner answers, with a timetable that hasn't run out; None for a server run without one. A planner of
+    one's own answers when a plain GET of PLAN_URL does, Kav's when it planned a trip within PLANNER_SEEN seconds or
+    answers a quick question now."""
+    if PLAN_URL:
+        try:
+            with urllib.request.urlopen(PLAN_URL, timeout=3) as r:
+                return r.status < 400
+        except (OSError, ValueError):
+            return False
     if not OTP_URL:
         return None
+    if now - planner_seen["at"] < PLANNER_SEEN:
+        return True
     req = urllib.request.Request(OTP_URL, data=json.dumps({"query": "{ serviceTimeRange { end } }"}).encode(),
                                  headers={"Content-Type": "application/json"})
     try:
@@ -5495,6 +5949,21 @@ def planner_answers(now):
     return bool(end) and end > now
 
 
+API_VERSION = 1  # the app API's version (server/API.md); a breaking change goes to /live/v2/
+
+
+def capabilities():
+    """What this server is set up to do, whether or not each part answers right now (served() says that): live buses
+    (a ministry key), which planner (Kav's OpenTripPlanner, one of the owner's, or none), Kav's own arrival times, and
+    trip links. The app hides what a server isn't set up for, rather than showing it failing."""
+    return {
+        "live": bool(URL),
+        "planner": "own" if PLAN_URL else "otp" if OTP_URL else None,
+        "predictions": bool(ETA or PREDICT_URL),
+        "links": True,
+    }
+
+
 def served(now, planner=planner_answers):
     """What the server has besides the live buses, for the app's Settings to tell whoever runs one: whether the planner
     answers, whether kav-eta is making Kav's own predicted times (its status, written every round, buses on the road or
@@ -5502,16 +5971,19 @@ def served(now, planner=planner_answers):
     signed with where it isn't Kav's, for the app to pin (a copy of the server makes one of its own, server/selfhost)."""
     if now - served_state["at"] < SERVED_EVERY:
         return served_state["parts"]
-    parts = {"planner": planner(now), "predictions": False, "timetable": ""}
+    parts = {"planner": planner(now), "predictions": False, "timetable": "", "api": API_VERSION, "capabilities": capabilities()}
     # A server run without a planner (server/selfhost's PLANNER=off) says nothing of one, and the app offers none.
     if parts["planner"] is None:
         del parts["planner"]
-    try:
-        with open(os.path.join(os.path.dirname(ETA), "status.json"), encoding="utf-8") as f:
-            said = json.load(f)
-        parts["predictions"] = bool(ETA) and now - said["at"] <= Predictions.OLD and "error" not in said
-    except (OSError, ValueError, KeyError, TypeError):
-        pass
+    if PREDICT_URL:
+        parts["predictions"] = predictions.working(now)
+    else:
+        try:
+            with open(os.path.join(os.path.dirname(ETA), "status.json"), encoding="utf-8") as f:
+                said = json.load(f)
+            parts["predictions"] = bool(ETA) and now - said["at"] <= Predictions.OLD and "error" not in said
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
     try:
         with open(os.path.join(REALTIME, "bundle", "manifest.json"), encoding="utf-8") as f:
             parts["timetable"] = json.load(f)["from"]
@@ -5538,10 +6010,73 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
 
+    def auth(self, path):
+        """Signing a phone in (a username and password, or an invite) and out, on a server with accounts."""
+        import accounts
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            doc = json.loads(self.rfile.read(length)) if 0 < length <= 4096 else {}
+        except ValueError:
+            doc = {}
+        if path.endswith("/logout"):
+            if not allowed(path, self.headers, caller(self.client_address[0], self.headers)):
+                return self.answer(401, {"error": "not signed in"})
+            account_store().sign_out(self.headers.get("X-Kav-Device"))
+            return self.answer(200, {"ok": True})
+        try:
+            model = str(doc.get("device") or "")
+            if doc.get("invite"):
+                got = account_store().redeem(str(doc["invite"]), model)
+            else:
+                got = account_store().sign_in(str(doc.get("username") or ""), str(doc.get("password") or ""), model)
+        except accounts.Refused as e:
+            return self.answer(429 if e.paused else 401, {"error": str(e)})
+        log("phone signed in for", got["user"])
+        return self.answer(200, got)
+
     def answer(self, code, body):
         raw = json.dumps(body, separators=(",", ":")).encode()
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+    TRANSLATE_MOST = 20  # texts in one request
+    TRANSLATE_LONGEST = 4000  # characters of one, a notice's whole text
+
+    def translate(self):
+        """A notice the phone has from Google, in English (alerts.py's translator and its store): the
+        texts are public alerts, and nothing of the trip comes with them."""
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            if not 0 < length <= 200_000:
+                raise ValueError()
+            texts = json.loads(self.rfile.read(length))["texts"]
+            if not isinstance(texts, list) or not 0 < len(texts) <= self.TRANSLATE_MOST or \
+                    not all(isinstance(t, str) and len(t) <= self.TRANSLATE_LONGEST for t in texts):
+                raise ValueError()
+        except (ValueError, KeyError, TypeError):
+            return self.answer(400, {"error": "texts: up to %d of %d characters" % (self.TRANSLATE_MOST, self.TRANSLATE_LONGEST)})
+        if not working.acquire(blocking=False):
+            return self.answer(503, {"error": "busy"})
+        try:
+            self.answer(200, {"texts": alerts.current.translations.now(texts)})
+        except OSError as e:
+            log("translate failing:", repr(e))
+            self.answer(502, {"error": "the translator didn't answer"})
+        finally:
+            working.release()
+
+    def answer_gzipped(self, packed):
+        """JSON kept gzipped, as it is to a client that takes gzip (Android's does), else unpacked."""
+        zipped = "gzip" in self.headers.get("Accept-Encoding", "")
+        raw = packed if zipped else gzip.decompress(packed)
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        if zipped:
+            self.send_header("Content-Encoding", "gzip")
         self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(raw)))
         self.end_headers()
@@ -5559,8 +6094,19 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/t/preview.png":
             code, kind, body = 200, "image/png", TRIP_PREVIEW
             more = {"Cache-Control": "public, max-age=86400", "X-Content-Type-Options": "nosniff"}
+        elif (card := SHARE_CARD.fullmatch(path)) is not None:
+            found = shared_trips.card(card[1])
+            if found:
+                # Kept no longer than its link lasts, by Cloudflare as by the apps that fetch it.
+                code, kind, body = 200, "image/jpeg", found[0]
+                more = {"Cache-Control": "public, max-age=%d" % min(86400, max(0, found[1] - int(time.time()))),
+                        "X-Content-Type-Options": "nosniff"}
+            else:
+                code, kind, body = 404, "text/plain; charset=utf-8", b"Not found\n"
+                more = {"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"}
         elif SHORT_LINK.fullmatch(path) or LINK.match(path) and path[1] == "t":
-            code, kind, body = 200, "text/html; charset=utf-8", TRIP_PAGE
+            code, kind = 200, "text/html; charset=utf-8"
+            body = trip_page(path[1:]) if SHORT_LINK.fullmatch(path) else TRIP_PAGE
             more = {"Cache-Control": "public, max-age=300", "Referrer-Policy": "no-referrer", "X-Content-Type-Options": "nosniff",
                     "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline' https://unpkg.com/leaflet@1.9.4/dist/leaflet.css; "
                                                "script-src 'unsafe-inline' https://unpkg.com/leaflet@1.9.4/dist/leaflet.js; "
@@ -5579,14 +6125,20 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = self.path.split("?", 1)[0]
-        if path != "/api/share" or not signed(path, self.headers.get("X-Kav")):
+        if path in ("/live/v1/auth/login", "/live/v1/auth/logout") and ACCESS == "accounts":
+            return self.auth(path)
+        if path == "/live/v1/translate" and alerts.current.translations is not None \
+                and allowed(path, self.headers, caller(self.client_address[0], self.headers)):
+            return self.translate()
+        if path != "/api/share" or not allowed(path, self.headers, caller(self.client_address[0], self.headers)):
             self.close_connection = True
             return self.answer(404, {"error": "not found"})
         try:
             length = int(self.headers.get("Content-Length", "0"))
         except ValueError:
             length = 0
-        if not 0 < length <= 262144:
+        # The trip, and its card in base64.
+        if not 0 < length <= 262144 + CARD_LIMIT * 4 // 3 + 4:
             self.close_connection = True
             return self.answer(413, {"error": "invalid share size"})
         if not working.acquire(blocking=False):
@@ -5604,9 +6156,15 @@ class Handler(BaseHTTPRequestHandler):
                     lat, lon = map(float, trip[name].split(","))
                     if not (-90 <= lat <= 90 and -180 <= lon <= 180):
                         raise ValueError()
+                # The card a chat shows with the link, drawn on the phone: a JPEG, or none.
+                card = doc.get("card")
+                if card is not None:
+                    card = base64.b64decode(card, validate=True)
+                    if not 0 < len(card) <= CARD_LIMIT or not card.startswith(b"\xff\xd8\xff"):
+                        raise ValueError()
             except (ValueError, KeyError, TypeError, AttributeError):
                 return self.answer(400, {"error": "invalid shared trip"})
-            self.answer(201, shared_trips.put(trip, days))
+            self.answer(201, shared_trips.put(trip, days, card, link_site(self.headers.get("Host"))))
         finally:
             working.release()
 
@@ -5614,9 +6172,12 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         if self.public(path):
             return
-        # Kav alone, and the container's own health check.
-        if self.client_address[0] != "127.0.0.1" and not signed(path, self.headers.get("X-Kav")):
-            return self.answer(404, {"error": "not found"})
+        # Kav alone, and the container's own health check. A copy's status answers anyone, so the app can tell how to
+        # sign in to it (its "access").
+        if not (self.client_address[0] == "127.0.0.1" or (path == "/live/v1/status" and ACCESS != "key")
+                or allowed(path, self.headers, caller(self.client_address[0], self.headers))):
+            return self.answer(429 if ACCESS == "open" else 404,
+                               {"error": "too many requests" if ACCESS == "open" else "not found"})
         if not working.acquire(blocking=False):
             return self.answer(503, {"error": "busy"})
         try:
@@ -5635,7 +6196,16 @@ class Handler(BaseHTTPRequestHandler):
                 "vehicles": snapshot.count if snapshot else 0,
                 "source": snapshot.source if snapshot else "",
                 **served(now),
+                "access": ACCESS,
+                **({"alerts": alerts.current.status()} if alerts.current.status() else {}),
             })
+        if (asked := ALERTS.match(path)) is not None:
+            if alerts.SOURCE == "off":
+                return self.answer(404, {"error": "no alerts here"})
+            packed = alerts.current.packed(asked.group(1))
+            if packed is None:
+                return self.answer(503, {"error": "no alerts yet"})
+            return self.answer_gzipped(packed)
         if (area := AREA.match(path)) is not None:
             return self.area(*(float(x) for x in area.groups()), fresh, now)
         if (stops := STOPS.match(path)) is not None:
@@ -5731,12 +6301,22 @@ class Handler(BaseHTTPRequestHandler):
         started = time.time()
         flat, flon, tlat, tlon, when, way, modes, via = asked.groups()
         frm, to = (float(flat), float(flon)), (float(tlat), float(tlon))
-        via = [tuple(float(x) for x in p.split(",")) for p in via.split(";")] if via else []
-        if not all(29 < p[0] < 34 and 34 < p[1] < 36 for p in [frm, to] + via):
+        # Each place on the way: where, and the seconds to stay there when its minutes are given.
+        via = [(float(lat), float(lon)) + tuple(int(m) * 60 for m in stay if int(m))
+               for lat, lon, *stay in (p.split(",") for p in via.split(";"))] if via else []
+        if not all(inside(*p[:2]) for p in [frm, to] + via):
             return self.answer(400, {"error": "outside the timetable's area"})
         if not planning.acquire(blocking=False):
             return self.answer(503, {"error": "busy"})
         when, arrive, allowed = int(when), way in "al", [int(m) for m in modes.split(",")] if modes else []
+        if PLAN_URL:
+            try:
+                return self.answer(200, plan_elsewhere(frm, to, when, way, modes, via))
+            except (OSError, ValueError) as e:
+                log("own planner failed:", repr(e))
+                return self.answer(502, {"error": "the planner didn't answer"})
+            finally:
+                planning.release()
         asked = when
         if way == "l":
             when = last_way(when)
@@ -5821,7 +6401,8 @@ class Handler(BaseHTTPRequestHandler):
                                      officially.result if officially else None,
                                      (lambda: ask_planner(plan_variables(frm, to, when, arrive, allowed, "main", via, DIRECT_WINDOW, (),
                                                                          at, transfers=0))) if way in "nd" and not via else None,
-                                     found_too if like or dawning else None, rested=rested if resting else None, off=off))
+                                     found_too if like or dawning else None, rested=rested if resting else None, off=off,
+                                     now=started if arrive else None))
 
     def line(self, number, fresh, now):
         """Every bus on the routes that carry this number, and those routes."""
@@ -5853,9 +6434,24 @@ class Server(ThreadingHTTPServer):
 
 
 if __name__ == "__main__":
-    threading.Thread(target=poll, daemon=True).start()
+    # Signed with an empty key, every request would pass: a server without its key answers no one rather than anyone.
+    if ACCESS in ("key", "accounts") and not APP_KEY:
+        sys.exit("KAV_APP_KEY is empty: set one in .env (the setup page and install.sh make one), see .env.example")
+    if PREDICT_URL:
+        threading.Thread(target=predictions.keep_fetching, daemon=True).start()
+    # Without a ministry key there are no live buses here (a planner-only copy, server/selfhost): the ministry isn't
+    # asked at all, and the app takes its live times elsewhere.
+    if URL:
+        threading.Thread(target=poll, daemon=True).start()
+    else:
+        log("no MOT_KEY: no live buses, the planner and the timetable only")
     threading.Thread(target=keep_lines, daemon=True).start()
     threading.Thread(target=keep_shapes, daemon=True).start()
+    if alerts.SOURCE == "gtfsrt":
+        threading.Thread(target=keep_stop_codes, daemon=True).start()
+    alerts.start(route_name, stop_codes.get)
+    if alerts.current.translations is not None:
+        threading.Thread(target=keep_names, daemon=True).start()
     # Both are the planner's; a server run without one (server/selfhost's PLANNER=off) has neither.
     if OTP_URL:
         threading.Thread(target=keep_rail_copies, daemon=True).start()

@@ -14,7 +14,7 @@ internal fun LookRow(inset: Dp) {
     val looks = listOf(Look.OLED, Look.LIGHT, Look.DARK)
     KavSegmented(
         listOf("OLED", T("Light", "בהיר"), T("Dark", "כהה")), looks.indexOf(K.look).coerceAtLeast(0),
-        { i -> K.applyTheme(looks[i]); Prefs.setLook(ctx, looks[i]) },
+        { i -> val look = looks[i]; K.restyle { K.applyTheme(look) }; Prefs.setLook(ctx, look) },
         Modifier.padding(horizontal = inset),
     )
 }

@@ -23,7 +23,7 @@ import uk.noammm.kav.data.Updates
 import uk.noammm.kav.ui.UpdateRun
 
 // Background GitHub checks run about every six hours, never while Kav is open or for
-// half an hour after, so requests don't reveal when someone uses the app.
+// half an hour after. Updates are also checked each time Kav opens (KavModel.loadUpdate).
 class Checks : JobService() {
     override fun onStartJob(params: JobParameters): Boolean {
         val app = applicationContext
@@ -80,6 +80,9 @@ class Checks : JobService() {
 
         private fun run(ctx: Context) {
             if (inFront(ctx)) return
+            // A process started for this job alone hasn't read the settings: without them a phone signed in to its rider's
+            // server would ask for the week without its device id, which a server with accounts turns away.
+            Prefs.loadSources(ctx)
             runCatching { GoogleRecipe.refresh(ctx) }.onFailure { Log.w("KavChecks", "vela", it) }
             runCatching { uk.noammm.kav.data.Timetable.refresh(ctx) }.onFailure { Log.w("KavChecks", "timetable", it) }
             val auto = Prefs.autoUpdate(ctx)

@@ -18,6 +18,7 @@ import uk.noammm.kav.data.Transit
 
 // The road a route takes, from Kav's server: empty until it comes, or if the route has none.
 @Composable
+@android.annotation.SuppressLint("ProduceStateDoesNotAssignValue")
 internal fun rememberKavShape(route: Int): List<Pair<Double, Double>> {
     val shape by produceState(KavLive.shapeNow(route), route, KavLive.source, KavLive.server) {
         value = KavLive.shapeNow(route)
@@ -80,6 +81,13 @@ internal fun freshColour(f: Freshness): androidx.compose.ui.graphics.Color = whe
     Freshness.LIVE -> K.realtime
     Freshness.ESTIMATED -> K.problem
     Freshness.OFF -> K.critical
+}
+
+// The same for a vehicle drawn on a map, in the colours of the map under it (MapInk).
+internal fun mapFreshColour(f: Freshness): androidx.compose.ui.graphics.Color = when (f) {
+    Freshness.LIVE -> MapInk.icons.realtime
+    Freshness.ESTIMATED -> MapInk.icons.problem
+    Freshness.OFF -> MapInk.icons.critical
 }
 
 // What a bus card says about a position it has: a live one by how long ago it came, to the second.

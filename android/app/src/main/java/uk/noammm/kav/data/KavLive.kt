@@ -23,9 +23,16 @@ object KavLive {
     // Kav's own server, or the rider's: a copy of server/ answering over HTTPS, at the address set in Settings, with the
     // key set beside it when it takes only requests signed with one (its KAV_APP_KEY). The rider's own is set up once,
     // for live locations and trip planning alike; ownServer is empty until it is.
-    const val KAV_SERVER = "https://kav.noammm.uk"
+    const val KAV_SERVER = "https://api.kavapp.link"
+    // Kav's server's address before kavapp.link, still answering for the Kavs installed before it. Saved in settings and
+    // backups it's Kav's server, never the rider's own (serverAddress turns it into KAV_SERVER).
+    const val OLD_KAV_SERVER = "https://kav.noammm.uk"
     var ownServer by mutableStateOf("")
+    // The key requests to it are signed with: its KAV_APP_KEY, or on a server with accounts this phone's own token,
+    // with ownDevice its id there and ownUser who signed it in (server/accounts.py).
     var ownKey by mutableStateOf("")
+    var ownDevice by mutableStateOf("")
+    var ownUser by mutableStateOf("")
 
     // Where live locations come from, Kav's server until the settings are read. Trip planning has its own choice
     // (KavPlan.source).
@@ -46,7 +53,6 @@ object KavLive {
     // The server a choice asks: the rider's own once it's set up, Kav's otherwise.
     fun serverOf(s: Source): String = when {
         s.hopOn -> BusNearby.SERVER
-        s == Source.MOOVIT -> MoovitWeb.SERVER
         s == Source.OWN && ownServer.isNotEmpty() -> ownServer
         else -> KAV_SERVER
     }
@@ -59,8 +65,8 @@ object KavLive {
 
     // What requests to a server are signed with: the key Kav is built with for Kav's, the rider's for their own.
     fun keyFor(at: String, own: String = key): String = when (at) {
-        KAV_SERVER -> BuildConfig.KAV_LIVE_KEY
-        BusNearby.SERVER, MoovitWeb.SERVER -> ""
+        KAV_SERVER, OLD_KAV_SERVER -> BuildConfig.KAV_LIVE_KEY
+        BusNearby.SERVER -> ""
         else -> own
     }
 
@@ -140,7 +146,7 @@ object KavLive {
     }
 
     private fun get(path: String, quick: Boolean = false, at: String = server): String {
-        val c = (URL("$at/live/v1/$path").openConnection() as HttpURLConnection).apply {
+        val c = (RiderProxy.open(URL("$at/live/v1/$path")) as HttpURLConnection).apply {
             // A server that answers connects within a few seconds; one that doesn't costs the connect timeout on each of
             // its addresses (Kav's has four).
             if (quick) { connectTimeout = 4_000; readTimeout = 4_000 } else { connectTimeout = 5_000; readTimeout = 15_000 }
@@ -178,6 +184,42 @@ object KavLive {
 
     fun sign(c: HttpURLConnection, path: String, key: String) {
         if (key.isNotEmpty()) c.setRequestProperty("X-Kav", mark(path, key, System.currentTimeMillis()))
+        // Signed with this phone's own token on the rider's server: which phone it is, for the server to find the token.
+        if (key.isNotEmpty() && key == ownKey && ownDevice.isNotEmpty()) c.setRequestProperty("X-Kav-Device", ownDevice)
+    }
+
+    // Signing this phone in to a server with accounts: a username and password, or an invite from its QR code. The
+    // phone's own id and token there, and who it's signed in as.
+    class SignedIn(val device: String, val token: String, val user: String)
+
+    class SignInRefused(val why: String) : java.io.IOException(why)
+
+    fun signIn(at: String, username: String = "", password: String = "", invite: String = ""): SignedIn {
+        val body = JSONObject().put("device", android.os.Build.MODEL.orEmpty())
+        if (invite.isNotEmpty()) body.put("invite", invite) else body.put("username", username).put("password", password)
+        val (code, o) = post(at, "/live/v1/auth/login", body)
+        if (code != 200 || o == null) throw SignInRefused(o?.optString("error")?.ifBlank { null } ?: "The server didn't sign this phone in.")
+        return SignedIn(o.getString("device"), o.getString("token"), o.optString("user"))
+    }
+
+    // Signing this phone out there too, so its token stops working; whatever the server says, the phone forgets it.
+    fun signOut(at: String) {
+        runCatching { post(at, "/live/v1/auth/logout", JSONObject(), signed = true) }
+    }
+
+    private fun post(at: String, path: String, body: JSONObject, signed: Boolean = false): Pair<Int, JSONObject?> {
+        val c = RiderProxy.open(URL(at + path)) as HttpURLConnection
+        try {
+            c.connectTimeout = 8_000; c.readTimeout = 15_000
+            c.requestMethod = "POST"; c.doOutput = true
+            c.setRequestProperty("User-Agent", "Kav")
+            c.setRequestProperty("Content-Type", "application/json")
+            if (signed) sign(c, path, ownKey)
+            c.outputStream.use { it.write(body.toString().toByteArray()) }
+            val code = c.responseCode
+            val text = (if (code < 400) c.inputStream else c.errorStream)?.bufferedReader()?.use { it.readText() }
+            return code to runCatching { JSONObject(text ?: "") }.getOrNull()
+        } finally { c.disconnect() }
     }
 
     // Whether the server is answering with live buses, waiting only a few seconds to know.
@@ -193,9 +235,13 @@ object KavLive {
         object Refused : Check()
         // Something answers there, but not as Kav's server does.
         object NotKav : Check()
+        // access: who may use it (server/selfhost): "key", signing with its key; "accounts", each phone signed in by a
+        // person; "open", anyone.
         class Answers(
             val live: Boolean, val vehicles: Int, val at: Long, val planner: Boolean?, val predictions: Boolean?,
-            val timetable: String?, val bundleKey: String?,
+            val timetable: String?, val bundleKey: String?, val access: String = "key",
+            // Where its line alerts come from (/live/v1/alerts), null when it serves none.
+            val alerts: String? = null,
         ) : Check()
 
         enum class Why { NO_SUCH_HOST, HTTPS, TIMEOUT, NO_ANSWER }
@@ -203,10 +249,8 @@ object KavLive {
 
     fun check(at: String, key: String, using: Source = source.takeIf { it.hopOn } ?: KavPlan.source): Check {
         if (at == BusNearby.SERVER) return BusNearby.check(using)
-        // Moovit's website only plans: whether its planner page answers.
-        if (at == MoovitWeb.SERVER) return MoovitWeb.check(MoovitWebPage.agent())
         val c = try {
-            URL("$at/live/v1/status").openConnection() as HttpURLConnection
+            RiderProxy.open(URL("$at/live/v1/status")) as HttpURLConnection
         } catch (e: java.io.IOException) {
             return Check.Unreached(Check.Why.NO_SUCH_HOST)
         }
@@ -241,7 +285,23 @@ object KavLive {
             planner = flag("planner"), predictions = flag("predictions"),
             timetable = if (o.has("timetable")) o.optString("timetable") else null,
             bundleKey = o.optString("bundleKey").takeIf { it.isNotEmpty() },
+            access = o.optString("access").ifBlank { "key" },
+            alerts = o.optString("alerts").ifBlank { null },
         )
+    }
+
+    // A server's QR code, as its setup page shows it (server/selfhost/setup): kav://server?address=<host>, with
+    // &invite=<code> for a person's invite on a server with accounts. Null for any other code.
+    class ServerCode(val address: String, val invite: String)
+
+    fun serverCode(text: String): ServerCode? {
+        val u = runCatching { java.net.URI(text.trim()) }.getOrNull() ?: return null
+        if (u.scheme != "kav" || u.host != "server") return null
+        val q = u.rawQuery.orEmpty().split('&').mapNotNull { p ->
+            p.split('=', limit = 2).takeIf { it.size == 2 }?.let { (k, v) -> k to java.net.URLDecoder.decode(v, "UTF-8") }
+        }.toMap()
+        val at = q["address"]?.let(::serverAddress) ?: return null
+        return ServerCode(at, q["invite"].orEmpty())
     }
 
     // A server's address as typed, the way requests are sent to it: https:// when it names none, without the API's own
@@ -252,8 +312,9 @@ object KavLive {
         val url = if ("://" in s) s else "https://$s"
         val u = runCatching { java.net.URI(url) }.getOrNull() ?: return null
         if (!u.scheme.equals("https", ignoreCase = true) || u.host.isNullOrBlank() || u.rawQuery != null || u.rawFragment != null) return null
-        // The host in lower case, as DNS and certificates take it: KAV.NOAMMM.UK is Kav's own.
-        return "https://" + u.rawAuthority.lowercase() + url.substring(u.scheme.length + 3 + u.rawAuthority.length)
+        // The host in lower case, as DNS and certificates take it: KAV.NOAMMM.UK is Kav's own, at its current address.
+        val at = "https://" + u.rawAuthority.lowercase() + url.substring(u.scheme.length + 3 + u.rawAuthority.length)
+        return if (at == OLD_KAV_SERVER) KAV_SERVER else at
     }
 
     // A trip a server plans (KavPlan), as it answers: the one chosen for planning, not live locations.
@@ -267,29 +328,17 @@ object KavLive {
         return answer
     }
 
-    fun ask(routes: List<Int>): Answer = fromSource { using ->
-        if (using.hopOn) BusNearby.follow(routes, using)
-        else parse(get("follow/" + routes.distinct().take(FOLLOW_MAX).sorted().joinToString(",")))
-    }
+    fun ask(routes: List<Int>): Answer = fromSource { it.liveProvider.follow(routes) }
 
     // Vehicles in a box (south, west, north, east): Kav's snapshot, or those serving the provider's nearby stops.
-    fun area(box: DoubleArray): Area = fromSource { using ->
-        if (using.hopOn) BusNearby.area(box, using)
-        else parseArea(get("area/" + box.joinToString(",") { String.format(java.util.Locale.US, "%.2f", it) }))
-    }
+    fun area(box: DoubleArray): Area = fromSource { it.liveProvider.area(box) }
 
     // Every bus on the routes with this number, and all those routes, so a page can pick its own.
-    fun line(number: String, codes: List<Int> = emptyList()): Area = fromSource { using ->
-        if (using.hopOn) BusNearby.line(number, using, codes)
-        else parseArea(get("line/" + URLEncoder.encode(number, "UTF-8").replace("+", "%20")))
-    }
+    fun line(number: String, codes: List<Int> = emptyList()): Area = fromSource { it.liveProvider.line(number, codes) }
 
     // Every bus due at these stops in the next hour and a half, straight from the ministry.
     fun stops(codes: Collection<Int>): Board = try {
-        fromSource { using ->
-            if (using.hopOn) BusNearby.stops(codes, using)
-            else parseBoard(get("stops/" + codes.filter { it > 0 }.distinct().sorted().take(STOPS_MAX).joinToString(",")))
-        }.also { stopsUp = true }
+        fromSource { it.liveProvider.stops(codes) }.also { stopsUp = true }
     } catch (e: Refused) {
         stopsUp = false
         throw e
@@ -307,17 +356,29 @@ object KavLive {
 
     // The road a route takes, from the ministry's timetable. A route's road doesn't change in a day, so it's kept; an
     // empty answer, as a server gives while it restarts, isn't, so the route is asked about again.
-    fun shape(route: Int): List<Pair<Double, Double>> {
-        val using = source
-        if (using.hopOn) return BusNearby.shape(route, using)
-        val cacheKey = server to route
-        synchronized(shapes) { shapes[cacheKey] }?.let { return it }
-        val path = decodePolyline(JSONObject(get("shape/$route")).optString("shape"))
-        if (path.size >= 2) synchronized(shapes) { shapes[cacheKey] = path }
-        return path
-    }
+    fun shape(route: Int): List<Pair<Double, Double>> = source.liveProvider.shape(route)
 
-    fun shapeNow(route: Int): List<Pair<Double, Double>> = if (source.hopOn) emptyList() else synchronized(shapes) { shapes[server to route] }.orEmpty()
+    fun shapeNow(route: Int): List<Pair<Double, Double>> = source.liveProvider.shapeNow(route)
+
+    // Kav's server, or the rider's own copy of it: the one at `server`.
+    object Server : LiveProvider {
+        override val nearbyOnly get() = false
+        override fun follow(routes: List<Int>) = parse(get("follow/" + routes.distinct().take(FOLLOW_MAX).sorted().joinToString(",")))
+        override fun area(box: DoubleArray) = parseArea(get("area/" + box.joinToString(",") { String.format(java.util.Locale.US, "%.2f", it) }))
+        override fun line(number: String, codes: List<Int>) = parseArea(get("line/" + URLEncoder.encode(number, "UTF-8").replace("+", "%20")))
+        override fun stops(codes: Collection<Int>) =
+            parseBoard(get("stops/" + codes.filter { it > 0 }.distinct().sorted().take(STOPS_MAX).joinToString(",")))
+
+        override fun shape(route: Int): List<Pair<Double, Double>> {
+            val cacheKey = server to route
+            synchronized(shapes) { shapes[cacheKey] }?.let { return it }
+            val path = decodePolyline(JSONObject(get("shape/$route")).optString("shape"))
+            if (path.size >= 2) synchronized(shapes) { shapes[cacheKey] = path }
+            return path
+        }
+
+        override fun shapeNow(route: Int) = synchronized(shapes) { shapes[server to route] }.orEmpty()
+    }
 
     // Google's encoded polyline: Kav uses five decimal places, HopOn's points6 uses six.
     fun decodePolyline(encoded: String?, precision: Int = 5): List<Pair<Double, Double>> {
@@ -509,7 +570,7 @@ object KavLive {
         var best = 4
         val goal = if (name.isEmpty()) 2 else 0
         for (i in net.dStart[stop] until net.dStart[stop + 1]) {
-            val st = net.cST[net.dConn[i]]
+            val st = net.dConn[i]
             val t = net.tripOf(st)
             if (net.rShort[net.tripRoute[t]] != number) continue
             if (!startsAt(net.stDep[net.tripStart[t]], first)) continue
@@ -536,7 +597,7 @@ object KavLive {
         var found: Int? = null
         var best = Int.MAX_VALUE
         for (i in net.dStart[stop] until net.dStart[stop + 1]) {
-            val st = net.cST[net.dConn[i]]
+            val st = net.dConn[i]
             val t = net.tripOf(st)
             val route = net.tripRoute[t]
             if (net.rType[route] != 2 || net.rShort[route].isNotEmpty()) continue
@@ -596,7 +657,7 @@ object KavLive {
 
     // Whether the timetable has the line of that number leave the stop on any day.
     private fun Net.serves(stop: Int, number: String): Boolean =
-        (dStart[stop] until dStart[stop + 1]).any { rShort[tripRoute[tripOf(cST[dConn[it]])]] == number }
+        (dStart[stop] until dStart[stop + 1]).any { rShort[tripRoute[tripOf(dConn[it])]] == number }
 
     // Whether a station's name in the timetable is the one the ministry names a route's end by, which can be shorter
     // ("בית שאן" for "בית שאן - דוד לוי").
@@ -771,7 +832,13 @@ object KavLive {
             net.rShort[net.tripRoute[t]] == number && startsAt(net.stDep[net.tripStart[t]], first) && away(t) <= ON_TRIP_M
         }
         val named = near.filter { name.isNotEmpty() && net.rLong[net.tripRoute[it]] == name }.ifEmpty { near }
-        val trip = named.filter { type < 0 || net.rType[net.tripRoute[it]] == type }.ifEmpty { named }.minByOrNull(::away)
+        fun kind(t: Int) = type < 0 || net.rType[net.tripRoute[t]] == type
+        val trip = named.filter(::kind).ifEmpty { named }.minByOrNull(::away)
+            // A trip the timetable hasn't then (the ministry runs some Saturday nights it has none of): any trip of the
+            // bus's own line by its full name, which stops where it does, the one passing nearest.
+            ?: net.tripRoute.indices.filter { t ->
+                name.isNotEmpty() && net.rShort[net.tripRoute[t]] == number && net.rLong[net.tripRoute[t]] == name && kind(t)
+            }.filter { away(it) <= ON_TRIP_M }.minByOrNull(::away)
             ?: return emptyList()
         return (net.tripStart[trip] until net.tripStart[trip + 1]).map { net.stStop[it] }
     }

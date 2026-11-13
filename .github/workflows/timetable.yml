@@ -11,6 +11,7 @@ on:
 
 permissions:
   contents: write
+  actions: write
 
 concurrency:
   group: timetable
@@ -67,3 +68,11 @@ jobs:
           gh release view timetable > /dev/null 2>&1 || gh release create timetable --latest=false --title "Timetable" \
             --notes "The week of scheduled departures Kav downloads, built each night from the Ministry of Transport's timetable."
           gh release upload timetable out/il.kav.gz out/manifest.json.sig out/manifest.json --clobber
+
+      # GitHub turns a schedule off after 60 days without a commit to the repository; turning it on again each night
+      # starts that count over, with no commit.
+      - name: Keep the schedule on
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X PUT "repos/${{ github.repository }}/actions/workflows/timetable.yml/enable" ||
+          echo "::warning::Could not renew the schedule; it stops after 60 days without a commit"

@@ -1,5 +1,7 @@
 package uk.noammm.kav.ui
 
+import uk.noammm.kav.data.RiderProxy
+
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -96,7 +98,7 @@ internal object StopPhotos {
     }
 
     private fun get(url: String): ByteArray {
-        val c = (URL(url).openConnection() as HttpURLConnection).apply { connectTimeout = 8000; readTimeout = 10000 }
+        val c = (RiderProxy.open(URL(url)) as HttpURLConnection).apply { connectTimeout = 8000; readTimeout = 10000 }
         try {
             if (c.responseCode != 200) throw IOException("Street View image: HTTP ${c.responseCode}")
             if (c.contentType?.startsWith("image/") != true) throw IOException("Street View sent no image")

@@ -21,6 +21,7 @@ import uk.noammm.kav.ui.Mode
 import uk.noammm.kav.ui.Step
 import uk.noammm.kav.ui.T
 import uk.noammm.kav.ui.aboard
+import uk.noammm.kav.ui.RideAlong
 import uk.noammm.kav.ui.alongPath
 import uk.noammm.kav.ui.boardingChoice
 import uk.noammm.kav.ui.buildSteps
@@ -34,6 +35,9 @@ import uk.noammm.kav.ui.drawWalker
 import uk.noammm.kav.ui.isFresh
 import uk.noammm.kav.ui.isRail
 import uk.noammm.kav.ui.legMode
+import uk.noammm.kav.ui.nextTurn
+import uk.noammm.kav.ui.turnText
+import uk.noammm.kav.ui.walkTo
 import uk.noammm.kav.ui.busOn
 import uk.noammm.kav.ui.minutesToAlight
 import uk.noammm.kav.ui.platformChange
@@ -42,6 +46,7 @@ import uk.noammm.kav.ui.modeName
 import uk.noammm.kav.ui.modeOf
 import uk.noammm.kav.ui.pathLength
 import uk.noammm.kav.ui.routeTints
+import uk.noammm.kav.ui.stopAlongs
 import uk.noammm.kav.ui.stopsProgress
 import uk.noammm.kav.ui.tripArrival
 import uk.noammm.kav.ui.whenLabel
@@ -67,13 +72,14 @@ internal data class TripNotice(
     // title writes it, and how live it is, for the picture-in-picture to colour it as the search results do.
     val dueText: String = "",
     val due: Transit.Departure? = null,
+    // The rides' stops on the picture-in-picture's bar, where each is and its colour: grey once passed, like the road behind.
+    val stops: List<Pair<Int, Int>> = emptyList(),
 ) {
     val max get() = parts.sumOf { it.first }
 }
 
 private val TRAVELLED get() = K.routeIdle.toArgb()
 private val WALK get() = K.muted.toArgb()
-private const val PART_BUDGET = 12
 
 private class Run(
     val step: Int,
@@ -83,6 +89,7 @@ private class Run(
     val arr: Long,
     val colour: Int,
     val walk: Boolean,
+    val ride: Transit.Leg? = null,
 )
 
 private class Say(
@@ -97,7 +104,8 @@ private fun lengthOf(leg: Transit.Leg): Double =
 
 private fun along(run: Run, live: Fix?, now: Long): Double {
     if (live != null && run.shape.size >= 2 && distanceToPath(live.lat, live.lon, run.shape) < 150) {
-        return alongPath(live.lat, live.lon, run.shape).coerceIn(0.0, run.metres)
+        return (if (run.ride != null) RideAlong.of(run.ride, live.lat to live.lon)
+            else alongPath(live.lat, live.lon, run.shape)).coerceIn(0.0, run.metres)
     }
     if (run.walk) return 0.0
     val span = run.arr - run.dep
@@ -125,15 +133,10 @@ internal fun tripNotice(journey: ActiveJourney, current: Int, fix: Fix?, now: Lo
             is Step.Cycle -> s.leg to colourOf(s.leg)
             else -> return@mapIndexedNotNull null
         }
-        Run(i, leg.shape, lengthOf(leg), leg.dep, leg.arr, colour, s is Step.Walk)
+        Run(i, leg.shape, lengthOf(leg), leg.dep, leg.arr, colour, s is Step.Walk, ride = leg.takeIf { s is Step.Ride })
     }
-    val metres = runs.map { max(1, it.metres.roundToInt()) }
-    val walks = runs.count { it.walk }
-    val spare = (PART_BUDGET - (runs.size - walks) - 1).coerceAtLeast(1)
-    fun dashesIn(i: Int, dash: Int) = max(1, (metres[i] + dash / 2) / dash)
-    var dash = max(1, metres.sum() / 20)
-    while (runs.indices.filter { runs[it].walk }.sumOf { dashesIn(it, dash) } > max(spare, walks)) dash += max(1, dash / 8)
-    val lens = runs.indices.map { if (runs[it].walk) dashesIn(it, dash) * dash else metres[it] }
+    // Each part of the trip its length on the bar, a walk too: one plain grey stretch.
+    val lens = runs.map { max(1, it.metres.roundToInt()) }
     val total = lens.sum().coerceAtLeast(1)
     val runAt = runs.indexOfFirst { it.step == index }
     // On foot, where you were last seen; on board, the timetable keeps the vehicle moving.
@@ -153,9 +156,7 @@ internal fun tripNotice(journey: ActiveJourney, current: Int, fix: Fix?, now: Lo
     var start = 0
     runs.forEachIndexed { i, run ->
         val end = start + lens[i]
-        if (run.walk) {
-            for (at in start until end step dash) add(dash, if (at + dash / 2 < progress) TRAVELLED else run.colour)
-        } else when {
+        when {
             end <= progress -> add(lens[i], TRAVELLED)
             start >= progress -> add(lens[i], run.colour)
             else -> { add(progress - start, TRAVELLED); add(end - progress, run.colour) }
@@ -163,6 +164,17 @@ internal fun tripNotice(journey: ActiveJourney, current: Int, fix: Fix?, now: Lo
         start = end
     }
     if (parts.isEmpty()) add(1, accent)
+    val stops = ArrayList<Pair<Int, Int>>()
+    var runStart = 0
+    runs.forEachIndexed { i, run ->
+        val ride = run.ride
+        if (ride != null && ride.shape.size >= 2) for (a in stopAlongs(ride) { r.stop(it)?.point }.drop(1)) {
+            if (a == null) continue
+            val at = runStart + (a / run.metres * lens[i]).roundToInt().coerceIn(0, lens[i])
+            stops += at to if (at <= progress) TRAVELLED else run.colour
+        }
+        runStart += lens[i]
+    }
 
     val hm = clockFormat()
     fun time(utc: Long) = hm.format(Date(utc * 1000))
@@ -255,7 +267,7 @@ internal fun tripNotice(journey: ActiveJourney, current: Int, fix: Fix?, now: Lo
     val arrive = tripArrival(journey.trip, r, journey.chosen, riding, live, now)
     return TripNotice(
         say.title, say.text, T("Arrive ${time(arrive)}", "הגעה ב-${time(arrive)}"),
-        say.chip, parts, progress, say.glyph, say.tint, dueText = say.dueText, due = say.due,
+        say.chip, parts, progress, say.glyph, say.tint, dueText = say.dueText, due = say.due, stops = stops,
     )
 }
 
@@ -292,9 +304,18 @@ private fun icon(glyph: Glyph, tint: Int, px: Int, round: Boolean): Bitmap = ico
     image.asAndroidBitmap()
 }
 
-internal class TripAlert(val key: String, val title: String, val text: String, val spoken: String = title)
+internal class TripAlert(val key: String, val title: String, val text: String, val spoken: String = title) {
+    // A walk's turn, said out loud by its own setting (Prefs.spokenTurns).
+    val turn get() = key.startsWith(TURN_KEY)
+}
 
+internal const val TURN_KEY = "turn-"
+
+// How near a turn its alert comes: a few steps before it.
+private const val TURN_AHEAD_M = 25.0
 private const val LAST_STRETCH_M = 1_000.0
+// A bus's or a tram's: a kilometre of a jammed street is five minutes, and its stops are a few hundred metres apart.
+private const val LAST_STRETCH_BUS_M = 400.0
 private const val LAST_STRETCH_S = 90.0
 private const val TRAFFIC_AHEAD_S = 30 * 60L
 private const val TRANSFER_WARN_S = 10 * 60L
@@ -334,6 +355,13 @@ internal fun tripAlert(journey: ActiveJourney, current: Int, fix: Fix?, now: Lon
     if (steps.isEmpty()) return null
     val r = journey.resolved
     return when (val step = steps[current.coerceIn(0, steps.lastIndex)]) {
+        // Walking: each turn as the rider reaches it, once.
+        is Step.Walk -> {
+            val at = fix?.takeIf { it.isFresh(now) } ?: return null
+            val (turn, metres) = nextTurn(step.leg, at) ?: return null
+            if (metres > TURN_AHEAD_M) null
+            else TripAlert("$TURN_KEY${turn.lat},${turn.lon}", turnText(turn), walkTo(step, r))
+        }
         is Step.Wait -> {
             val (ride, wait) = boardingChoice(step.ride, step.wait, journey.chosen[step.legIndex] ?: 0)
             val dep = r.departures(ride, wait).firstOrNull { it.tripId == ride.tripId }
@@ -360,18 +388,21 @@ internal fun tripAlert(journey: ActiveJourney, current: Int, fix: Fix?, now: Lon
             val total = ride.stops.size
             val progress = stopsProgress(ride, r.stops, busOn(ride, r, riderTrip(ride, r, fix, now)), fix, now)
             // A train's next stop can be half an hour away, so the alert also waits for the last stretch: about 90
-            // seconds at the current speed, at least a kilometre. Without every stop's position (saved trips often lack
-            // them), the route left must also be shorter than an average gap between stops.
+            // seconds at the current speed, at least a kilometre; 400 m on a bus, where a kilometre crawled along is
+            // five minutes. Without every stop's position (saved trips often lack them), the route left must also be
+            // shorter than an average gap between stops.
             val located = ride.stops.all { r.stops[it]?.point != null }
             val aboard = fix?.takeIf { total >= 2 && it.isFresh(now) && it.aboard(ride.shape) }
-            val left = aboard?.let { pathLength(ride.shape) - alongPath(it.lat, it.lon, ride.shape) }
+            val left = aboard?.let { pathLength(ride.shape) - RideAlong.of(ride, it.lat to it.lon) }
             // A GPS speed spike must not stretch it: no train here goes faster than 180 km/h.
-            val stretch = max(LAST_STRETCH_M, (aboard?.speed ?: 0f).coerceAtMost(50f) * LAST_STRETCH_S)
+            val least = if (r.isTrain(ride)) LAST_STRETCH_M else LAST_STRETCH_BUS_M
+            val stretch = max(least, (aboard?.speed ?: 0f).coerceAtMost(50f) * LAST_STRETCH_S)
             val nearEnd = when {
                 // Going by the vehicle without the rider's own position, the stop before theirs can be half an hour off on a
                 // train, so it also waits for the expected arrival there (live, or the plan with its delay) within two minutes.
+                // With no vehicle either, by that same time: the plan's alone comes as early as the ride runs late.
                 left == null -> if (progress >= 0) total >= 2 && progress >= total - 1f && minutesToAlight(ride, r, fix, now) <= 2
-                    else ride.arr - now in 0..120
+                    else r.alightAt(ride) - now in 0..120
                 located -> left <= stretch && progress >= total - 1f
                 else -> left <= min(stretch, pathLength(ride.shape) / (total - 1))
             }

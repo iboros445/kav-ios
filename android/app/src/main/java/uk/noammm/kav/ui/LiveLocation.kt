@@ -86,22 +86,24 @@ fun LiveLocationScreen(
             val agency = info?.agencyId ?: -1
             val rt = if (info != null) r.routeType(agency) else 3
             val plate = linePlate(rt, agency) { Operators.of(r, agency) }
-            if (K.lineBadgeAppearance == LineBadgeAppearance.STRIP && modeOf(rt) == Mode.BUS) {
-                LinePlateBadge(leg.shortName.ifBlank { null } ?: info?.number?.ifBlank { null } ?: "…", Mode.BUS, plate,
-                    glyph = { ink, size -> AgencyMark(rt, agency, ink, size) })
-            } else Row(
-                Modifier.clip(RoundedCornerShape(K.rBadge)).background(plate?.fill ?: K.surface1)
-                    .padding(horizontal = 10.dp, vertical = 7.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                AgencyMark(rt, agency, plate?.ink ?: K.muted, 15.dp)
-                Spacer(Modifier.width(6.dp))
-                Text(
-                    leg.shortName.ifBlank { null } ?: info?.number?.ifBlank { null } ?: "…",
-                    style = K.type.bodyStrong, color = plate?.ink ?: K.text,
-                    maxLines = 1, overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.widthIn(max = 130.dp),
-                )
+            BadgeLookSwitch(K.lineBadgeAppearance == LineBadgeAppearance.STRIP && modeOf(rt) == Mode.BUS) { strip ->
+                if (strip) {
+                    LinePlateBadge(leg.shortName.ifBlank { null } ?: info?.number?.ifBlank { null } ?: "…", Mode.BUS, plate,
+                        glyph = { ink, size -> AgencyMark(rt, agency, ink, size) }, look = LineBadgeAppearance.STRIP)
+                } else Row(
+                    Modifier.clip(RoundedCornerShape(K.rBadge)).background(plate?.fill ?: K.surface1)
+                        .padding(horizontal = 10.dp, vertical = 7.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    AgencyMark(rt, agency, plate?.ink ?: K.muted, 15.dp)
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        leg.shortName.ifBlank { null } ?: info?.number?.ifBlank { null } ?: "…",
+                        style = K.type.bodyStrong, color = plate?.ink ?: K.text,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.widthIn(max = 130.dp),
+                    )
+                }
             }
             Spacer(Modifier.width(K.gap3))
             Column(Modifier.weight(1f)) {
@@ -116,9 +118,10 @@ fun LiveLocationScreen(
             }
         }
 
+        val grey = rememberGreyRoad(leg, arrival, r)
         VehicleMap(
             leg, arrival, modeOf(if (info != null) r.routeType(info.agencyId) else 3),
-            approach = lineRoute(arrival, r),
+            approach = grey.road, approachStops = grey.stops,
             modifier = Modifier.padding(horizontal = K.gap3),
         )
 
@@ -138,28 +141,29 @@ private fun VehicleMap(
     a: Transit.Arrival?,
     mode: Mode,
     approach: List<Pair<Double, Double>> = emptyList(),
+    approachStops: List<Pair<Double, Double>> = emptyList(),
     modifier: Modifier = Modifier,
 ) {
     if (leg.shape.size < 2) return
     val bus = a?.takeIf { it.hasLocation }
     val points = leg.shape + approach + listOfNotNull(bus?.let { it.lat to it.lon })
-    val geometry = remember(approach, leg, K.look, bus?.lat, bus?.lon, bus?.vehicleStatus) {
+    val geometry = remember(approach, approachStops, leg, MapInk.bg, MapInk.text, MapInk.routeIdle, MapInk.route, bus?.lat, bus?.lon, bus?.vehicleStatus) {
         // Off its route, a dashed line ties the bus to the nearest point of the route.
         val astray = bus?.takeIf { it.vehicleStatus == 2 }?.let { b ->
             val near = leg.shape.minBy { (lat, lon) -> metres(lat, lon, b.lat, b.lon) }
-            MapLine(listOf(near, b.lat to b.lon), K.problem, 1.5f, dashed = true)
+            MapLine(listOf(near, b.lat to b.lon), MapInk.problem, 1.5f, dashed = true)
         }
         MapGeometry(
             lines = listOfNotNull(
-                MapLine(approach, K.routeIdle, 3f, casing = 7f),
-                MapLine(leg.shape, K.route, 4f, casing = 8f),
+                MapLine(approach, MapInk.routeIdle, 3f, casing = 7f),
+                MapLine(leg.shape, MapInk.route, 4f, casing = 8f),
                 astray,
             ),
-            dots = listOf(
-                MapDot(leg.shape.first().first, leg.shape.first().second, K.bg, 6f),
-                MapDot(leg.shape.first().first, leg.shape.first().second, Color.Transparent, 5f, K.text, 2f),
-                MapDot(leg.shape.last().first, leg.shape.last().second, K.bg, 7f),
-                MapDot(leg.shape.last().first, leg.shape.last().second, K.text, 5f),
+            dots = greyStopDots(approachStops) + listOf(
+                MapDot(leg.shape.first().first, leg.shape.first().second, MapInk.bg, 6f),
+                MapDot(leg.shape.first().first, leg.shape.first().second, Color.Transparent, 5f, MapInk.text, 2f),
+                MapDot(leg.shape.last().first, leg.shape.last().second, MapInk.bg, 7f),
+                MapDot(leg.shape.last().first, leg.shape.last().second, MapInk.text, 5f),
             ),
         )
     }
@@ -195,7 +199,8 @@ private fun StatusBlock(
         }
         Row(verticalAlignment = Alignment.CenterVertically) {
             if (a?.hasLocation == true) { LiveGlyph(tint, 13.dp); Spacer(Modifier.width(6.dp)) }
-            Text(headline, style = K.type.bodyStrong, color = tint)
+            // Its seconds roll as they tick; the words stay still (LiveText).
+            LiveText(headline, style = K.type.bodyStrong, color = tint)
         }
         if (a != null && a.vehicleStatus == 2) {
             Text(

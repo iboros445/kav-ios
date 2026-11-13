@@ -205,7 +205,7 @@
     if (!label || !(await choose(id, same(label)))) k.missed.push(id);
   }
   async function pickTrain() {
-    await tick('TrainType', '1');
+    await tick('TrainType', d.trainType || '1');
     await sleep(600);
     await pickStation('BoardingStation', d.boarding, d.boardingName);
     await pickStation('DestinationStation', d.destination, d.destinationName);

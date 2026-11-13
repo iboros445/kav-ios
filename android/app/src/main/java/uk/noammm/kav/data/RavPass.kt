@@ -55,14 +55,18 @@ object RavPass {
 
     internal fun request(
         method: String, path: String, agent: String, uid: String, token: String?, body: JSONObject?, json: Boolean,
+        related: List<String> = emptyList(),
     ): Pair<Int, String> {
-        val c = (URL(base + path).openConnection() as HttpURLConnection).apply {
+        val c = (RiderProxy.open(URL(base + path)) as HttpURLConnection).apply {
             requestMethod = method; connectTimeout = 10_000; readTimeout = 30_000
             if (json) setRequestProperty("Accept", "application/json")
             setRequestProperty("Accept-Language", if (uk.noammm.kav.ui.T.rtl) "he_IL" else "en_US")
             setRequestProperty("User-Agent", agent)
             setRequestProperty("X-HOPON-UID", uid)
             if (token != null) setRequestProperty("Authorization", "Token $token")
+            // The linked passengers paid for too, as HopOn's app sends them with each price and ride, and when it finds the
+            // station a train ride ends at.
+            if (related.isNotEmpty()) setRequestProperty("X-Additional-Related-Passenger-Ids", related.joinToString(","))
             if (body != null || method == "POST" || method == "PUT") doOutput = true
             if (body != null) setRequestProperty("Content-Type", "application/json; charset=UTF-8")
         }
@@ -95,8 +99,11 @@ object RavPass {
         throw refusal(o) ?: IOException("HopOn HTTP $code")
     }
 
-    private fun send(method: String, path: String, s: Session, body: JSONObject? = null, agent: String = this.agent): JSONObject? {
-        val (code, text) = request(method, path, agent, s.uid, s.token, body, json = agent == this.agent)
+    private fun send(
+        method: String, path: String, s: Session, body: JSONObject? = null, agent: String = this.agent,
+        related: List<String> = emptyList(),
+    ): JSONObject? {
+        val (code, text) = request(method, path, agent, s.uid, s.token, body, json = agent == this.agent, related = related)
         return answer(code, text)
     }
 
@@ -162,7 +169,8 @@ object RavPass {
     }
 
     // HopOn's settings: the terms in force and where to read them, how many may ride along, and whether its app adds
-    // them as occasional passengers (extra_passengers_enabled), which it then counts as such when paying.
+    // them as occasional passengers (extra_passengers_enabled), which it then counts as such when paying. Only then
+    // does it offer the account's linked passengers too.
     class Settings(
         val terms: String?, val termsUrl: String?, val privacyUrl: String?, val motTermsUrl: String?,
         val pricesUrl: String?, val guestsMax: Int, val occasional: Boolean,
@@ -408,37 +416,90 @@ object RavPass {
         }
     }
 
-    // HopOn's price for the ride to `to`, for the rider and `guests` more, under the distance its fare reaches.
-    class Quote(val total: Price?, val km: Int?, val notes: List<String>)
+    // A passenger linked to the account in Rav-Pass (a child, say), paid for with it on one ticket: the id their rides
+    // are paid with, their name and fare profiles. blocked: in debt or blacklisted, which HopOn's app shows greyed out
+    // and won't let be picked.
+    class Linked(val id: String, val name: String, val profiles: String, val blocked: Boolean)
+
+    fun linked(s: Session): List<Linked> =
+        send("GET", "passengers/me/links?link_type=sub_passenger", s)?.optJSONArray("data")?.objects().orEmpty().mapNotNull(::linkedOf)
+
+    // As HopOn's app reads one: the passenger's own id before the link's, the account's name before the person's, and
+    // their approved profiles when they have any, else the titles sent. One with no id at all isn't listed, where its
+    // app would send their name as the id.
+    internal fun linkedOf(p: JSONObject): Linked? {
+        val passenger = p.optJSONObject("passenger")
+        val id = passenger?.str("id") ?: p.str("passenger_id") ?: p.str("id") ?: return null
+        fun nameOf(o: JSONObject) = o.str("full_name") ?: o.str("name")
+            ?: listOfNotNull(o.str("first_name"), o.str("last_name")).joinToString(" ").trim().ifBlank { null }
+        val name = p.str("account_name") ?: nameOf(p) ?: passenger?.let(::nameOf) ?: p.str("passenger_id") ?: p.str("id").orEmpty()
+        fun profileName(o: JSONObject) = o.str("profile_name") ?: o.str("title") ?: o.str("name")
+        val all = listOfNotNull(passenger?.optJSONArray("profiles"), p.optJSONArray("profiles")).flatMap { it.objects() }
+            .distinctBy { it.str("entity_profile_id") ?: it.str("profile_id") ?: it.str("id") ?: profileName(it) }
+        val profiles = if (all.isNotEmpty())
+            all.filter { it.optJSONObject("status")?.str("name").equals("approved", true) }.mapNotNull(::profileName).joinToString(", ")
+        else p.optJSONArray("profile_titles")?.strings()?.joinToString(", ")?.ifBlank { null } ?: p.str("profile_title").orEmpty()
+        val status = p.str("status").orEmpty()
+        val blocked = listOf("in_debt", "has_debt", "is_blacklisted", "blacklisted").any { p.optBoolean(it) } ||
+            listOf("in_debt", "debt", "blacklisted").any { status.equals(it, true) }
+        return Linked(id, name, profiles, blocked)
+    }
+
+    // HopOn's price for a ride, under the distance its fare reaches: the total for everyone on the ticket, own: the
+    // rider's with the guests', related: each linked passenger's id and price.
+    class Quote(
+        val total: Price?, val km: Int?, val notes: List<String>, val own: Long? = null,
+        val related: List<Pair<Long, Long>> = emptyList(),
+    )
 
     private val local get() = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.ENGLISH).apply { timeZone = ISRAEL }
 
-    fun quote(s: Session, bus: Bus, to: Stop, guests: Int): Quote {
+    fun quote(s: Session, bus: Bus, to: Stop, guests: Int, related: List<String> = emptyList()): Quote {
         val body = JSONObject().put("route_id", bus.routeId).put("extra_passengers", guests).put("qr", bus.qr)
             .put("is_train", false).put("departure_stop_code", bus.from?.code).put("arrival_stop_code", to.code)
             .put("departure_date", local.format(java.util.Date()))
-        val d = send("POST", "services/mot_pricing/next_ride", s, body)?.optJSONObject("data") ?: throw IOException("no price")
-        return quoteOf(d, guests)
+        val d = send("POST", "services/mot_pricing/next_ride", s, body, related = related)?.optJSONObject("data") ?: throw IOException("no price")
+        return quoteOf(d)
     }
 
-    // As HopOn's app adds it up: the price for everyone when HopOn gives one, else the rider's own after discounts plus
-    // the guests' (each at the single price when no total for them comes).
-    internal fun quoteOf(d: JSONObject, guests: Int): Quote {
-        val all = d.optLongOrNull("total_for_all_passengers")
-        val mine = d.optLongOrNull("total_after_discount")
-        val others = d.optLongOrNull("extra_passengers_price") ?: d.optLongOrNull("single_price")?.let { it * guests }
-        val total = all ?: if (mine != null && (guests == 0 || others != null)) mine + (others ?: 0) else null
+    // As HopOn's app adds it up: the rider's price after discounts, the guests' (together, or each at the single
+    // price) and each linked passenger's own.
+    internal fun quoteOf(d: JSONObject): Quote {
+        fun priceOf(o: JSONObject) = o.optLongOrNull("total_after_discount") ?: o.optLongOrNull("total") ?: o.optLongOrNull("precise_total")
+        val guests = d.optLongOrNull("extra_passengers_after_discount") ?: d.optLongOrNull("extra_passengers")
+            ?: d.optLongOrNull("single_price")?.let { it * (d.optLongOrNull("extra_passengers_count") ?: 0) } ?: 0
+        val own = priceOf(d)?.plus(guests)
+        val linked = d.optJSONArray("related_passengers_pricing")?.objects().orEmpty()
+        val related = linked.mapNotNull { r -> r.str("passenger_id")?.toLongOrNull()?.let { id -> priceOf(r)?.let { id to it } } }
+        val total = own?.plus(linked.sumOf { priceOf(it) ?: 0 })
         val notes = d.optJSONArray("fare_information")?.objects().orEmpty()
             .mapNotNull { (it.str("text") ?: it.str("message") ?: it.str("benefit"))?.trim()?.ifBlank { null } }
-        return Quote(total?.let(::Price), d.optDoubleOrNull("radius")?.toInt(), notes)
+        return Quote(total?.let(::Price), d.optDoubleOrNull("radius")?.toInt(), notes, own, related)
     }
 
     // Whether others may ride along, as HopOn's app asks with every price it shows: a payment method on the account can
     // block them (block_extra_passengers). price: the ride's, sent as plan_price, or 1 as its app sends it at a station.
-    fun guestsAllowed(s: Session, qr: String, price: Price?): Boolean {
+    // With linked passengers picked its app asks passengers/me/links/payment_information instead, with the price split
+    // between the rider and each of them, and doesn't ask at all when the quote didn't price each of them.
+    fun guestsAllowed(s: Session, qr: String, price: Price?, quote: Quote? = null, related: List<String> = emptyList()): Boolean {
         val plan = (price?.agorot?.takeIf { it > 0 } ?: 1L).toDouble()
-        val d = send("GET", "passengers/me/payment_information?type=rav_pass&plan_price=$plan&qr=${enc(qr)}", s)
+        val d = if (related.isEmpty()) send("GET", "passengers/me/payment_information?type=rav_pass&plan_price=$plan&qr=${enc(qr)}", s)
+        else send("POST", "passengers/me/links/payment_information", s,
+            linkedPayment(qr, plan, quote, related) ?: throw IOException("no price for each linked passenger"))
         return d?.optJSONArray("data")?.objects().orEmpty().none { it.optBoolean("block_extra_passengers") }
+    }
+
+    // The split as HopOn's app makes it: the rider pays the plan price less the linked passengers' prices, or the
+    // quote's own price when theirs come to more.
+    internal fun linkedPayment(qr: String, plan: Double, q: Quote?, related: List<String>): JSONObject? {
+        val ids = related.mapNotNull { it.toLongOrNull() }.toSet()
+        val theirs = q?.related.orEmpty().filter { it.first in ids }
+        if (ids.isEmpty() || theirs.size != ids.size) return null
+        val sum = theirs.sumOf { it.second }
+        val planned = Math.round(plan)
+        val mine = if (planned > sum) planned - sum else q?.own ?: planned
+        return JSONObject().put("type", "rav_pass").put("qr", qr).put("plan_price", mine)
+            .put("related_passengers", JSONArray(theirs.map { JSONObject().put("passenger_id", it.first).put("plan_price", it.second) }))
     }
 
     // A validated ride: each passenger's code for the inspector, its reference (UTN), and until when it is valid and
@@ -484,11 +545,11 @@ object RavPass {
 
     // Pays for the bus whose code was scanned: the rider and `guests` riding along, all on one ticket. occasional: HopOn's
     // settings have its app count them as occasional passengers too (Settings.occasional).
-    fun buy(s: Session, qr: String, guests: Int, occasional: Boolean): Ticket {
+    fun buy(s: Session, qr: String, guests: Int, occasional: Boolean, related: List<String> = emptyList()): Ticket {
         val body = JSONObject().put("qr", qr)
         if (guests > 0) body.put("extra_passengers", guests).put("extra_passengers_count", guests)
         if (guests > 0 && occasional) body.put("occasional_passengers_count", guests)
-        val d = send("POST", "travel/bus", s, body)?.optJSONObject("data") ?: throw IOException("no ticket")
+        val d = send("POST", "travel/bus", s, body, related = related)?.optJSONObject("data") ?: throw IOException("no ticket")
         return ticketOf(d)
     }
 
@@ -519,44 +580,44 @@ object RavPass {
         return stationOf(send("GET", path, s)?.optJSONObject("data") ?: throw IOException("no station"))
     }
 
-    // The station a train ride ends at, the same way.
-    fun checkout(s: Session, at: Fix): Station {
+    // The station a train ride ends at, the same way. related: the linked passengers its entrance was paid for with.
+    fun checkout(s: Session, at: Fix, related: List<String> = emptyList()): Station {
         val path = "checkout?lat=${at.lat}&lon=${at.lon}&timestamp=${at.timeUtc}&accuracy=${at.accuracy}" +
             "&manual_stop_selection_supported=true"
-        return stationOf(send("GET", path, s)?.optJSONObject("data") ?: throw IOException("no station"))
+        return stationOf(send("GET", path, s, related = related)?.optJSONObject("data") ?: throw IOException("no station"))
     }
 
     // HopOn's price for a ride from the station, for the rider and `guests` more: the train's as a train, the rest as
     // HopOn's app asks it. to: where the ride ends, when known.
-    fun stationQuote(s: Session, kind: Kind, st: Station, to: String?, guests: Int): Quote {
+    fun stationQuote(s: Session, kind: Kind, st: Station, to: String?, guests: Int, related: List<String> = emptyList()): Quote {
         val body = JSONObject().put("qr", st.qr).put("departure_stop_code", st.stop?.code).put("arrival_stop_code", to)
             .put("extra_passengers", guests).put("is_train", kind == Kind.TRAIN).put("departure_date", local.format(java.util.Date()))
-        val d = send("POST", "services/mot_pricing/next_ride", s, body)?.optJSONObject("data") ?: throw IOException("no price")
-        return quoteOf(d, guests)
+        val d = send("POST", "services/mot_pricing/next_ride", s, body, related = related)?.optJSONObject("data") ?: throw IOException("no price")
+        return quoteOf(d)
     }
 
     // Pays the way in at the station: the ticket whose code opens the gate. Others ride along on light rail and the
     // like, not on the train, as in HopOn's app.
-    fun enter(s: Session, kind: Kind, st: Station, guests: Int): Ticket {
+    fun enter(s: Session, kind: Kind, st: Station, guests: Int, related: List<String> = emptyList()): Ticket {
         val body = JSONObject().put("qr", st.qr)
         if (kind == Kind.OTHER && guests > 0)
             body.put("extra_passengers", guests).put("extra_passengers_count", guests).put("occasional_passengers_count", guests)
-        return ticketOf(send("POST", "travel/train", s, body)?.optJSONObject("data") ?: throw IOException("no ticket"))
+        return ticketOf(send("POST", "travel/train", s, body, related = related)?.optJSONObject("data") ?: throw IOException("no ticket"))
     }
 
     // The price of the train ride from the entrance to the station checkout found, which HopOn's app asks for before
     // the exit ticket: it is what gives HopOn the ride's destination, and closing the ride fails without it.
-    fun exitQuote(s: Session, st: Station, entrance: Ticket): Quote {
+    fun exitQuote(s: Session, st: Station, entrance: Ticket, related: List<String> = emptyList()): Quote {
         val body = JSONObject().put("qr", st.qr).put("departure_stop_code", entrance.fromCode).put("arrival_stop_code", st.stop?.code)
             .put("extra_passengers", entrance.guests).put("is_train", true).put("departure_date", local.format(java.util.Date()))
-        val d = send("POST", "services/mot_pricing/next_ride", s, body)?.optJSONObject("data") ?: throw IOException("no price")
-        return quoteOf(d, entrance.guests)
+        val d = send("POST", "services/mot_pricing/next_ride", s, body, related = related)?.optJSONObject("data") ?: throw IOException("no price")
+        return quoteOf(d)
     }
 
     // The exit ticket for the entrance `rideId`, at the station checkout found, once exitQuote has priced it.
-    fun exit(s: Session, st: Station, rideId: Long): Ticket {
+    fun exit(s: Session, st: Station, rideId: Long, related: List<String> = emptyList()): Ticket {
         val body = JSONObject().put("qr", st.qr).put("id", rideId)
-        return ticketOf(send("PUT", "travel/train", s, body)?.optJSONObject("data") ?: throw IOException("no ticket"))
+        return ticketOf(send("PUT", "travel/train", s, body, related = related)?.optJSONObject("data") ?: throw IOException("no ticket"))
     }
 
     // The account's latest ride, or null before the first.

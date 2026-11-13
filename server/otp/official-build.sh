@@ -59,6 +59,8 @@ prepare() {
 build() {
   [ -s $B/israel-gtfs.zip ] || { echo "no timetable in $B"; return 1; }
   [ data/serve/graph.obj -nt "$1" ] || { echo "the main planner was not rebuilt from tonight's timetable"; return 1; }
+  exec 8>/tmp/kav-android-build.lock
+  flock -w 1800 8 || { echo "another build held the memory slot for 30 minutes"; return 1; }
   # Low priority and capped like rebuild.sh's build, and the first to go if memory runs out. The official planner steps
   # aside for it too; the EXIT trap starts it again.
   if [ "$(docker inspect -f '{{.State.Running}}' kav-otp-official 2>/dev/null)" = true ]; then
@@ -71,7 +73,7 @@ build() {
   docker run --rm --user 1000:1000 -v "$PWD:/otp" -w /otp python:3.12-slim python3 clocks.py $B
   cp build-config.json router-config.json $B/
   rm -f $B/graph.obj
-  docker run --rm --name kav-otp-official-build --user 1000:1000 --memory=15g --memory-swap=15g --cpus=4 \
+  docker run --rm --name kav-otp-official-build --user 1000:1000 --memory=15g --memory-swap=23g --cpus=4 \
     --cpu-shares=128 --oom-score-adj=1000 -e JAVA_OPTS=-Xmx14g -v "$PWD/$B:/var/opentripplanner" "$OTP" --build --save \
     > $B/build.log 2>&1 || { tail -20 $B/build.log; return 1; }
   mkdir -p data/serve-official

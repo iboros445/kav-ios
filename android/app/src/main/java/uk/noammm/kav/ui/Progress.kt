@@ -110,6 +110,92 @@ internal fun alongFrom(at: Pair<Double, Double>, path: List<Pair<Double, Double>
     return found?.takeIf { best <= nearest + 10.0 }
 }
 
+// How far along a road a place is, the first time the road passes it from `from` metres on (less 5, for a report that
+// went back a little). Where a road comes back by the same corner, a loop or a U-turn, it's the pass the way gets to
+// first, even when the place lies a few metres (slack) nearer the later one. When a stretch before `from` is clearly
+// nearer than any after it, that's where it is: the place went back, or `from` was another bus's.
+internal fun alongNext(at: Pair<Double, Double>, path: List<Pair<Double, Double>>, from: Double = 0.0, slack: Double = 15.0): Double {
+    if (path.size < 2) return 0.0
+    val f = Flat(at.first, at.second)
+    val n = path.lastIndex
+    val d = DoubleArray(n); val along = DoubleArray(n)
+    var walked = 0.0
+    for (i in 0 until n) {
+        val ax = f.x(path[i].second); val ay = f.y(path[i].first)
+        val bx = f.x(path[i + 1].second); val by = f.y(path[i + 1].first)
+        val dx = bx - ax; val dy = by - ay
+        val len = sqrt(dx * dx + dy * dy)
+        val seg = metres(path[i].first, path[i].second, path[i + 1].first, path[i + 1].second)
+        val t = if (len == 0.0) 0.0 else (((-ax) * dx + (-ay) * dy) / (len * len)).coerceIn(0.0, 1.0)
+        d[i] = sqrt((ax + dx * t).let { it * it } + (ay + dy * t).let { it * it })
+        along[i] = walked + seg * t
+        walked += seg
+    }
+    val ahead = (0 until n).firstOrNull { along[it] >= from - 5.0 } ?: 0
+    val nearest = d.min()
+    val start = if ((ahead until n).minOf { d[it] } > nearest + BACK_CLEAR_M) 0 else ahead
+    val best = (start until n).minOf { d[it] }
+    // The first run of stretches about as near as the nearest: one pass by the place.
+    var runBest = Double.MAX_VALUE; var runAlong = along[start]; var inRun = false
+    for (i in start until n) {
+        if (d[i] <= best + slack) {
+            inRun = true
+            if (d[i] < runBest) { runBest = d[i]; runAlong = along[i] }
+        } else if (inRun) break
+    }
+    return runAlong
+}
+
+// Clearly nearer: a stretch passed already beats every one ahead by this much.
+private const val BACK_CLEAR_M = 50.0
+
+// How far along a ride the rider or their bus is, going on from where it was last: the road passing the same corner
+// again later (line 37's loop) isn't taken for where they are now, which showed the loop ridden while it was still ahead.
+internal object RideAlong {
+    private val last = HashMap<String, Double>()
+
+    fun of(ride: Transit.Leg, at: Pair<Double, Double>): Double {
+        val key = "${ride.tripId}:${ride.fromStop}:${ride.toStop}"
+        synchronized(last) {
+            val a = alongNext(at, ride.shape, (last[key] ?: 0.0) - 30.0)
+            last[key] = a
+            return a
+        }
+    }
+}
+
+// Where a rider on a ride is shown: on its road, as a navigation app keeps a car on its road while the GPS wanders off
+// it, until the phone has been well off the road for a while, or far off at once, when the bus has gone another way and
+// the phone's own place shows (null).
+internal object RideRoad {
+    private val offSince = HashMap<String, Long>()
+
+    fun place(ride: Transit.Leg, fix: Fix): Fix? {
+        if (ride.shape.size < 2) return null
+        val key = "${ride.tripId}:${ride.fromStop}:${ride.toStop}"
+        val off = distanceToPath(fix.lat, fix.lon, ride.shape)
+        synchronized(offSince) {
+            if (off <= OFF_ROAD_M) offSince.remove(key)
+            else {
+                val since = offSince.getOrPut(key) { fix.at }
+                if (off > FAR_OFF_ROAD_M || fix.at - since >= OFF_ROAD_S) return null
+            }
+        }
+        val (lat, lon) = pointAlong(ride.shape, RideAlong.of(ride, fix.lat to fix.lon)) ?: return null
+        return fix.copy(lat = lat, lon = lon)
+    }
+}
+
+private const val OFF_ROAD_M = 80.0
+private const val FAR_OFF_ROAD_M = 300.0
+private const val OFF_ROAD_S = 10L
+
+// Each of a ride's stops along its road, in the ride's order: two stops at one corner of a loop each on their own pass.
+internal fun stopAlongs(ride: Transit.Leg, pointOf: (Int) -> Pair<Double, Double>?): List<Double?> {
+    var from = 0.0
+    return ride.stops.map { id -> pointOf(id)?.let { p -> alongNext(p, ride.shape, from).also { from = it } } }
+}
+
 // The stretch of a road between two places on it, the second ahead of the first the way the road goes, to glide a
 // vehicle along. Null when either is off the road, the second is behind, or the way round is far longer than the gap,
 // the road meeting the place again further on.
@@ -129,9 +215,12 @@ internal fun roadBetween(
     return out
 }
 
-internal fun bearingAlong(lat: Double, lon: Double, path: List<Pair<Double, Double>>, lookahead: Double = 40.0): Float? {
+internal fun bearingAlong(lat: Double, lon: Double, path: List<Pair<Double, Double>>, lookahead: Double = 40.0): Float? =
+    if (path.size < 2) null else bearingAt(path, alongPath(lat, lon, path), lookahead)
+
+// The way a road goes at metres `at` along it.
+internal fun bearingAt(path: List<Pair<Double, Double>>, at: Double, lookahead: Double = 40.0): Float? {
     if (path.size < 2) return null
-    val at = alongPath(lat, lon, path)
     val from = pointAlong(path, at) ?: return null
     val to = pointAlong(path, at + lookahead) ?: path.last()
     val back = pointAlong(path, max(0.0, at - lookahead)) ?: path.first()
@@ -226,16 +315,19 @@ private fun onStep(step: Step, r: Transit.Resolved, chosen: Map<Int, Int>, fix: 
 // `seen` is that place, or null once a ride has been assumed since; `waitForFix` holds the
 // timetable back while a first fix is still to come.
 // startNow: the rider wants a trip to move to its first walk at once (Settings), not at its time or once they move off.
-// fromHere: they began the trip where it starts, so moving off it starts the trip; one from elsewhere waits for its time.
+// fromHere: they began the trip where it starts, so moving off it starts the trip; one from elsewhere waits for its time,
+// unless they are on its first walk (firstWalk) as far past its start: they set out, whatever was known when they began it.
 private fun done(
     step: Step, r: Transit.Resolved, chosen: Map<Int, Int>, now: Long, live: Fix?, seen: Fix?, waitForFix: Boolean,
     walks: List<List<Pair<Double, Double>>>, startNow: Boolean = false, fromHere: Boolean = true,
+    firstWalk: List<Pair<Double, Double>> = emptyList(),
 ): Boolean {
     val target = stepTarget(step, r, chosen)
     val slack = live?.slack ?: 0.0
     return when (step) {
-        is Step.Start -> startNow || now >= step.time ||
-            (fromHere && live != null && target != null && live.distanceTo(target) > 60 + 3 * slack)
+        is Step.Start -> startNow || now >= step.time || live != null && target != null &&
+            live.distanceTo(target) > 60 + 3 * slack &&
+            (fromHere || distanceToPath(live.lat, live.lon, firstWalk) < ON_WALK_M + slack)
         is Step.Walk -> when {
             target == null -> now >= step.leg.arr
             live != null -> live.distanceTo(target) < 40 + slack
@@ -247,7 +339,10 @@ private fun done(
             if (live != null && target != null) {
                 val away = live.distanceTo(target)
                 val onRoute = distanceToPath(live.lat, live.lon, ride.shape) < 60 + slack
-                onRoute && away > 40 + 3 * slack && live.speed > 5f && offWalks(live, walks) ||
+                // Past the stop along the ride's road, not coming up to it: the bus that brings a rider to a change of
+                // lines at this stop is on that road and moving too, with the stop still ahead.
+                val past = alongPath(live.lat, live.lon, ride.shape) > 20 + 3 * slack
+                onRoute && past && away > 40 + 3 * slack && live.speed > 5f && offWalks(live, walks) ||
                     riding(live, ride.shape, 60.0, 150.0, walks)
             } else {
                 val dep = departureOf(step, r, chosen)
@@ -333,9 +428,10 @@ internal fun rideTimes(
     // How far along the ride each stop is, 0 to 1: by the road where the stop's place is known, else by its count. Kept
     // in the ride's order, as two stops at one corner can land either way round on the road.
     var furthest = 0.0
-    val share = ride.stops.mapIndexed { i, id ->
-        val p = (names[id] ?: r.stops[id])?.point
-        val f = if (length > 0 && p != null) (alongPath(p.first, p.second, shape) / length).coerceIn(0.0, 1.0)
+    val alongs = stopAlongs(ride) { (names[it] ?: r.stops[it])?.point }
+    val share = ride.stops.indices.map { i ->
+        val a = alongs[i]
+        val f = if (length > 0 && a != null) (a / length).coerceIn(0.0, 1.0)
             else if (n > 1) i.toDouble() / (n - 1) else 1.0
         f.coerceAtLeast(furthest).also { furthest = it }
     }
@@ -345,7 +441,7 @@ internal fun rideTimes(
     val known = ArrayList<Pair<Double, Long>>()
     ride.stops.indices.forEach { i -> live[i]?.let { known += share[i] to it } }
     fix?.takeIf { length > 0 && it.isFresh(now) && it.aboard(shape) }
-        ?.let { known += (alongPath(it.lat, it.lon, shape) / length) to now }
+        ?.let { known += (RideAlong.of(ride, it.lat to it.lon) / length) to now }
     val delay = r.delays[ride.tripId] ?: 0L
     return ride.stops.indices.map { i ->
         live[i]?.let { return@map StopTime(it, true) }
@@ -369,6 +465,25 @@ internal fun pathLength(path: List<Pair<Double, Double>>): Double {
     for (i in 0 until path.lastIndex) m += metres(path[i].first, path[i].second, path[i + 1].first, path[i + 1].second)
     return m
 }
+
+// The trip is over: at its destination once its last step is reached or its planned arrival has passed; near it a
+// while after that arrival (got there another way, or the destination pin is off the door); or long after it, wherever
+// the rider is. It then ends by itself (MainActivity, TripService).
+internal fun arrivedAtEnd(steps: List<Step>, current: Int, r: Transit.Resolved, chosen: Map<Int, Int>, now: Long, fix: Fix?, arr: Long): Boolean {
+    if (now > arr + OVER_S) return true
+    val live = fix?.takeIf { it.isFresh(now) } ?: return false
+    val end = steps.lastOrNull() as? Step.Arrive ?: return false
+    val away = stepTarget(end, r, chosen)?.let { live.distanceTo(it) } ?: return false
+    if (now > arr + LATE_S && away < NEAR_END_M) return true
+    return onStep(end, r, chosen, live, emptyList()) && (current == steps.lastIndex || now > arr)
+}
+
+private const val OVER_S = 2 * 3600L
+private const val LATE_S = 15 * 60L
+private const val NEAR_END_M = 250.0
+
+// How long a trip shows it has arrived before it ends by itself.
+internal const val ARRIVED_END_S = 20L
 
 internal fun journeyProgress(
     steps: List<Step>,
@@ -406,7 +521,8 @@ internal fun journeyProgress(
         val seen = fix?.takeIf { f ->
             (0 until i).none { j -> (steps[j] as? Step.Ride)?.let { f.at < rideOf(it, chosen).arr - 300 } == true }
         }
-        if (!done(steps[i], r, chosen, now, live, seen, waitForFix, walks(i), startNow, fromHere)) break
+        if (!done(steps[i], r, chosen, now, live, seen, waitForFix, walks(i), startNow, fromHere,
+                (steps.getOrNull(i + 1) as? Step.Walk)?.leg?.shape.orEmpty())) break
         i++
     }
     return i
@@ -449,13 +565,12 @@ internal fun stopsProgress(
             else -> null
         }
         if (at != null) {
-            val along = alongPath(at.first, at.second, shape)
+            val along = RideAlong.of(ride, at)
             var passed = 0
             var prev = 0.0
             var next = Double.NaN
-            for (id in ride.stops) {
-                val p = stops[id]?.point ?: continue
-                val a = alongPath(p.first, p.second, shape)
+            for (a in stopAlongs(ride) { stops[it]?.point }) {
+                if (a == null) continue
                 if (a <= along) { passed++; prev = a } else { next = a; break }
             }
             val frac = if (!next.isNaN() && next > prev) ((along - prev) / (next - prev)).toFloat().coerceIn(0f, 1f) else 0f

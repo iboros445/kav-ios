@@ -853,6 +853,13 @@ def clean(raw, out, entrances=None, extra=None, railway=None):
                 r.append("")
             trips[0][-1] = "bikes_allowed"
         t_id, t_service = trips[0].index("trip_id"), trips[0].index("service_id")
+        # The feed now and then lists a trip twice, under two services (36 on 9 Nov 2026), and the planner refuses a feed
+        # with a trip twice: the first is kept.
+        kept = {}
+        for r in trips[1:]:
+            kept.setdefault(r[t_id], r)
+        repeated = len(trips) - 1 - len(kept)
+        trips[1:] = kept.values()
         for r in trips[1:]:
             r[t_service] = moved.get(r[t_id], r[t_service])
         trips += in_order(trips[0], fixed["trips.txt"])
@@ -906,7 +913,7 @@ def clean(raw, out, entrances=None, extra=None, railway=None):
     os.replace(out + ".part", out)
     copies = sum(1 for r in fixed["trips.txt"] if r["trip_id"].split("~rail")[0] in moved)
     return {"stations turned into stops": len(used), "station entrances": sum(1 for r in added if r[kind] == "2"),
-            "trips put in order": len({trip for trip, _ in tangled}),
+            "trips put in order": len({trip for trip, _ in tangled}), "trips listed twice": repeated,
             "Israel Railways' days": sorted(d.isoformat() for d in railway or {}),
             "train runs put right": copies, "trains added": len(fixed["trips.txt"]) - copies}
 

@@ -1,5 +1,7 @@
 package uk.noammm.kav.ui
 
+import uk.noammm.kav.data.RiderProxy
+
 import android.annotation.SuppressLint
 import android.content.Intent
 import android.content.Context
@@ -90,7 +92,7 @@ internal object StreetPano {
 
     // Null when Google has none within radius metres; throws when Google couldn't be asked.
     fun near(lat: Double, lon: Double, radius: Double): Pano? {
-        val c = (URL(SEARCH).openConnection() as HttpURLConnection).apply {
+        val c = (RiderProxy.open(URL(SEARCH)) as HttpURLConnection).apply {
             connectTimeout = 8000; readTimeout = 8000
             requestMethod = "POST"; doOutput = true
             setRequestProperty("Content-Type", "application/json+protobuf")
@@ -438,6 +440,10 @@ private fun StreetWebView(page: String, ground: Int, onReady: () -> Unit) {
                 settings.setSupportMultipleWindows(false)
                 android.webkit.CookieManager.getInstance().setAcceptThirdPartyCookies(this, false)
                 webViewClient = object : WebViewClient() {
+                    // The rider's proxy asking for its login (RiderProxy).
+                    override fun onReceivedHttpAuthRequest(view: android.webkit.WebView, handler: android.webkit.HttpAuthHandler, host: String?, realm: String?) {
+                        if (!uk.noammm.kav.data.RiderProxy.answer(handler, host)) super.onReceivedHttpAuthRequest(view, handler, host, realm)
+                    }
                     override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
                         if (!request.isForMainFrame) return false
                         runCatching {
@@ -474,18 +480,18 @@ private fun StreetWebView(page: String, ground: Int, onReady: () -> Unit) {
 @Composable
 private fun StopLookMap(shown: StopLook, pano: StreetPano.Pano?) {
     val stop = shown.look.target ?: shown.look.at
-    val geometry = remember(shown, pano, K.look) {
+    val geometry = remember(shown, pano, MapInk.bg, MapInk.muted, MapInk.accent) {
         val dots = ArrayList<MapDot>()
         val lines = ArrayList<MapLine>()
         // Where Street View stands, and which way it looks.
         if (pano != null) {
             val heading = facing(pano.lat to pano.lon, shown.look)
-            if (heading != null) lines += MapLine(listOf(pano.lat to pano.lon, offsetBy(pano.lat to pano.lon, heading.toFloat(), 14.0)), K.muted, 2.5f)
-            dots += MapDot(pano.lat, pano.lon, K.bg, 6f)
-            dots += MapDot(pano.lat, pano.lon, K.muted, 4f)
+            if (heading != null) lines += MapLine(listOf(pano.lat to pano.lon, offsetBy(pano.lat to pano.lon, heading.toFloat(), 14.0)), MapInk.muted, 2.5f)
+            dots += MapDot(pano.lat, pano.lon, MapInk.bg, 6f)
+            dots += MapDot(pano.lat, pano.lon, MapInk.muted, 4f)
         }
-        dots += MapDot(stop.first, stop.second, K.bg, 10f)
-        dots += MapDot(stop.first, stop.second, androidx.compose.ui.graphics.Color.Transparent, 6.5f, K.accent, 2.6f)
+        dots += MapDot(stop.first, stop.second, MapInk.bg, 10f)
+        dots += MapDot(stop.first, stop.second, androidx.compose.ui.graphics.Color.Transparent, 6.5f, MapInk.accent, 2.6f)
         MapGeometry(lines = lines, dots = dots)
     }
     TileMap(

@@ -700,7 +700,8 @@ def hand_over(made, buses, now):
         in_order_ahead(stops, now)
     path = os.path.join(OUT, "now.json")
     with open(path + ".part", "w") as f:
-        json.dump({"at": int(now), "runs": runs}, f, separators=(",", ":"))
+        # The predictions file, version 1 (server/PREDICTOR.md): what live.py reads, and any predictor of one's own writes.
+        json.dump({"version": 1, "at": int(now), "runs": runs}, f, separators=(",", ":"))
     os.replace(path + ".part", path)
     return len(runs)
 
@@ -731,19 +732,61 @@ def peak_gb():
     return round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1e6, 2)
 
 
+PACK_VERSION = 1  # the model pack format this reads (server/PREDICTOR.md)
+INPUTS = ("live3", "live5")  # the feature sets this feeds a model: inputs.py, and motion.py for live5
+
+
+class PackRefused(ValueError):
+    """A model pack this predictor can't run, and why, in words for the owner's dashboard and the app's status."""
+
+
+def pack_paths(folder, model=None, fallback=None, rail=None):
+    """The model's files: by the pack's manifest.json where it has one (model pack v1), else as MODEL, MODEL_FALLBACK and
+    RAIL name them (a pack from before manifests). A pack of a newer format, for inputs this doesn't make, or naming
+    files it hasn't got is refused, and the ministry's times stand meanwhile."""
+    model, fallback, rail = model or MODEL, MODEL_FALLBACK if fallback is None else fallback, rail or RAIL
+    path = os.path.join(folder, "manifest.json")
+    if not os.path.exists(path):
+        return model, fallback, rail, None
+    with open(path, encoding="utf-8") as f:
+        m = json.load(f)
+    if m.get("pack") != PACK_VERSION:
+        raise PackRefused("model pack format %r; this predictor reads %d" % (m.get("pack"), PACK_VERSION))
+    if m.get("inputs") not in INPUTS:
+        raise PackRefused("model pack for inputs %r; this predictor makes %s" % (m.get("inputs"), ", ".join(INPUTS)))
+    files = m.get("files") or {}
+    at = lambda name: os.path.join(folder, files[name]) if files.get(name) else ""
+    if not at("bus") or not os.path.exists(at("bus")):
+        raise PackRefused("model pack has no bus model (files.bus)")
+    for name in ("bus_fallback", "rail"):
+        if at(name) and not os.path.exists(at(name)):
+            raise PackRefused("model pack names %s, which isn't in it" % files[name])
+    return at("bus"), at("bus_fallback"), at("rail") or os.path.join(folder, "rail"), "%s %s" % (m.get("name", "?"), m.get("version", "?"))
+
+
 def main():
     os.makedirs(OUT, exist_ok=True)
-    model = Model(MODEL, Model(MODEL_FALLBACK) if MODEL_FALLBACK else None)
-    rail = {a: RailModel(RAIL, a) for a in OPERATORS if os.path.exists(os.path.join(RAIL, "gbdt-%s.txt" % a))}
+    try:
+        model_path, fallback_path, rail_path, pack = pack_paths(os.path.dirname(MODEL))
+    except (PackRefused, OSError, ValueError) as e:
+        # Said where the owner and the app see it, every round, and nothing predicted: the ministry's times stand.
+        log("model pack refused:", e)
+        while True:
+            with open(os.path.join(OUT, "status.json.part"), "w") as f:
+                json.dump({"version": 1, "at": int(time.time()), "error": "model pack: %s" % e}, f)
+            os.replace(os.path.join(OUT, "status.json.part"), os.path.join(OUT, "status.json"))
+            time.sleep(EVERY)
+    model = Model(model_path, Model(fallback_path) if fallback_path else None)
+    rail = {a: RailModel(rail_path, a) for a in OPERATORS if os.path.exists(os.path.join(rail_path, "gbdt-%s.txt" % a))}
     days, recorded, logged = {}, Recorded(), 0
     motion = {}  # each bus's recent places, for its speed (with_speed)
     special = set()  # the special days listed so far (special_days()); the list only grows
     tracks = V.Tracks()  # and a minute apart, for a motion model's inputs
-    log("model", MODEL, len(model.routes), "routes", len(model.codes), "stops", "motion" if model.motion else "", MODEL_FALLBACK,
-        "; rail models", sorted(rail))
+    log("model", pack or model_path, len(model.routes), "routes", len(model.codes), "stops", "motion" if model.motion else "",
+        fallback_path, "; rail models", sorted(rail))
     while True:
         start = time.time()
-        status = {"at": int(start)}
+        status = {"version": 1, "at": int(start)}
         try:
             active = service_days(start)
             for day in active:

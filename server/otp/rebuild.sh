@@ -37,7 +37,21 @@ docker run --rm --user 1000:1000 --memory=4g -v "$PWD:/otp" -v "$PWD/../history:
 # The night the clocks change, the trips before it go where the ministry runs them.
 docker run --rm --user 1000:1000 -v "$PWD:/otp" -w /otp python:3.12-slim python3 clocks.py data/build
 cp build-config.json router-config.json data/build/
+# The trains' roads, which the ministry's feed has none of, matched to OpenStreetMap's tracks for the live map. A failure
+# keeps the last ones.
+mkdir -p realtime
+if docker run --rm --user 1000:1000 --memory=2g -v "$PWD:/otp" -w /otp python:3.12-slim python3 rail_shapes.py cut data/build &&
+   rm -rf data/build/gtfs-out &&
+   docker run --rm --user 1000:1000 --memory=4g -v "$PWD/data/build:/w" -w /w ghcr.io/ad-freiburg/pfaedle:latest \
+     -x israel.osm.pbf -m rail -i rail.zip > data/build/pfaedle.log 2>&1 &&
+   docker run --rm --user 1000:1000 --memory=2g -v "$PWD:/otp" -w /otp python:3.12-slim python3 rail_shapes.py write data/build realtime; then :
+else
+  echo "rail shapes failing, the last ones kept"
+fi
 rm -f data/build/graph.obj
+# Share the Android build's memory slot while the graph is built.
+exec 8>/tmp/kav-android-build.lock
+flock -w 1800 8 || { echo "another build held the memory slot for 30 minutes"; exit 1; }
 # The official planner steps aside while the graph builds, which doesn't fit beside it. It serves again however this
 # ends, unless official-build.sh is waiting to build it next (it holds its lock then) and starts it itself.
 if [ "$(docker inspect -f '{{.State.Running}}' kav-otp-official 2>/dev/null)" = true ]; then
@@ -46,7 +60,7 @@ if [ "$(docker inspect -f '{{.State.Running}}' kav-otp-official 2>/dev/null)" = 
 fi
 # Low priority and capped: the server's other services come first. The timetable with the predicted bus times needs more
 # than 9 GB; 14 builds it in about 12 minutes.
-docker run --rm --user 1000:1000 --memory=15g --memory-swap=15g --cpus=4 --cpu-shares=128 -e JAVA_OPTS=-Xmx14g \
+docker run --rm --user 1000:1000 --memory=15g --memory-swap=23g --cpus=4 --cpu-shares=128 -e JAVA_OPTS=-Xmx14g \
   -v "$PWD/data/build:/var/opentripplanner" "$OTP" --build --save > data/build/build.log 2>&1 ||
   { tail -20 data/build/build.log; exit 1; }
 cp router-config.json data/serve/

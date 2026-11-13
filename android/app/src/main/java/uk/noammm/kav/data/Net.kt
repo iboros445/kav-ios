@@ -56,11 +56,11 @@ class Net private constructor() {
     lateinit var tripStart: IntArray; private set
     // Bit 0 is Sunday. Bundles older than KAV5 hold one day, so their trips run every day.
     lateinit var tripDays: IntArray; private set
-    lateinit var stStop: IntArray; private set
+    lateinit var stStop: StopOfTime; private set
     lateinit var stDep: IntArray; private set
 
-    lateinit var cST: IntArray; private set
-
+    // Each stop's departures: dConn[dStart[s] until dStart[s + 1]] are its stop times that aren't their trip's last, as
+    // indexes into stStop and stDep, by departure and at the same second by that index.
     lateinit var dStart: IntArray; private set
     lateinit var dConn: IntArray; private set
 
@@ -118,7 +118,7 @@ class Net private constructor() {
         var nearest = ""
         var gap = Int.MAX_VALUE
         for (s in stops) for (i in dStart[s] until dStart[s + 1]) {
-            val st = cST[dConn[i]]
+            val st = dConn[i]
             if (rShort[tripRoute[tripOf(st)]] != number) continue
             seen.add(platform[s])
             val off = Math.abs(Math.floorMod(stDep[st] - second + 43_200, 86_400) - 43_200)
@@ -174,8 +174,18 @@ class Net private constructor() {
 
     private lateinit var b: ByteArray
     private var p = 0
+    // The bundle still being unpacked into b beside the reading of it (Unpacking), and how far b is known to be filled:
+    // reading waits there for more. All of it, with nothing unpacking.
+    private var unpacking: Unpacking? = null
+    private var filled = Int.MAX_VALUE
+
+    private fun await(upTo: Int) {
+        val u = unpacking ?: return
+        filled = u.await(upTo)
+    }
 
     private fun vi(): Int {
+        if (p + 5 > filled) await(p + 5)
         var sh = 0; var r = 0; var x: Int
         do {
             x = b[p++].toInt() and 0xFF
@@ -187,13 +197,16 @@ class Net private constructor() {
 
     private fun vs(): String {
         val n = vi()
+        if (p + n > filled) await(p + n)
         val s = String(b, p, n, StandardCharsets.UTF_8)
         p += n
         return s
     }
 
-    private fun parse(buf: ByteArray) {
+    private fun parse(buf: ByteArray, from: Unpacking? = null) {
         b = buf; p = 0
+        unpacking = from; filled = if (from == null) Int.MAX_VALUE else 0
+        await(4)
         val magic = String(b, 0, 4, StandardCharsets.US_ASCII)
         if (magic != "KAV3" && magic != "KAV4" && magic != "KAV5" && magic != "KAV6") throw IllegalArgumentException("bad bundle: $magic")
         val v4 = magic != "KAV3"
@@ -226,7 +239,7 @@ class Net private constructor() {
         tripRoute = IntArray(nT); tripStart = IntArray(nT + 1)
         tripDays = IntArray(nT) { 0x7f }
         if (v5) {
-            stStop = IntArray(nST); stDep = IntArray(nST)
+            val stops = StopOfTime(nST, nS); val deps = IntArray(nST)
             var k = 0
             for (t in 0 until nT) {
                 tripRoute[t] = vi(); tripDays[t] = vi()
@@ -235,11 +248,12 @@ class Net private constructor() {
                 tripStart[t] = k
                 for (j in 0 until n) {
                     val d = pt + vi() + vi(); val s = ps + vi()
-                    stDep[k] = d; stStop[k] = s; k++
+                    deps[k] = d; stops[k] = s; k++
                     pt = d; ps = s
                 }
             }
             tripStart[nT] = k
+            stStop = stops; stDep = deps
         } else {
             val ss = IntVec(1 shl 21); val sd = IntVec(1 shl 21)
             for (t in 0 until nT) {
@@ -254,7 +268,7 @@ class Net private constructor() {
                 }
             }
             tripStart[nT] = ss.n
-            stStop = ss.trimmed(); stDep = sd.trimmed()
+            stStop = StopOfTime(ss.n, nS).also { for (i in 0 until ss.n) it[i] = ss.a[i] }; stDep = sd.trimmed()
         }
 
         platform = Array(nS) { "" }
@@ -280,73 +294,150 @@ class Net private constructor() {
         hayEn = if (nameEn.isEmpty()) emptyArray()
             else Array(nS) { (nameEn[it] + " " + cityEn.getOrElse(cityOf[it]) { "" }).trim().lowercase() }
         b = ByteArray(0)
-        buildConnections()
+        unpacking = null; filled = Int.MAX_VALUE
     }
 
-    // A downloaded week without English names (no "en" section) takes them from the week Kav shipped with: a stop's by
-    // its code and Hebrew name, else by the Hebrew name alone, and a town's by its Hebrew name. False when there was
-    // nothing to take.
-    fun borrowEnglish(from: Net): Boolean {
-        if (nameEn.isNotEmpty() || from.nameEn.isEmpty()) return false
-        val exact = HashMap<String, String>()
-        val byName = HashMap<String, String>()
-        for (s in 0 until from.nStops) {
-            val en = from.nameEn[s]
-            if (en.isEmpty()) continue
-            exact.putIfAbsent("${from.code[s]}|${from.name[s]}", en)
-            byName.putIfAbsent(from.name[s], en)
-        }
-        val towns = HashMap<String, String>()
-        for (c in from.city.indices) from.cityEn.getOrNull(c)?.takeIf { it.isNotEmpty() }?.let { towns.putIfAbsent(from.city[c], it) }
-        nameEn = Array(nStops) { exact["${code[it]}|${name[it]}"] ?: byName[name[it]] ?: "" }
-        cityEn = Array(city.size) { towns[city[it]] ?: "" }
-        moreEn = from.moreEn
-        hayEn = Array(nStops) { (nameEn[it] + " " + cityEn.getOrElse(cityOf[it]) { "" }).trim().lowercase() }
-        return true
-    }
-
+    // The stop times go to their stops as they come in the file, which reads it once from end to end, and each stop's
+    // few are then put in order. Sorting them all by time first, then dealing them out, jumped about the week's 6.7
+    // million stop times three times over and took most of the time the timetable needs to open.
     private fun buildConnections() {
         val nT = tripRoute.size
-        var m = 0; var maxT = 0
+        val nS = lat.size
+        val stop = stStop; val dep = stDep; val start = tripStart
+        dStart = IntArray(nS + 1)
         for (t in 0 until nT) {
-            val a = tripStart[t]; val z = tripStart[t + 1] - 1
-            if (z > a) m += z - a
-            for (i in a until z) if (stDep[i] > maxT) maxT = stDep[i]
+            var k = start[t]; val z = start[t + 1] - 1
+            while (k < z) { dStart[stop[k] + 1]++; k++ }
         }
-        val span = maxT + 2
-        val cnt = IntArray(span + 2)
-        for (t in 0 until nT) {
-            var i = tripStart[t]; val z = tripStart[t + 1] - 1
-            while (i < z) { cnt[stDep[i] + 1]++; i++ }
+        var most = 0
+        for (s in 0 until nS) {
+            if (dStart[s + 1] > most) most = dStart[s + 1]
+            dStart[s + 1] += dStart[s]
         }
-        for (i in 0..span) cnt[i + 1] += cnt[i]
-
-        cST = IntArray(m)
+        val m = dStart[nS]
+        val fill = dStart.copyOf(nS)
+        val conn = IntArray(m); val at = IntArray(m)
         for (t in 0 until nT) {
-            var i = tripStart[t]; val z = tripStart[t + 1] - 1
-            while (i < z) {
-                cST[cnt[stDep[i]]++] = i
-                i++
+            var k = start[t]; val z = start[t + 1] - 1
+            while (k < z) {
+                val i = fill[stop[k]]++
+                conn[i] = k; at[i] = dep[k]
+                k++
             }
         }
+        // Each stop's are its own to put in order, so the stops are shared out between a few threads, about as many
+        // stop times to each.
+        val threads = minOf(4, Runtime.getRuntime().availableProcessors()).coerceAtLeast(1)
+        val cuts = IntArray(threads + 1)
+        var s = 0
+        for (w in 1 until threads) {
+            while (s < nS && dStart[s] < m.toLong() * w / threads) s++
+            cuts[w] = s
+        }
+        cuts[threads] = nS
+        val starts = dStart
+        val sorting = (0 until threads).map { w ->
+            kotlin.concurrent.thread(name = "kav-week-$w", isDaemon = true) { sortDepartures(starts, conn, at, cuts[w], cuts[w + 1], most) }
+        }
+        sorting.forEach { it.join() }
+        dConn = conn
+    }
 
-        val nS = lat.size
-        dStart = IntArray(nS + 1)
-        val deg = IntArray(nS)
-        for (i in 0 until m) deg[stStop[cST[i]]]++
-        for (s in 0 until nS) dStart[s + 1] = dStart[s] + deg[s]
-        val fill = dStart.copyOf(nS)
-        dConn = IntArray(m)
-        for (i in 0 until m) dConn[fill[stStop[cST[i]]]++] = i
+    // A stop time's departure above its index: in order as numbers, they're in order by departure, then by index.
+    private fun sortDepartures(starts: IntArray, conn: IntArray, at: IntArray, from: Int, to: Int, most: Int) {
+        val keys = LongArray(most)
+        for (s in from until to) {
+            val a = starts[s]; val n = starts[s + 1] - a
+            if (n < 2) continue
+            var sorted = true
+            for (i in 1 until n) if (at[a + i] < at[a + i - 1]) { sorted = false; break }
+            if (sorted) continue
+            for (i in 0 until n) keys[i] = (at[a + i].toLong() shl 32) or conn[a + i].toLong()
+            java.util.Arrays.sort(keys, 0, n)
+            for (i in 0 until n) conn[a + i] = keys[i].toInt()
+        }
     }
 
     companion object {
-        fun read(input: InputStream): Net {
-            val raw = input.buffered().use { it.readBytes() }
-            val bytes = if (raw.size > 2 && raw[0] == 0x1f.toByte() && raw[1] == 0x8b.toByte())
-                GZIPInputStream(raw.inputStream(), 1 shl 16).use { it.readBytes() }
-            else raw
-            return Net().also { it.parse(bytes) }
+        fun read(input: InputStream): Net = read(input.buffered().use { it.readBytes() })
+
+        // A gzip file ends with its size unpacked, so it's unpacked straight into an array of that size, on a thread of
+        // its own while this one reads what's unpacked so far, rather than one after the other. The bundle is let go
+        // before the stops' departures are worked out, which need as much room again.
+        fun read(file: ByteArray): Net = parsed(file).also { it.buildConnections() }
+
+        // Returned without the unpacked bundle, which nothing holds once this ends.
+        private fun parsed(file: ByteArray): Net {
+            val net = Net()
+            val size = unpackedSize(file)
+            if (size > 0) {
+                val u = Unpacking(file, size)
+                net.parse(u.out, u)
+                u.finish()
+            } else net.parse(file)
+            return net
         }
+
+        // What a gzip file says it unpacks to, 0 for a bundle that isn't gzipped.
+        private fun unpackedSize(file: ByteArray): Int {
+            if (file.size < 18 || file[0] != 0x1f.toByte() || file[1] != 0x8b.toByte()) return 0
+            var size = 0
+            for (i in 1..4) size = (size shl 8) or (file[file.size - i].toInt() and 0xff)
+            if (size !in 1..(1 shl 29)) throw java.io.IOException("the bundle's file says it unpacks to $size bytes")
+            return size
+        }
+    }
+
+    // A gzip file unpacking into out on a thread of its own. await(upTo) holds the reader until that much is in, or all
+    // there is, and says how far it's filled: everything once it's all in.
+    private class Unpacking(file: ByteArray, size: Int) {
+        val out = ByteArray(size)
+        private val lock = Object()
+        private var filled = 0
+        private var done = false
+        private var failed: Throwable? = null
+        private val thread = kotlin.concurrent.thread(name = "kav-week-unpack", isDaemon = true) {
+            try {
+                GZIPInputStream(file.inputStream(), 1 shl 16).use { z ->
+                    var at = 0
+                    while (at < size) {
+                        val got = z.read(out, at, minOf(size - at, 1 shl 17))
+                        if (got < 0) break
+                        at += got
+                        synchronized(lock) { filled = at; lock.notifyAll() }
+                    }
+                    // gzip checks the size itself once it's read to its end.
+                    if (at != size || z.read() >= 0) throw java.io.IOException("the bundle isn't the size its file says")
+                }
+            } catch (e: Throwable) {
+                synchronized(lock) { failed = e }
+            } finally {
+                synchronized(lock) { done = true; lock.notifyAll() }
+            }
+        }
+
+        fun await(upTo: Int): Int = synchronized(lock) {
+            while (filled < upTo && !done) lock.wait()
+            failed?.let { throw java.io.IOException("the bundle didn't unpack", it) }
+            if (done) Int.MAX_VALUE else filled
+        }
+
+        // The whole file unpacked as it said it would, or the error.
+        fun finish() {
+            thread.join()
+            synchronized(lock) { failed }?.let { throw java.io.IOException("the bundle didn't unpack", it) }
+        }
+    }
+}
+
+// The stop of each stop time. There are far fewer than 65,536 stops, so each takes two bytes rather than four, 13 MB
+// less for the week; a bundle with more stops than that keeps four.
+class StopOfTime internal constructor(size: Int, stops: Int) {
+    private val two: CharArray? = if (stops <= 65536) CharArray(size) else null
+    private val four: IntArray? = if (stops <= 65536) null else IntArray(size)
+    val size: Int get() = two?.size ?: four!!.size
+    operator fun get(i: Int): Int = if (two != null) two[i].code else four!![i]
+    internal operator fun set(i: Int, stop: Int) {
+        if (two != null) two[i] = stop.toChar() else four!![i] = stop
     }
 }
