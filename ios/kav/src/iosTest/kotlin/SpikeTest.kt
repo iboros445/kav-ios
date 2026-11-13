@@ -23,6 +23,9 @@ class SpikeTest {
         assertEquals("%2B", String.format("%%2B"))
         assertEquals("b a", "%2\$s %1\$s".format("a", "b"))
         assertEquals("  7|7  |007", String.format("%3d|%-3d|%03d", 7, 7, 7))
+        assertEquals("ff", "%02x".format((-1).toByte()))
+        assertEquals("05", "%02x".format(5.toByte()))
+        assertEquals("80", "%02x".format((-128).toByte()))
     }
 
     @Test fun systemAndMath() {

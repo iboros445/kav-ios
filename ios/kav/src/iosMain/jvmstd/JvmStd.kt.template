@@ -312,9 +312,9 @@ internal object KavFormat {
                         'd' -> signed(toLongValue(arg), plus, group)
                         'f' -> fixed((arg as Number).toDouble(), if (prec < 0) 6 else prec, plus, group)
                         's' -> arg.toString().let { if (prec >= 0 && it.length > prec) it.substring(0, prec) else it }
-                        'S' -> arg.toString().uppercase()
-                        'x' -> toLongValue(arg).toULong().toString(16)
-                        'X' -> toLongValue(arg).toULong().toString(16).uppercase()
+                        'S' -> arg.toString().stdlibUppercase()
+                        'x' -> toHexValue(arg)
+                        'X' -> toHexValue(arg).stdlibUppercase()
                         else -> throw IllegalArgumentException("Unsupported conversion %$conv in: $fmt")
                     }
                 }
@@ -335,8 +335,21 @@ internal object KavFormat {
         return out.toString()
     }
 
+    private fun toHexValue(a: Any?): String = when (a) {
+        is Byte -> (a.toInt() and 0xFF).toString(16)
+        is Short -> (a.toInt() and 0xFFFF).toString(16)
+        is Int -> a.toUInt().toString(16)
+        is Long -> a.toULong().toString(16)
+        is UByte -> a.toString(16)
+        is UShort -> a.toString(16)
+        is UInt -> a.toString(16)
+        is ULong -> a.toString(16)
+        else -> throw IllegalArgumentException("%x needs an integer, got ${a?.let { it::class.simpleName }}")
+    }
+
     private fun toLongValue(a: Any?): Long = when (a) {
         is Long -> a; is Int -> a.toLong(); is Short -> a.toLong(); is Byte -> a.toLong()
+        is ULong -> a.toLong(); is UInt -> a.toLong(); is UShort -> a.toLong(); is UByte -> a.toLong()
         else -> throw IllegalArgumentException("%d needs an integer, got ${a?.let { it::class.simpleName }}")
     }
 
