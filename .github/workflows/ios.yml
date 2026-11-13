@@ -28,27 +28,16 @@ jobs:
       run:
         working-directory: ios
     steps:
+      # clean: false keeps ios/**/build and .gradle between runs on this self-hosted runner (incremental compiles)
       - uses: actions/checkout@v4
+        with:
+          clean: false
 
+      # no system JDK on this Mac; the runner's tool cache keeps it after the first download
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '21'
-
-      - uses: gradle/actions/setup-gradle@v4
-
-      # ~/.konan holds the toolchain and, after a debug link, the per-library caches (Compose, Material, icons...).
-      # Building those caches takes ~6 minutes, so the key follows every Gradle file and the cache is saved right
-      # after the link (below) instead of at the end of the job. An exact hit skips the save.
-      - name: Restore the Kotlin/Native toolchain and library caches
-        id: konan
-        uses: actions/cache/restore@v4
-        with:
-          path: ~/.konan
-          key: konan-v2-${{ runner.os }}-${{ hashFiles('ios/**/*.gradle.kts', 'ios/gradle.properties', 'ios/gradle/wrapper/*.properties') }}
-          restore-keys: |
-            konan-v2-${{ runner.os }}-
-            konan-${{ runner.os }}-
 
       # CoreLocation's module map autolinks the private framework `_LocationEssentials`, which the Xcode 16 SDKs no longer
       # ship as a file (the simulator runtime still provides it). The linker only needs a stub to resolve the name.
@@ -121,14 +110,6 @@ jobs:
         continue-on-error: true
         run: grep -vE '^\s*$' kavkit/build/bin/iosArm64/${{ steps.fw.outputs.variant }}/KavKit.framework/Headers/KavKit.h
 
-      - name: Save the Kotlin/Native toolchain and library caches
-        if: steps.konan.outputs.cache-hit != 'true'
-        continue-on-error: true
-        uses: actions/cache/save@v4
-        with:
-          path: ~/.konan
-          key: ${{ steps.konan.outputs.cache-primary-key }}
-
       - name: App icon from .github/icon.png
         working-directory: .
         run: |
@@ -139,7 +120,7 @@ jobs:
 
       - name: Generate the Xcode project
         run: |
-          brew install xcodegen
+          command -v xcodegen >/dev/null || brew install xcodegen
           xcodegen generate --spec app/project.yml --project app
 
       - name: Build the unsigned app
