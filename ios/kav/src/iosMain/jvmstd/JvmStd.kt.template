@@ -13,6 +13,9 @@ import kotlinx.coroutines.IO as CoroutinesIO
 import kotlin.math.abs
 import kotlin.math.floor
 import kotlin.math.pow
+import kotlin.text.lowercase as stdlibLowercase
+import kotlin.text.uppercase as stdlibUppercase
+import kotlin.text.titlecase as stdlibTitlecase
 import kotlin.time.Clock
 import kotlin.time.TimeSource
 import kotlin.time.ExperimentalTime
@@ -53,7 +56,7 @@ fun <K, V> Map<out K, V>.toSortedMap(comparator: Comparator<in K>): Map<K, V> =
     entries.sortedWith { a, b -> comparator.compare(a.key, b.key) }.associateTo(kotlin.collections.LinkedHashMap()) { it.key to it.value }
 // Char.titlecase(Locale): the locale only matters for Turkish dotted i, which Kav never titlecases.
 @Suppress("UNUSED_PARAMETER")
-fun Char.titlecase(locale: Locale): String = titlecase()
+fun Char.titlecase(locale: Locale): String = this.stdlibTitlecase()
 // Foo::class.java: KClass stands in for java.lang.Class (Context.getSystemService(Class), Intent(ctx, Class)).
 val <T : Any> kotlin.reflect.KClass<T>.java: kotlin.reflect.KClass<T> get() = this
 
@@ -97,11 +100,12 @@ val <T : Any> T.javaClass: JavaClass get() = JavaClass(this::class)
 // ---- Java getters return platform types (String!), and upstream calls String members on them directly.
 // On a null these throw as the JVM would. ----
 val String?.length: Int get() = this!!.length
-fun String?.lowercase(): String = this!!.lowercase()
+fun String?.lowercase(): String = this!!.stdlibLowercase()
+fun String?.uppercase(): String = this!!.stdlibUppercase()
 
 // ---- String.lowercase(Locale) / uppercase(Locale) ----
-fun String.lowercase(locale: Locale): String = lowercase()
-fun String.uppercase(locale: Locale): String = uppercase()
+fun String.lowercase(locale: Locale): String = this.stdlibLowercase()
+fun String.uppercase(locale: Locale): String = this.stdlibUppercase()
 
 // ---- kotlin.io helpers that exist only on the JVM ----
 fun ByteArray.inputStream(): ByteArrayInputStream = ByteArrayInputStream(this)
