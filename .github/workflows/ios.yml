@@ -82,6 +82,8 @@ jobs:
       - name: Bundle the map style, fonts and sprites
         working-directory: .
         run: |
+          # The self-hosted runner keeps the checkout (clean: false): start these over, or cp -R nests map/map.
+          rm -rf ios/app/assets/map ios/app/assets/raw
           mkdir -p ios/app/assets
           cp -R android/app/src/main/assets/map ios/app/assets/map
           cp .github/icon.png ios/app/assets/icon.png

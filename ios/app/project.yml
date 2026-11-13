@@ -33,6 +33,8 @@ targets:
         PRODUCT_NAME: Kav
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         GENERATE_INFOPLIST_FILE: NO
+        # KavCatch: MapLibre reports a bad layer by raising an Objective-C exception, which Swift can't catch.
+        SWIFT_OBJC_BRIDGING_HEADER: Kav/Kav-Bridging-Header.h
         # The Kotlin framework is built by Gradle (:kavkit:link{Debug,Release}FrameworkIosArm64) before xcodebuild runs.
         # ios.yml passes KAV_FRAMEWORK_VARIANT=debugFramework for branch builds (the release link takes ~14 minutes).
         KAV_FRAMEWORK_VARIANT: releaseFramework

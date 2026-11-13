@@ -61,7 +61,7 @@ final class MapLibreNativeMap: NSObject, KavNativeMap, MLNMapViewDelegate {
     }
 
     func mapViewDidFailLoadingMap(_ mapView: MLNMapView, withError error: Error) {
-        NSLog("Kav map: style failed to load: \(error)")
+        Self.log("style failed to load: \(error)")
     }
 
     // MARK: sources
@@ -113,14 +113,34 @@ final class MapLibreNativeMap: NSObject, KavNativeMap, MLNMapViewDelegate {
         return NSExpression(forConstantValue: value)
     }
 
+    /// A map error, to the console and to Documents/kav.log (Files app → Kav), where Kotlin's Log writes too: a phone
+    /// without a Mac shows nothing else.
+    static func log(_ message: String) {
+        NSLog("Kav map: \(message)")
+        guard let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first,
+              let line = "E/KavMap: \(message)\n".data(using: .utf8) else { return }
+        let url = docs.appendingPathComponent("kav.log")
+        if let h = try? FileHandle(forWritingTo: url) {
+            h.seekToEndOfFile()
+            h.write(line)
+            h.closeFile()
+        } else {
+            try? line.write(to: url)
+        }
+    }
+
+    /// Each property on its own: one MapLibre refuses (it raises) is logged and left at its default, and the rest still
+    /// apply.
     private static func apply(_ props: [String: Any], to layer: MLNStyleLayer) {
         for (name, value) in props {
             let k = key(name)
             guard layer.responds(to: NSSelectorFromString(k)) else {
-                NSLog("Kav map: \(type(of: layer)) has no property \(k) for \(name)")
+                log("\(type(of: layer)) has no property \(k) for \(name)")
                 continue
             }
-            layer.setValue(expression(value), forKey: k)
+            if let failed = KavCatch({ layer.setValue(expression(value), forKey: k) }) {
+                log("layer \(layer.identifier): \(name) = \(value) refused: \(failed)")
+            }
         }
     }
 
@@ -141,7 +161,7 @@ final class MapLibreNativeMap: NSObject, KavNativeMap, MLNMapViewDelegate {
               let sourceId = obj["source"] as? String,
               let source = style.source(withIdentifier: sourceId),
               style.layer(withIdentifier: id) == nil else {
-            NSLog("Kav map: cannot add layer \(layerJson.prefix(120))")
+            Self.log("cannot add layer \(layerJson.prefix(120))")
             return
         }
         let layer: MLNVectorStyleLayer
@@ -152,17 +172,25 @@ final class MapLibreNativeMap: NSObject, KavNativeMap, MLNMapViewDelegate {
         case "fill": layer = MLNFillStyleLayer(identifier: id, source: source)
         case "fill-extrusion": layer = MLNFillExtrusionStyleLayer(identifier: id, source: source)
         default:
-            NSLog("Kav map: unsupported layer type \(type)")
+            Self.log("unsupported layer type \(type)")
             return
         }
-        if let filter = obj["filter"] { layer.predicate = NSPredicate(mglJSONObject: filter) }
+        // MapLibre raises an Objective-C exception for a filter or value it can't take, which would end the app: a
+        // refused filter leaves the layer unfiltered, a refused property its default, and the map still opens.
+        if let filter = obj["filter"],
+           let failed = KavCatch({ layer.predicate = NSPredicate(mglJSONObject: filter) }) {
+            Self.log("layer \(id): filter \(filter) refused: \(failed)")
+        }
         Self.apply(obj["layout"] as? [String: Any] ?? [:], to: layer)
         Self.apply(obj["paint"] as? [String: Any] ?? [:], to: layer)
-        if let below, let under = style.layer(withIdentifier: below) {
-            style.insertLayer(layer, below: under)
-        } else {
-            style.addLayer(layer)
+        let failed = KavCatch {
+            if let below, let under = style.layer(withIdentifier: below) {
+                style.insertLayer(layer, below: under)
+            } else {
+                style.addLayer(layer)
+            }
         }
+        if let failed { Self.log("layer \(id) not added: \(failed)") }
     }
 
     func setLayerProperties(layerId: String, layoutJson: String, paintJson: String) {
