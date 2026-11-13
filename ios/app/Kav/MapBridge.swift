@@ -111,9 +111,36 @@ final class MapLibreNativeMap: NSObject, KavNativeMap, MLNMapViewDelegate {
     /// A style-spec value: an expression array starts with an operator name; anything else is a literal.
     private static func expression(_ value: Any) -> NSExpression {
         if let a = value as? [Any], let op = a.first as? String, !op.isEmpty {
+            // A colour constant (PropertyFactory's ["to-color", "rgba(...)"]) as a UIColor. MapLibre would turn it into
+            // CAST('rgba(...)', 'UIColor'), which Foundation's predicate security stops by ending the app (SIGILL, not
+            // an exception KavCatch could catch). A colour read from a feature, ["to-color", ["get", ...]], is fine.
+            if op == "to-color", a.count == 2, let s = a[1] as? String, let c = color(s) {
+                return NSExpression(forConstantValue: c)
+            }
             return NSExpression(mglJSONObject: a)
         }
         return NSExpression(forConstantValue: value)
+    }
+
+    /// "rgba(r,g,b,a)", "rgb(r,g,b)" or "#rgb"/"#rrggbb"/"#rrggbbaa", as the style spec writes colours.
+    static func color(_ s: String) -> UIColor? {
+        let t = s.trimmingCharacters(in: .whitespaces).lowercased()
+        if t.hasPrefix("rgb"), let open = t.firstIndex(of: "("), let close = t.lastIndex(of: ")") {
+            let n = t[t.index(after: open)..<close].split(separator: ",")
+                .compactMap { Double($0.trimmingCharacters(in: .whitespaces)) }
+            guard n.count == 3 || n.count == 4 else { return nil }
+            return UIColor(red: n[0] / 255, green: n[1] / 255, blue: n[2] / 255, alpha: n.count == 4 ? n[3] : 1)
+        }
+        if t.hasPrefix("#") {
+            var hex = String(t.dropFirst())
+            if hex.count == 3 { hex = hex.map { "\($0)\($0)" }.joined() }
+            guard hex.count == 6 || hex.count == 8, let v = UInt64(hex, radix: 16) else { return nil }
+            let has = hex.count == 8
+            let r = Double((v >> (has ? 24 : 16)) & 0xff), g = Double((v >> (has ? 16 : 8)) & 0xff)
+            let b = Double((v >> (has ? 8 : 0)) & 0xff), al = has ? Double(v & 0xff) / 255 : 1
+            return UIColor(red: r / 255, green: g / 255, blue: b / 255, alpha: al)
+        }
+        return nil
     }
 
     /// A map error, to the console and to Documents/kav.log (Files app → Kav), where Kotlin's Log writes too: a phone
