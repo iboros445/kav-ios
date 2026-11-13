@@ -228,6 +228,12 @@ Keep this list current. It is the user-facing truth about the iOS build.
 | Self-update from GitHub | Replaced by the SideStore source |
 | Paying for rides (Moovit Pay) | Stubbed until migration Phase 6 |
 | Ongoing-trip notification | Local notifications + background location. Live Activity in Phase 7 |
+| The rider's proxy (Settings, 4.3) | Kav's own requests go through it (HTTP/HTTPS and SOCKS, with a login). The pages Kav shows (Street View, Rav-Pass, the report form) don't: WKWebView only takes a proxy from iOS 17, and none with a login |
+| GovMap layers (4.3) | MapLibre iOS sends its own requests, without the Referer GovMap's tile server wants, so it may refuse them (`GovMapTiles.ios.kt`) |
+| A trip's map picture in the share card (4.3) | Not yet: `MapSnapshotter` fails at once until MapBridge.swift wraps MLNMapSnapshotter. The card goes without it |
+| Sharing straight to WhatsApp/Telegram (4.3) | iOS doesn't let an app list or address other apps: Copy link and More (the system sheet) only |
+| 3D buildings leaning in with the tilt (4.3) | The base style's `buildings_3d` layer isn't one Kav made, so `getLayer` doesn't find it on iOS: they show at the style's own opacity |
+| The launch screen's arrow flying away (4.3) | iOS shows its own launch screen; Kav fades in after it |
 
 ## Sync log
 
@@ -235,3 +241,5 @@ Keep this list current. It is the user-facing truth about the iOS build.
 |---|---|---|---|
 | 2026-10-07 | e945f0b | — | Fork baseline (Kav 2.2). iOS migration planned |
 | 2026-10-08 | dcd6ab5 | — | Kav 2.3 + 2.3.1. Moovit CLIENT_VERSION 5.201.5.1810. Ported `QrScanner(onFail)`; `TripService` API unchanged (base bumped) |
+| 2026-11-04 | ede72bd | — | Kav 3.2-nightly to 3.3.1 (own providers, signed timetable, Rav-Pass). Never built: GitHub locked the account's Actions (billing) |
+| 2026-11-13 | 449cd8a | — | Kav 4.3. Upstream replaced its history with one commit, so the merge is `--allow-unrelated-histories` taking upstream's tree for every upstream path; later syncs merge normally. New overrides: RiderProxy, GoogleSession, GovMapTiles, KavApp; MoovitWebPage gone. Built on the IdanPrivateSpace fork while the account's Actions are locked |
