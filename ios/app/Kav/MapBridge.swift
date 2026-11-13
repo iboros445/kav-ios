@@ -73,7 +73,9 @@ final class MapLibreNativeMap: NSObject, KavNativeMap, MLNMapViewDelegate {
 
     func addSource(id: String, geoJson: String) {
         guard let style = mapView.style, style.source(withIdentifier: id) == nil else { return }
-        style.addSource(MLNShapeSource(identifier: id, shape: shape(geoJson), options: nil))
+        if let failed = KavCatch({ style.addSource(MLNShapeSource(identifier: id, shape: shape(geoJson), options: nil)) }) {
+            Self.log("source \(id) not added: \(failed)")
+        }
     }
 
     func setSourceData(id: String, geoJson: String) {
@@ -82,7 +84,8 @@ final class MapLibreNativeMap: NSObject, KavNativeMap, MLNMapViewDelegate {
 
     func removeSource(id: String) {
         guard let style = mapView.style, let source = style.source(withIdentifier: id) else { return }
-        style.removeSource(source)
+        // MapLibre raises for a source a layer still uses.
+        if let failed = KavCatch({ style.removeSource(source) }) { Self.log("source \(id) not removed: \(failed)") }
     }
 
     // MARK: layers
@@ -150,7 +153,7 @@ final class MapLibreNativeMap: NSObject, KavNativeMap, MLNMapViewDelegate {
 
     func removeLayer(id: String) {
         guard let style = mapView.style, let layer = style.layer(withIdentifier: id) else { return }
-        style.removeLayer(layer)
+        if let failed = KavCatch({ style.removeLayer(layer) }) { Self.log("layer \(id) not removed: \(failed)") }
     }
 
     private func insert(_ layerJson: String, below: String?) {
@@ -183,9 +186,10 @@ final class MapLibreNativeMap: NSObject, KavNativeMap, MLNMapViewDelegate {
         // MapLibre raises an Objective-C exception for a filter or value it can't take, which would end the app: a
         // refused filter leaves the layer unfiltered, a refused property its default, and the map still opens.
         // A bare true or false is a filter in the style spec (Expression.literal(true) for the rider's layer), but
-        // MapLibre iOS only reads arrays.
+        // MapLibre iOS reads only arrays, and raises for NSPredicate(value:) too: true is the same as no filter, and
+        // false shows nothing, so the layer is hidden instead.
         if let filter = obj["filter"] as? Bool {
-            layer.predicate = NSPredicate(value: filter)
+            if !filter { layer.isVisible = false }
         } else if let filter = obj["filter"],
                   let failed = KavCatch({ layer.predicate = NSPredicate(mglJSONObject: filter) }) {
             Self.log("layer \(id): filter \(filter) refused: \(failed)")
@@ -214,11 +218,11 @@ final class MapLibreNativeMap: NSObject, KavNativeMap, MLNMapViewDelegate {
 
     func addImage(name: String, png: Data, scale: Double) {
         guard let image = UIImage(data: png, scale: CGFloat(scale)) else { return }
-        mapView.style?.setImage(image, forName: name)
+        if let failed = KavCatch({ mapView.style?.setImage(image, forName: name) }) { Self.log("image \(name) not added: \(failed)") }
     }
 
     func removeImage(name: String) {
-        mapView.style?.removeImage(forName: name)
+        if let failed = KavCatch({ mapView.style?.removeImage(forName: name) }) { Self.log("image \(name) not removed: \(failed)") }
     }
 
     // MARK: camera
