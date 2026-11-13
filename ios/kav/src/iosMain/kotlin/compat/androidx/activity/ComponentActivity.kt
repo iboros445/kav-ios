@@ -32,6 +32,9 @@ open class ComponentActivity : Activity(), LifecycleOwner, ViewModelStoreOwner {
     open fun onCreate(savedInstanceState: Bundle?) { registry.currentState = Lifecycle.State.CREATED }
     open fun onNewIntent(intent: Intent) {}
     open fun onUserLeaveHint() {}
+    // iOS has no restart of a stopped activity or memory-trim callbacks for Kav to act on.
+    open fun onRestart() {}
+    open fun onTrimMemory(level: Int) {}
 
     /** Called by the host as the app comes to the foreground and goes away. */
     fun moveTo(state: Lifecycle.State) { registry.currentState = state }

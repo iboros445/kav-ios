@@ -33,8 +33,17 @@ abstract class Context {
         SENSOR_SERVICE -> sensorManager
         CONNECTIVITY_SERVICE -> connectivityManager
         WINDOW_SERVICE -> android.view.WindowManager()
+        CLIPBOARD_SERVICE -> ClipboardManager()
         else -> null
     }
+
+    @Suppress("UNCHECKED_CAST")
+    fun <T : Any> getSystemService(cls: kotlin.reflect.KClass<T>): T? = when (cls) {
+        android.location.LocationManager::class -> locationManager
+        android.hardware.SensorManager::class -> sensorManager
+        android.net.ConnectivityManager::class -> connectivityManager
+        else -> null
+    } as T?
 
     private val locationManager by lazy { android.location.LocationManager() }
     private val sensorManager by lazy { android.hardware.SensorManager() }
@@ -59,6 +68,7 @@ abstract class Context {
         const val SENSOR_SERVICE = "sensor"
         const val CONNECTIVITY_SERVICE = "connectivity"
         const val WINDOW_SERVICE = "window"
+        const val CLIPBOARD_SERVICE = "clipboard"
         const val NOTIFICATION_SERVICE = "notification"
     }
 }

@@ -29,6 +29,7 @@ class WindowManager {
 }
 
 class Window {
+    val decorView: View by lazy { View() }
     var navigationBarColor: Int = 0
     var statusBarColor: Int = 0
     private var flags = 0

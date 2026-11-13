@@ -9,6 +9,7 @@ open class Activity : Context() {
         const val RESULT_CANCELED = 0
     }
     val window: Window = Window()
+    val splashScreen: android.window.SplashScreen by lazy { android.window.SplashScreen() }
     open fun finish() {}
     /** iOS asks for a permission once; after a refusal only the Settings app can grant it, Android's "don't ask again". */
     @Suppress("UNUSED_PARAMETER")

@@ -13,12 +13,16 @@ import platform.SystemConfiguration.kSCNetworkReachabilityFlagsIsWWAN
 
 class Network internal constructor()
 
-class NetworkCapabilities internal constructor(private val online: Boolean) {
+class NetworkCapabilities internal constructor(private val online: Boolean, private val vpn: Boolean = false) {
     fun hasCapability(c: Int): Boolean = online && (c == NET_CAPABILITY_INTERNET || c == NET_CAPABILITY_VALIDATED)
+    fun hasTransport(t: Int): Boolean = t == TRANSPORT_VPN && vpn
 
     companion object {
         const val NET_CAPABILITY_INTERNET = 12
         const val NET_CAPABILITY_VALIDATED = 16
+        const val TRANSPORT_CELLULAR = 0
+        const val TRANSPORT_WIFI = 1
+        const val TRANSPORT_VPN = 4
     }
 }
 
@@ -39,5 +43,13 @@ class ConnectivityManager constructor() {
         val flags = alloc<SCNetworkReachabilityFlagsVar>()
         SCNetworkReachabilityGetFlags(ref, flags.ptr) && (flags.value and kSCNetworkReachabilityFlagsIsWWAN) != 0u
     }
-    fun getNetworkCapabilities(network: Network): NetworkCapabilities = NetworkCapabilities(online())
+    fun getNetworkCapabilities(network: Network?): NetworkCapabilities? =
+        if (network == null) null else NetworkCapabilities(online(), vpnOn())
+
+    // A VPN shows as a scoped proxy setting on a tunnel interface (utun, ipsec, ppp, tap, tun).
+    private fun vpnOn(): Boolean = runCatching {
+        val settings = platform.Foundation.CFBridgingRelease(platform.CFNetwork.CFNetworkCopySystemProxySettings()) as? Map<*, *>
+        val scoped = settings?.get("__SCOPED__") as? Map<*, *> ?: return@runCatching false
+        scoped.keys.any { k -> listOf("utun", "ipsec", "ppp", "tap", "tun").any { k.toString().startsWith(it) } }
+    }.getOrDefault(false)
 }

@@ -7,6 +7,12 @@ class Locale private constructor(private val tag: String, @Suppress("UNUSED_PARA
     constructor(language: String, country: String) : this(if (country.isEmpty()) language else "$language-$country", Unit)
 
     val language: String get() = tag.substringBefore('-')
+    val country: String get() = tag.substringAfter('-', "").substringBefore('-')
+    // The country's name in the given language, from iOS's own locale data.
+    fun getDisplayCountry(inLocale: Locale): String = if (country.isEmpty()) "" else
+        platform.Foundation.NSLocale(localeIdentifier = inLocale.tag)
+            .displayNameForKey(platform.Foundation.NSLocaleCountryCode, value = country) ?: country
+    fun getDisplayCountry(): String = getDisplayCountry(getDefault())
     fun toLanguageTag(): String = tag
     override fun toString(): String = tag.replace('-', '_')
     override fun equals(other: Any?): Boolean = other is Locale && other.tag == tag

@@ -12,7 +12,11 @@ import kotlin.math.sin
 import kotlin.math.sqrt
 
 class Sensor internal constructor(val type: Int) {
-    companion object { const val TYPE_ROTATION_VECTOR = 11 }
+    companion object {
+        const val TYPE_ROTATION_VECTOR = 11
+        // Android's rotation without the compass; iOS gives the same heading-based rotation for both.
+        const val TYPE_GAME_ROTATION_VECTOR = 15
+    }
 }
 
 class SensorEvent internal constructor(val values: FloatArray, val sensor: Sensor? = null)
@@ -26,7 +30,8 @@ class SensorManager constructor() {
     private val subscriptions = HashMap<SensorEventListener, (Double) -> Unit>()
     private val rotation = Sensor(Sensor.TYPE_ROTATION_VECTOR)
 
-    fun getDefaultSensor(type: Int): Sensor? = if (type == Sensor.TYPE_ROTATION_VECTOR) rotation else null
+    fun getDefaultSensor(type: Int): Sensor? =
+        if (type == Sensor.TYPE_ROTATION_VECTOR || type == Sensor.TYPE_GAME_ROTATION_VECTOR) rotation else null
 
     fun registerListener(listener: SensorEventListener, sensor: Sensor?, @Suppress("UNUSED_PARAMETER") delay: Int): Boolean {
         if (sensor == null) return false
@@ -45,6 +50,7 @@ class SensorManager constructor() {
 
     companion object {
         const val SENSOR_DELAY_UI = 2
+        const val SENSOR_DELAY_GAME = 1
         const val AXIS_X = 1
         const val AXIS_Y = 2
         const val AXIS_Z = 3

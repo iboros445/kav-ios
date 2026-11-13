@@ -17,7 +17,10 @@ class Bitmap internal constructor(internal val image: androidx.compose.ui.graphi
     internal constructor(sk: SkBitmap) : this(sk.asComposeImageBitmap())
     internal val skia: SkBitmap get() = image.asSkiaBitmap()
 
-    enum class Config { ARGB_8888, RGB_565, ALPHA_8 }
+    enum class Config { ARGB_8888, RGB_565, ALPHA_8, HARDWARE }
+    // Skia bitmaps are always in memory and 32-bit.
+    val config: Config get() = Config.ARGB_8888
+    fun copy(config: Config, isMutable: Boolean): Bitmap = this
     enum class CompressFormat { JPEG, PNG, WEBP }
 
     val width: Int get() = skia.width
@@ -34,6 +37,14 @@ class Bitmap internal constructor(internal val image: androidx.compose.ui.graphi
     }
 
     companion object {
+        fun createScaledBitmap(src: Bitmap, dstWidth: Int, dstHeight: Int, filter: Boolean): Bitmap {
+            val out = SkBitmap().also { it.allocN32Pixels(dstWidth.coerceAtLeast(1), dstHeight.coerceAtLeast(1)) }
+            val canvas = SkCanvas(out)
+            canvas.drawImageRect(SkImage.makeFromBitmap(src.skia), Rect.makeWH(out.width.toFloat(), out.height.toFloat()))
+            canvas.close()
+            return Bitmap(out)
+        }
+
         fun createBitmap(width: Int, height: Int, config: Config): Bitmap = Bitmap(androidx.compose.ui.graphics.ImageBitmap(width, height))
 
         /** A region of [src] transformed by [m]: rotations by multiples of 90 degrees and scaling, which is what upstream asks. */
@@ -96,6 +107,8 @@ object BitmapFactory {
 
     fun decodeStream(input: java.io.InputStream?): Bitmap? = decodeStream(input, null, null)
 
+    fun decodeFile(path: String): Bitmap? = decodeFile(path, null)
+
     fun decodeFile(path: String, opts: Options?): Bitmap? {
         val bytes = runCatching { File(path).readBytes() }.getOrNull() ?: return null
         return decodeByteArray(bytes, 0, bytes.size, opts)
@@ -130,4 +143,7 @@ class Paint(flags: Int = 0) {
 class Canvas(bitmap: Bitmap) {
     private val compose = androidx.compose.ui.graphics.Canvas(bitmap.image)
     fun drawPath(path: Path, paint: Paint) { compose.drawPath(path.compose, paint.compose) }
+    fun drawRoundRect(rect: RectF, rx: Float, ry: Float, paint: Paint) {
+        compose.drawRoundRect(rect.left, rect.top, rect.right, rect.bottom, rx, ry, paint.compose)
+    }
 }

@@ -25,7 +25,8 @@ import platform.Foundation.precomposedStringWithCompatibilityMapping
 class ParseException(message: String?, val errorOffset: Int) : Exception(message)
 
 /** Pattern letters are Unicode TR35, which covers the ones Java code uses (yyyy MM dd HH mm ss EEE MMM d). */
-class SimpleDateFormat(pattern: String, locale: Locale = Locale.getDefault()) {
+class SimpleDateFormat(private val pattern: String, locale: Locale = Locale.getDefault()) {
+    fun toPattern(): String = pattern
     private val formatter = NSDateFormatter().apply {
         dateFormat = pattern
         this.locale = NSLocale.localeWithLocaleIdentifier(locale.toLanguageTag())

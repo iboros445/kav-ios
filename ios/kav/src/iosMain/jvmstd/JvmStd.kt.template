@@ -41,9 +41,36 @@ val Dispatchers.IO: CoroutineDispatcher get() = Dispatchers.CoroutinesIO
 
 // ---- java.util.Map.putIfAbsent on Kotlin maps ----
 fun <K, V> MutableMap<K, V>.putIfAbsent(key: K, value: V): V? = get(key) ?: run { put(key, value); null }
+// java.util.Map.merge: the value put, or the key removed when remapping gives null.
+fun <K, V : Any> MutableMap<K, V>.merge(key: K, value: V, remapping: (V, V) -> V?): V? {
+    val old = get(key)
+    val next = if (old == null) value else remapping(old, value)
+    if (next == null) remove(key) else put(key, next)
+    return next
+}
+// kotlin.collections.toSortedMap (JVM): a map that iterates in the comparator's order.
+fun <K, V> Map<out K, V>.toSortedMap(comparator: Comparator<in K>): Map<K, V> =
+    entries.sortedWith { a, b -> comparator.compare(a.key, b.key) }.associateTo(kotlin.collections.LinkedHashMap()) { it.key to it.value }
+// Char.titlecase(Locale): the locale only matters for Turkish dotted i, which Kav never titlecases.
+@Suppress("UNUSED_PARAMETER")
+fun Char.titlecase(locale: Locale): String = titlecase()
+// Foo::class.java: KClass stands in for java.lang.Class (Context.getSystemService(Class), Intent(ctx, Class)).
+val <T : Any> kotlin.reflect.KClass<T>.java: kotlin.reflect.KClass<T> get() = this
 
 // ---- java.lang.Character (only what upstream calls) ----
 object Character {
+    const val FORMAT: Byte = 16
+    fun toChars(codePoint: Int): CharArray = if (codePoint < 0x10000) charArrayOf(codePoint.toChar()) else {
+        val v = codePoint - 0x10000
+        charArrayOf((0xD800 + (v shr 10)).toChar(), (0xDC00 + (v and 0x3FF)).toChar())
+    }
+    const val CONTROL: Byte = 15
+    // Only FORMAT (Cf: the bidi marks, zero-width joiners) and CONTROL are told apart; everything else is 0.
+    fun getType(c: Char): Int = when {
+        c.category == CharCategory.FORMAT -> FORMAT.toInt()
+        c.category == CharCategory.CONTROL -> CONTROL.toInt()
+        else -> 0
+    }
     class UnicodeBlock internal constructor(private val range: IntRange) {
         companion object {
             val COMBINING_DIACRITICAL_MARKS = UnicodeBlock(0x0300..0x036F)

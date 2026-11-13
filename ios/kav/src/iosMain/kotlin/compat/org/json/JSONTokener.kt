@@ -1,8 +1,9 @@
 package org.json
 
-class JSONTokener(input: String) {
+class JSONTokener(input: String?) {
     // Android tolerates a leading BOM; so do we.
-    private val s = if (input.startsWith("﻿")) input.substring(1) else input
+    // Java takes a null and fails reading it, as here.
+    private val s = (input ?: throw NullPointerException("input")).let { if (it.startsWith("﻿")) it.substring(1) else it }
     private var pos = 0
 
     fun nextValue(): Any? {

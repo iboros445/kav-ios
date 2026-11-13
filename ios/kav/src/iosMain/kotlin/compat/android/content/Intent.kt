@@ -30,6 +30,10 @@ class Intent() {
     fun putExtra(k: String, v: Boolean): Intent { extras[k] = v; return this }
     fun putExtra(k: String, v: Int): Intent { extras[k] = v; return this }
     fun getStringExtra(k: String): String? = extras[k] as? String
+    fun getCharSequenceExtra(k: String): CharSequence? = extras[k] as? CharSequence
+    // No other app can be asked for by intent on iOS: callers fall back (Gett's App Store page).
+    @Suppress("UNUSED_PARAMETER")
+    fun resolveActivity(pm: android.content.pm.PackageManager): Any? = null
 
     companion object {
         const val ACTION_VIEW = "android.intent.action.VIEW"

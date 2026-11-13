@@ -19,6 +19,9 @@ class PackageManager {
     }
 
     fun canRequestPackageInstalls(): Boolean = false
+    // No app can be addressed by package on iOS: ShareSheet lists none of its own and offers the system sheet (More).
+    @Suppress("UNUSED_PARAMETER")
+    fun resolveActivity(intent: android.content.Intent, flags: Int): ResolveInfo? = null
 
     /** This app only: its version from Info.plist; installed when its data folder was made, updated when the app bundle was. */
     fun getPackageInfo(packageName: String, flags: Int): PackageInfo = PackageInfo(
@@ -31,6 +34,13 @@ class PackageManager {
 
     private fun dateOf(path: String, key: Any?): Long =
         (((NSFileManager.defaultManager.attributesOfItemAtPath(path, null)?.get(key) as? NSDate)?.timeIntervalSince1970 ?: 0.0) * 1000).toLong()
+}
+
+class ResolveInfo internal constructor() {
+    @Suppress("UNUSED_PARAMETER")
+    fun loadLabel(pm: PackageManager): CharSequence = ""
+    @Suppress("UNUSED_PARAMETER")
+    fun loadIcon(pm: PackageManager): android.graphics.drawable.Drawable = object : android.graphics.drawable.Drawable() {}
 }
 
 class PackageInfo(

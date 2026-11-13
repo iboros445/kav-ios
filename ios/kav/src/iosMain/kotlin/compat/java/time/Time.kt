@@ -194,6 +194,8 @@ class ZonedDateTime internal constructor(internal val epochSecond: Long, val zon
     fun plusDays(n: Long): ZonedDateTime = withLocal(LocalDateTime(local.date.plusDays(n), local.time))
     fun minusDays(n: Long): ZonedDateTime = plusDays(-n)
     fun plusHours(n: Long): ZonedDateTime = ZonedDateTime(epochSecond + n * 3600, zone, nano)
+    fun minusHours(n: Long): ZonedDateTime = plusHours(-n)
+    fun minusMinutes(n: Long): ZonedDateTime = plusMinutes(-n)
     fun plusMinutes(n: Long): ZonedDateTime = ZonedDateTime(epochSecond + n * 60, zone, nano)
     fun plusSeconds(n: Long): ZonedDateTime = ZonedDateTime(epochSecond + n, zone, nano)
     fun withHour(h: Int): ZonedDateTime = withLocal(LocalDateTime(local.date, LocalTime.of(h, local.minute, local.second)))
@@ -209,6 +211,11 @@ class ZonedDateTime internal constructor(internal val epochSecond: Long, val zon
     override fun equals(other: Any?): Boolean = other is ZonedDateTime && other.epochSecond == epochSecond && other.nano == nano && other.zone == zone
     override fun hashCode(): Int = epochSecond.hashCode()
     override fun toString(): String = "$local${OffsetDateTime.offsetText(zone.offsetAt(epochSecond))}[$zone]"
+
+    companion object {
+        fun now(zone: ZoneId): ZonedDateTime = Instant.now().atZone(zone)
+        fun now(): ZonedDateTime = now(ZoneId.systemDefault())
+    }
 }
 
 /** Only what upstream needs: parse an ISO-8601 date-time with an offset, and read its instant. */

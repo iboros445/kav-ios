@@ -37,7 +37,8 @@ import platform.darwin.NSObject
 
 annotation class JavascriptInterface
 
-fun interface ValueCallback<T> { fun onReceiveValue(value: T) }
+// Java hands these null freely (no file picked, no script result), so the value is nullable here.
+fun interface ValueCallback<T> { fun onReceiveValue(value: T?) }
 
 interface WebResourceRequest {
     val url: Uri

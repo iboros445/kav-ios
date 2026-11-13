@@ -33,9 +33,26 @@ class Location(var provider: String? = null) {
     fun setAccuracy(v: Float) { accuracy = v; hasAcc = true }
     fun hasSpeed(): Boolean = hasSp
     fun hasBearing(): Boolean = bearing >= 0f
+    // iOS 15+ marks simulated fixes (CLLocationSourceInformation), but Kav's fixes come through LocationHub, which
+    // doesn't keep it: treated as real, like a phone with no mock provider.
+    val isMock: Boolean get() = false
+    val isFromMockProvider: Boolean get() = false
 
-    internal companion object {
-        fun from(l: CLLocation): Location = Location("fused").also {
+    companion object {
+        // Great-circle distance in metres, and the initial and final bearings when results has room for them.
+        fun distanceBetween(startLatitude: Double, startLongitude: Double, endLatitude: Double, endLongitude: Double, results: FloatArray) {
+            val r = 6_371_008.8
+            val p1 = startLatitude * kotlin.math.PI / 180; val p2 = endLatitude * kotlin.math.PI / 180
+            val dp = p2 - p1; val dl = (endLongitude - startLongitude) * kotlin.math.PI / 180
+            val h = kotlin.math.sin(dp / 2).let { it * it } + kotlin.math.cos(p1) * kotlin.math.cos(p2) * kotlin.math.sin(dl / 2).let { it * it }
+            results[0] = (2 * r * kotlin.math.asin(kotlin.math.sqrt(h.coerceIn(0.0, 1.0)))).toFloat()
+            fun bearing(a: Double, b: Double, d: Double) = (kotlin.math.atan2(kotlin.math.sin(d) * kotlin.math.cos(b),
+                kotlin.math.cos(a) * kotlin.math.sin(b) - kotlin.math.sin(a) * kotlin.math.cos(b) * kotlin.math.cos(d)) * 180 / kotlin.math.PI).toFloat()
+            if (results.size > 1) results[1] = bearing(p1, p2, dl)
+            if (results.size > 2) results[2] = (bearing(p2, p1, -dl) + 180f).let { if (it > 180f) it - 360f else it }
+        }
+
+        internal fun from(l: CLLocation): Location = Location("fused").also {
             l.coordinate.useContents { it.latitude = latitude; it.longitude = longitude }
             if (l.horizontalAccuracy >= 0) it.setAccuracy(l.horizontalAccuracy.toFloat())
             if (l.speed >= 0) { it.speed = l.speed.toFloat(); it.hasSp = true }
