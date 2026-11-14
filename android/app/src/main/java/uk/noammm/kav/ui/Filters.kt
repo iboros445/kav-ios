@@ -1,26 +1,12 @@
 package uk.noammm.kav.ui
 
-import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.core.animateDpAsState
-import androidx.compose.foundation.background
-import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.ui.Alignment
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.semantics.Role
-import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.semantics.toggleableState
-import androidx.compose.ui.state.ToggleableState
-import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
-import uk.noammm.kav.data.Moovit
+import uk.noammm.kav.data.Source
+import uk.noammm.kav.data.Transit
+
+// What a planner can bring: Bus Nearby and egg plan transit and walking, never a bike route. Taxi stays for them too,
+// as the plain Gett row Kav shows under any planner's routes.
+fun filtersOf(planner: Source): List<ResultFilter> =
+    if (planner.hopOn) ResultFilter.entries - ResultFilter.BIKE else ResultFilter.entries
 
 enum class ResultFilter {
     BUS, TRAIN, LIGHT_RAIL, CARMELIT_RAKAVLIT, SHUTTLE, TAXI, BIKE, WALK;
@@ -60,17 +46,17 @@ fun routeTypesFor(on: Set<ResultFilter>): List<Int> {
     return all.filterNot { it in off }
 }
 
-fun filterResults(list: List<Moovit.Itinerary>, on: Set<ResultFilter>, r: Moovit.Resolved): List<Moovit.Itinerary> {
+fun filterResults(list: List<Transit.Itinerary>, on: Set<ResultFilter>, r: Transit.Resolved): List<Transit.Itinerary> {
     if (on.size == ResultFilter.entries.size) return list
     return list.filter { it ->
         val legs = it.legs
-        val hasRide = legs.any { l -> l.kind == Moovit.LegKind.RIDE }
-        val hasTaxi = legs.any { l -> l.kind == Moovit.LegKind.TAXI }
-        val hasBike = legs.any { l -> l.kind == Moovit.LegKind.BIKE }
+        val hasRide = legs.any { l -> l.kind == Transit.LegKind.RIDE }
+        val hasTaxi = legs.any { l -> l.kind == Transit.LegKind.TAXI }
+        val hasBike = legs.any { l -> l.kind == Transit.LegKind.BIKE }
         if (ResultFilter.TAXI !in on && hasTaxi) return@filter false
         if (ResultFilter.BIKE !in on && hasBike) return@filter false
         if (ResultFilter.WALK !in on && !hasRide && !hasTaxi && !hasBike) return@filter false
-        legs.filter { l -> l.kind == Moovit.LegKind.RIDE }.all { ride ->
+        legs.filter { l -> l.kind == Transit.LegKind.RIDE }.all { ride ->
             val info = r.line(ride.lineId) ?: return@all true
             val rt = r.routeType(info.agencyId)
             if (rt == 711) return@all ResultFilter.SHUTTLE in on
@@ -83,64 +69,5 @@ fun filterResults(list: List<Moovit.Itinerary>, on: Set<ResultFilter>, r: Moovit
                 else -> true
             }
         }
-    }
-}
-
-@Composable
-fun SwitchRow(
-    label: String,
-    desc: String,
-    on: Boolean,
-    onToggle: (Boolean) -> Unit,
-    leading: @Composable () -> Unit,
-) {
-    Row(
-        Modifier.fillMaxWidth().panel(14.dp)
-            .then(if (on) Modifier.border(1.dp, K.borderStrong, RoundedCornerShape(14.dp)) else Modifier)
-            .semantics { contentDescription = label; toggleableState = if (on) ToggleableState.On else ToggleableState.Off }
-            .clickable(role = Role.Switch) { onToggle(!on) }
-            .padding(horizontal = K.gap3, vertical = 10.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(K.gap3),
-    ) {
-        Box(Modifier.width(22.dp), contentAlignment = Alignment.Center) { leading() }
-        Column(Modifier.weight(1f)) {
-            Text(label, fontSize = 14.sp, color = if (on) K.text else K.muted)
-            Text(desc, fontSize = 11.sp, color = K.dim, lineHeight = 15.sp, modifier = Modifier.padding(top = 2.dp))
-        }
-        Switch(on)
-    }
-}
-
-@Composable
-fun FilterRows(enabled: Set<ResultFilter>, onToggle: (ResultFilter, Boolean) -> Unit) {
-    Column(Modifier.fillMaxWidth().padding(horizontal = K.gap3), verticalArrangement = Arrangement.spacedBy(K.gap1)) {
-        ResultFilter.entries.forEach { f ->
-            val on = f in enabled
-            SwitchRow(f.label, f.desc, on, { onToggle(f, it) }) {
-                when (f) {
-                    ResultFilter.BUS -> ModeGlyph(Mode.BUS, if (on) K.text else K.dim, 18.dp)
-                    ResultFilter.TRAIN -> ModeGlyph(Mode.TRAIN, if (on) K.text else K.dim, 18.dp)
-                    ResultFilter.LIGHT_RAIL -> ModeGlyph(Mode.TRAM, if (on) K.text else K.dim, 18.dp)
-                    ResultFilter.CARMELIT_RAKAVLIT -> CarmelitMark(18.dp)
-                    ResultFilter.SHUTTLE -> ShuttleMark(18.dp)
-                    ResultFilter.TAXI -> ModeGlyph(Mode.TAXI, if (on) K.text else K.dim, 18.dp)
-                    ResultFilter.BIKE -> BikeGlyph(if (on) K.text else K.dim)
-                    ResultFilter.WALK -> WalkGlyph(if (on) K.text else K.dim, 16.dp)
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun Switch(on: Boolean) {
-    val track by animateColorAsState(if (on) K.accent else K.surface4, label = "track")
-    val knob by animateDpAsState(if (on) 20.dp else 2.dp, label = "knob")
-    Box(Modifier.width(40.dp).height(22.dp).clip(RoundedCornerShape(999.dp)).background(track)) {
-        Box(
-            Modifier.padding(start = knob, top = 2.dp).size(18.dp).clip(RoundedCornerShape(999.dp))
-                .background(if (on) K.bg else K.muted),
-        )
     }
 }

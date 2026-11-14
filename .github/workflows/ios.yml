@@ -1,0 +1,200 @@
+name: iOS
+
+# Builds run for pushes to the iOS branches (a commit that changes no code says [skip ci]). Manual runs can add the
+# simulator tests.
+on:
+  push:
+    branches: ['sync/**', 'claude/ios-migration-plan-4ojstt']
+    tags: ['ios-v*']
+  workflow_dispatch:
+    inputs:
+      tests:
+        description: Run the Kotlin simulator tests too (~10 more macOS minutes)
+        type: boolean
+        default: false
+
+permissions:
+  contents: write   # the SideStore source release (ios-nightly)
+
+concurrency:
+  group: ios-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: [self-hosted, macOS]
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: ios
+    steps:
+      # clean: false keeps ios/**/build and .gradle between runs on this self-hosted runner (incremental compiles)
+      - uses: actions/checkout@v4
+        with:
+          clean: false
+
+      # no system JDK on this Mac; the runner's tool cache keeps it after the first download
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      # CoreLocation's module map autolinks the private framework `_LocationEssentials`, which the Xcode 16 SDKs no longer
+      # ship as a file (the simulator runtime still provides it). The linker only needs a stub to resolve the name.
+      - name: Stub for the autolinked _LocationEssentials framework
+        working-directory: .
+        run: |
+          d="$RUNNER_TEMP/kav-framework-stubs/_LocationEssentials.framework"
+          mkdir -p "$d"
+          cat > "$d/_LocationEssentials.tbd" <<'EOF'
+          --- !tapi-tbd
+          tbd-version:     4
+          targets:         [ arm64-ios, arm64-ios-simulator, x86_64-ios-simulator ]
+          install-name:    '/System/Library/PrivateFrameworks/_LocationEssentials.framework/_LocationEssentials'
+          current-version: 1
+          exports:         []
+          ...
+          EOF
+          echo "KAV_FRAMEWORK_STUBS=$RUNNER_TEMP/kav-framework-stubs" >> "$GITHUB_ENV"
+
+      - name: Upstream version
+        id: ver
+        working-directory: .
+        run: |
+          v=$(sed -n 's/.*versionName = "\(.*\)".*/\1/p' android/app/build.gradle.kts)
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "Upstream versionName: $v"
+
+      # The app downloads the timetable at setup (upstream's nightly `timetable` release); the simulator tests read
+      # a copy from the test assets. It has no licence, so it is never committed.
+      - name: Fetch il.kav for the tests
+        if: inputs.tests
+        continue-on-error: true
+        working-directory: .
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p ios/app/assets
+          gh release download timetable --repo ImNoammm/kav --pattern 'il.kav.gz' --dir "$RUNNER_TEMP"
+          gunzip -c "$RUNNER_TEMP/il.kav.gz" > ios/app/assets/il.kav
+          ls -l ios/app/assets/il.kav
+
+      - name: Bundle the map style, fonts and sprites
+        working-directory: .
+        run: |
+          # The self-hosted runner keeps the checkout (clean: false): start these over, or cp -R nests map/map.
+          rm -rf ios/app/assets/map ios/app/assets/raw
+          mkdir -p ios/app/assets
+          cp -R android/app/src/main/assets/map ios/app/assets/map
+          cp .github/icon.png ios/app/assets/icon.png
+          # res/raw (notices, release notes, the Moovit scripts) as assets/raw/<file>: see the R and Resources shims.
+          mkdir -p ios/app/assets/raw
+          cp android/app/src/main/res/raw/* ios/app/assets/raw/
+          # Other assets upstream reads by name (report.js for the ministry's form, and any added later).
+          find android/app/src/main/assets -maxdepth 1 -type f -exec cp {} ios/app/assets/ \;
+
+      # compile errors first and alone, so a failed run says why in a few lines
+      # Device target first: the link below reuses this compile (the simulator one waits for the tests at the end).
+      - name: Compile Kotlin
+        run: ./gradlew :kavkit:compileKotlinIosArm64 --console=plain
+
+      # The release link (LLVM whole-program optimisation) takes ~14 minutes; debug takes a fraction of that, so branch
+      # builds ship a debug framework (readable Kotlin stack traces too). Tagged ios-v* releases stay optimised.
+      - name: Link the Kotlin framework (device)
+        id: fw
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/ios-v* ]]; then v=Release; else v=Debug; fi
+          echo "variant=$(echo $v | tr '[:upper:]' '[:lower:]')Framework" >> "$GITHUB_OUTPUT"
+          ./gradlew ":kavkit:link${v}FrameworkIosArm64" --console=plain
+
+      # What Swift sees of KavKit (only the entry point and the map seam), for reading Swift compile errors.
+      - name: KavKit header
+        continue-on-error: true
+        run: grep -vE '^\s*$' kavkit/build/bin/iosArm64/${{ steps.fw.outputs.variant }}/KavKit.framework/Headers/KavKit.h
+
+      - name: App icon from .github/icon.png
+        working-directory: .
+        run: |
+          out=ios/app/Kav/Assets.xcassets/AppIcon.appiconset/icon-1024.png
+          # iOS rejects icons with an alpha channel: a JPEG round trip drops it.
+          sips -s format jpeg -z 1024 1024 .github/icon.png --out "$RUNNER_TEMP/icon.jpg"
+          sips -s format png "$RUNNER_TEMP/icon.jpg" --out "$out"
+
+      - name: Generate the Xcode project
+        run: |
+          command -v xcodegen >/dev/null || brew install xcodegen
+          xcodegen generate --spec app/project.yml --project app
+
+      - name: Build the unsigned app
+        working-directory: ios/app
+        run: |
+          xcodebuild -project Kav.xcodeproj -scheme Kav -sdk iphoneos -configuration Release \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            MARKETING_VERSION='${{ steps.ver.outputs.version }}' \
+            CURRENT_PROJECT_VERSION='${{ github.run_number }}' \
+            KAV_FRAMEWORK_VARIANT='${{ steps.fw.outputs.variant }}' \
+            build
+
+      - name: Package Kav.ipa
+        working-directory: ios/app
+        run: |
+          rm -rf Payload Kav.ipa
+          mkdir Payload
+          cp -R build/Build/Products/Release-iphoneos/Kav.app Payload/
+          zip -qry Kav.ipa Payload
+          ls -l Kav.ipa
+
+      # Self-hosted: every IPA also lands on this Mac, so a full GitHub artifact quota never loses a build.
+      - name: Copy Kav.ipa to ~/Kav-builds
+        working-directory: ios/app
+        run: |
+          mkdir -p ~/Kav-builds
+          cp Kav.ipa ~/Kav-builds/Kav-${{ steps.ver.outputs.version }}-${{ github.run_number }}.ipa
+          cp Kav.ipa ~/Kav-builds/Kav-latest.ipa
+          # keep the 10 newest numbered builds
+          ls -t ~/Kav-builds/Kav-*-*.ipa | tail -n +11 | xargs rm -f
+          ls -l ~/Kav-builds
+
+      # SideStore source: every push build on iboros445/kav-ios replaces the IPA on the rolling `ios-nightly` release and
+      # rewrites source.json next to it, so SideStore picks up the update.
+      # Source URL: https://github.com/iboros445/kav-ios/releases/download/ios-nightly/source.json
+      - name: Publish to the SideStore source
+        if: github.repository == 'iboros445/kav-ios' && github.event_name == 'push' && startsWith(github.ref, 'refs/heads/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ios-nightly
+        run: |
+          ipa="Kav-${{ steps.ver.outputs.version }}-${{ github.run_number }}.ipa"
+          cp app/Kav.ipa "$RUNNER_TEMP/$ipa"
+          notes="Build ${{ github.run_number }}: $(git log -1 --format=%s)"
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --prerelease --target "$GITHUB_SHA" --title "Kav for iPhone (latest build)" \
+              --notes "Rolling development build. Add the source in SideStore: https://github.com/${{ github.repository }}/releases/download/$TAG/source.json"
+          fi
+          # IPA first, then the source that points at it, then drop older IPAs
+          gh release upload "$TAG" "$RUNNER_TEMP/$ipa" --clobber
+          python3 tools/make_source_json.py --ipa app/Kav.ipa \
+            --url "https://github.com/${{ github.repository }}/releases/download/$TAG/$ipa" \
+            --notes "$notes" > "$RUNNER_TEMP/source.json"
+          gh release upload "$TAG" "$RUNNER_TEMP/source.json" --clobber
+          gh release view "$TAG" --json assets --jq '.assets[].name' | grep -E '^Kav-.*\.ipa$' | grep -vxF "$ipa" \
+            | xargs -r -n1 gh release delete-asset "$TAG" -y
+
+      - uses: actions/upload-artifact@v4
+        continue-on-error: true
+        with:
+          name: Kav-ipa
+          path: ios/app/Kav.ipa
+          if-no-files-found: error
+          # Each IPA is ~30 MB; keep only recent ones so artifact storage stays small.
+          retention-days: 3
+
+      # Last on purpose: linking the test binary takes ~9 minutes, and the IPA above must not wait for it.
+      - name: Kotlin simulator tests
+        if: inputs.tests
+        timeout-minutes: 25
+        env:
+          # simctl hands SIMCTL_CHILD_* to the simulated process with the prefix removed
+          SIMCTL_CHILD_KAV_ASSETS_DIR: ${{ github.workspace }}/ios/app/assets
+        run: ./gradlew :kav:iosSimulatorArm64Test --console=plain

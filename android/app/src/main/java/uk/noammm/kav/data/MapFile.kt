@@ -1,117 +1,94 @@
 package uk.noammm.kav.data
 
-import uk.noammm.kav.ui.T
 import android.content.Context
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
-import java.io.File
-import java.net.HttpURLConnection
-import java.net.URL
-import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import org.json.JSONArray
+import org.json.JSONObject
+import uk.noammm.kav.ui.Lang
+import uk.noammm.kav.ui.Look
 
 object MapFile {
-    const val TAG = "map-1"
-    const val URL = "https://github.com/${Updates.OWNER}/${Updates.REPO}/releases/download/$TAG/israel.pmtiles"
+    // The map Kav draws (Settings, Map): its own, kept on the phone; satellite photos under its names; or one of
+    // OpenFreeMap's four, kept on the phone or loaded from OpenFreeMap as the map is looked at.
+    enum class Type { STANDARD, SATELLITE, LIBERTY, BRIGHT, DARK, FIORD, GOVMAP, GOVMAP_PHOTO }
 
-    const val BYTES = 185_001_087L
+    var type by mutableStateOf(Type.STANDARD)
 
-    sealed interface State {
-        data object Missing : State
-        data class Downloading(val progress: Float) : State
-        data class Failed(val why: String) : State
-        data object Ready : State
+    // The language of the map's own names, apart from Kav's.
+    var labels by mutableStateOf(Lang.HE)
+
+    // Buildings standing up in 3D on the standard map, close in (Settings, Map).
+    var buildings3d by mutableStateOf(false)
+
+    private val openFreeMap = mapOf(
+        Type.LIBERTY to MapTileProvider.OpenFreeMap("liberty", lightGround = true),
+        Type.BRIGHT to MapTileProvider.OpenFreeMap("bright", lightGround = true),
+        Type.DARK to MapTileProvider.OpenFreeMap("dark", lightGround = false),
+        Type.FIORD to MapTileProvider.OpenFreeMap("fiord", lightGround = false),
+    )
+
+    fun provider(t: Type = type): MapTileProvider = when (t) {
+        Type.STANDARD -> MapTileProvider.Standard
+        Type.SATELLITE -> MapTileProvider.Satellite
+        Type.GOVMAP -> GovMap.STREETS
+        Type.GOVMAP_PHOTO -> GovMap.PHOTO
+        else -> openFreeMap.getValue(t)
     }
 
-    var state by mutableStateOf<State>(State.Missing)
-        private set
+    // The map types drawn from a pack.
+    fun typesOf(pack: MapPack) = Type.entries.filter { provider(it).let { p -> p.usesPack && p.pack === pack } }
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    fun credit(t: Type = type) = provider(t).credit
 
-    fun file(ctx: Context) = File(File(ctx.filesDir, "map"), "israel.pmtiles")
+    fun init(ctx: Context) = MapPacks.init(ctx.applicationContext.filesDir)
 
-    fun init(ctx: Context) {
-        val app = ctx.applicationContext
-        if (state !is State.Downloading) state = if (file(app).length() == BYTES) State.Ready else State.Missing
-        scope.launch {
-            File(app.filesDir, "tiles-esri").listFiles()?.forEach { it.delete() }
-            File(app.filesDir, "tiles-esri").delete()
-        }
+    // Each style is made off the main thread once and kept: reading, parsing and changing a whole style is work a screen
+    // opening shouldn't wait for, and a kept map (MapPool) knows its style by the same text.
+    private val made = object : LinkedHashMap<String, String>(8, .75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?) = size > 6
     }
 
-    fun styleJson(ctx: Context, light: Boolean = false): String =
-        ctx.assets.open(if (light) "map/style-light.json" else "map/style.json").reader().use { it.readText() }
-            .replace("__MAP__", "pmtiles://file://" + file(ctx).absolutePath)
-
-    fun startDownload(ctx: Context) {
-        if (state is State.Downloading || state is State.Ready) return
-        val app = ctx.applicationContext
-        state = State.Downloading(0f)
-        scope.launch {
-            try {
-                download(app)
-                state = State.Ready
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                android.util.Log.e("KavMap", "map download failed", e)
-                state = State.Failed(e.message ?: e.javaClass.simpleName)
-            }
-        }
+    suspend fun styleJson(ctx: Context, t: Type, look: Look, labels: Lang, preview: Boolean): String? {
+        val p = provider(t)
+        val key = "$t|$look|$labels|$preview|${p.pack.state is MapPack.State.Ready}|$buildings3d"
+        synchronized(made) { made[key] }?.let { return it }
+        val json = withContext(Dispatchers.Default) { p.style(ctx, look, labels, preview)?.toString() } ?: return null
+        synchronized(made) { made[key] = json }
+        return json
     }
 
-    private fun download(ctx: Context) {
-        val file = file(ctx)
-        file.parentFile?.mkdirs()
-        if (file.length() == BYTES) return
-        val part = File(file.path + ".part")
-        var have = part.length()
-        if (have == BYTES && part.renameTo(file)) return
-        if (have >= BYTES) { part.delete(); have = 0 }
+    // Esri's World Imagery needs no key and has photos to zoom 19 over Israel.
+    private const val PHOTOS = "https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
 
-        var c = URL(URL).openConnection() as HttpURLConnection
-        c.connectTimeout = 15_000; c.readTimeout = 30_000
-        c.setRequestProperty("User-Agent", "Kav")
-        if (have > 0) c.setRequestProperty("Range", "bytes=$have-")
-        var hops = 0
-        while (c.responseCode in 300..399 && hops < 5) {
-            val next = c.getHeaderField("Location") ?: break
-            c.disconnect()
-            c = URL(URL(URL), next).openConnection() as HttpURLConnection
-            c.connectTimeout = 15_000; c.readTimeout = 30_000
-            c.setRequestProperty("User-Agent", "Kav")
-            if (have > 0) c.setRequestProperty("Range", "bytes=$have-")
-            hops++
-        }
-        when (c.responseCode) {
-            200 -> { have = 0; part.delete() }
-            206 -> {}
-            else -> throw RuntimeException(T("Download HTTP ${c.responseCode}", "הורדה נכשלה, שגיאת HTTP ${c.responseCode}"))
-        }
-        c.inputStream.use { input ->
-            java.io.FileOutputStream(part, have > 0).use { out ->
-                val buf = ByteArray(256 * 1024)
-                var done = have
-                while (true) {
-                    val n = input.read(buf)
-                    if (n < 0) break
-                    out.write(buf, 0, n)
-                    done += n
-                    state = State.Downloading((done.toFloat() / BYTES).coerceIn(0f, 1f))
+    // The photos under the map's names: the land, water, buildings and roads drawn on top would hide what the photo
+    // shows, so only the background and the names stay.
+    internal fun satellite(style: JSONObject): JSONObject {
+        style.getJSONObject("sources").put("satellite", JSONObject()
+            .put("type", "raster").put("tiles", JSONArray().put(PHOTOS)).put("tileSize", 256).put("maxzoom", 19))
+        val layers = style.getJSONArray("layers")
+        val kept = JSONArray()
+        for (i in 0 until layers.length()) {
+            val layer = layers.getJSONObject(i)
+            when (layer.optString("type")) {
+                "background" -> {
+                    kept.put(layer)
+                    kept.put(JSONObject().put("id", "satellite").put("type", "raster").put("source", "satellite"))
                 }
+                "symbol" -> if (layer.optString("id") != "roads_oneway") kept.put(onPhotos(layer))
             }
         }
-        if (part.length() != BYTES) throw RuntimeException(T("Interrupted at ${part.length() / (1 shl 20)} MB, try again", "ההורדה נקטעה אחרי ${part.length() / (1 shl 20)} MB, נסו שוב"))
-        if (!part.renameTo(file)) throw RuntimeException(T("Could not keep the download", "לא ניתן היה לשמור את ההורדה"))
+        return style.put("layers", kept)
     }
 
-    fun remove(ctx: Context) {
-        file(ctx).delete()
-        File(file(ctx).path + ".part").delete()
-        state = State.Missing
+    // The black map's names are dark grey, which a photo swallows: white with a dark edge instead. Road numbers keep
+    // their own plate.
+    private fun onPhotos(layer: JSONObject): JSONObject {
+        val paint = layer.optJSONObject("paint")?.takeIf { it.has("text-halo-color") } ?: return layer
+        paint.put("text-color", "rgba(255,255,255,0.95)").put("text-halo-color", "rgba(0,0,0,0.75)").put("text-halo-width", 1.5)
+        return layer
     }
 }

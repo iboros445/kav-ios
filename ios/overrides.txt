@@ -1,0 +1,15 @@
+# Upstream files NOT compiled for iOS, because an iOS replacement exists.
+# Format: <path under android/app/src/main/java>  <upstream base sha>  <reason>
+# Replacement: ios/kav/src/iosMain/kotlin/overrides/<same path with .kt -> .ios.kt>. See UPSTREAM_SYNC.md.
+uk/noammm/kav/data/Updates.kt  449cd8a  no APK installer on iOS; updates come from the SideStore source
+uk/noammm/kav/ui/Liquid.kt  449cd8a  AGSL RuntimeShader -> Skia RuntimeEffect
+uk/noammm/kav/ui/Qr.kt  ede72bd  CameraX + zxing; AVFoundation + a QR encoder come in Phase 6
+uk/noammm/kav/TripService.kt  449cd8a  Android foreground service; Phase 4 adds background location + local notifications
+uk/noammm/kav/Checks.kt  449cd8a  JobScheduler + PackageInstaller; iOS runs the checks when Kav comes to the front
+uk/noammm/kav/data/AutoUpdate.kt  ede72bd  APK self-install; SideStore updates Kav on iOS
+uk/noammm/kav/Speaker.kt  449cd8a  Android TextToSpeech; AVSpeechSynthesizer on iOS
+uk/noammm/kav/LineAlerts.kt  449cd8a  AlarmManager wakes; no scheduled wakes for an iPhone app yet
+uk/noammm/kav/KavApp.kt  449cd8a  android.app.Application; MainViewController calls onCreate
+uk/noammm/kav/data/RiderProxy.kt  449cd8a  ProxySelector/Authenticator/WebView proxy; iOS puts the proxy on each connection
+uk/noammm/kav/data/GoogleSession.kt  449cd8a  OkHttp + cookie jar; HttpURLConnection with the system cookie store
+uk/noammm/kav/data/GovMapTiles.kt  449cd8a  OkHttp client handed to MapLibre Android; MapLibre iOS networks in Swift

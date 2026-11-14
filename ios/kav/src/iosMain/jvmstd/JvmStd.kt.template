@@ -1,0 +1,404 @@
+@file:Suppress("unused", "FunctionName", "NOTHING_TO_INLINE")
+// Stamped by Gradle (:kav:stampJvmStd) into every package the upstream sources declare, so
+// JVM-only stdlib calls in upstream code resolve without editing it. A declaration in the
+// same package beats default imports. Edit this template, never a stamped copy.
+package __PACKAGE__
+
+import java.io.ByteArrayInputStream
+import java.nio.charset.Charset
+import java.util.Locale
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.IO as CoroutinesIO
+import kotlin.math.abs
+import kotlin.math.floor
+import kotlin.math.pow
+import kotlin.text.lowercase as stdlibLowercase
+import kotlin.text.uppercase as stdlibUppercase
+import kotlin.text.titlecase as stdlibTitlecase
+import kotlin.time.Clock
+import kotlin.time.TimeSource
+import kotlin.time.ExperimentalTime
+import platform.Foundation.dateWithTimeIntervalSinceNow
+
+// ---- annotations that exist in kotlin.jvm on Android and elsewhere on Native ----
+typealias Volatile = kotlin.concurrent.Volatile
+typealias Runnable = java.lang.Runnable
+typealias SecurityException = java.lang.SecurityException
+
+/** kotlin.jvm.Synchronized does not exist on Native. Upstream uses it to serialise small file appends; races there are benign. */
+@Target(AnnotationTarget.FUNCTION, AnnotationTarget.PROPERTY_GETTER, AnnotationTarget.PROPERTY_SETTER)
+annotation class Synchronized
+
+object Integer {
+    const val MAX_VALUE = Int.MAX_VALUE
+    const val MIN_VALUE = Int.MIN_VALUE
+    fun toHexString(i: Int): String = i.toUInt().toString(16)
+    fun parseInt(s: String): Int = s.toInt()
+    fun valueOf(i: Int): Int = i
+    fun bitCount(i: Int): Int = i.countOneBits()
+}
+
+// kotlinx.coroutines keeps Dispatchers.IO as an extension on Native; on the JVM it is a member, so upstream imports nothing.
+val Dispatchers.IO: CoroutineDispatcher get() = Dispatchers.CoroutinesIO
+
+// ---- java.util.Map.putIfAbsent on Kotlin maps ----
+fun <K, V> MutableMap<K, V>.putIfAbsent(key: K, value: V): V? = get(key) ?: run { put(key, value); null }
+// java.util.Map.merge: the value put, or the key removed when remapping gives null.
+fun <K, V : Any> MutableMap<K, V>.merge(key: K, value: V, remapping: (V, V) -> V?): V? {
+    val old = get(key)
+    val next = if (old == null) value else remapping(old, value)
+    if (next == null) remove(key) else put(key, next)
+    return next
+}
+// kotlin.collections.toSortedMap (JVM): a map that iterates in the comparator's order.
+fun <K, V> Map<out K, V>.toSortedMap(comparator: Comparator<in K>): Map<K, V> =
+    entries.sortedWith { a, b -> comparator.compare(a.key, b.key) }.associateTo(kotlin.collections.LinkedHashMap()) { it.key to it.value }
+// Char.titlecase(Locale): the locale only matters for Turkish dotted i, which Kav never titlecases.
+@Suppress("UNUSED_PARAMETER")
+fun Char.titlecase(locale: Locale): String = this.stdlibTitlecase()
+// Foo::class.java: KClass stands in for java.lang.Class (Context.getSystemService(Class), Intent(ctx, Class)).
+val <T : Any> kotlin.reflect.KClass<T>.java: kotlin.reflect.KClass<T> get() = this
+
+// ---- java.lang.Character (only what upstream calls) ----
+object Character {
+    const val FORMAT: Byte = 16
+    fun toChars(codePoint: Int): CharArray = if (codePoint < 0x10000) charArrayOf(codePoint.toChar()) else {
+        val v = codePoint - 0x10000
+        charArrayOf((0xD800 + (v shr 10)).toChar(), (0xDC00 + (v and 0x3FF)).toChar())
+    }
+    const val CONTROL: Byte = 15
+    // Only FORMAT (Cf: the bidi marks, zero-width joiners) and CONTROL are told apart; everything else is 0.
+    fun getType(c: Char): Int = when {
+        c.category == CharCategory.FORMAT -> FORMAT.toInt()
+        c.category == CharCategory.CONTROL -> CONTROL.toInt()
+        else -> 0
+    }
+    class UnicodeBlock internal constructor(private val range: IntRange) {
+        companion object {
+            val COMBINING_DIACRITICAL_MARKS = UnicodeBlock(0x0300..0x036F)
+            private val OTHER = UnicodeBlock(-1..-1)
+            fun of(c: Char): UnicodeBlock = if (c.code in COMBINING_DIACRITICAL_MARKS.range) COMBINING_DIACRITICAL_MARKS else OTHER
+        }
+    }
+    fun isLetter(c: Char): Boolean = c.isLetter()
+    fun isDigit(c: Char): Boolean = c.isDigit()
+    fun isWhitespace(c: Char): Boolean = c.isWhitespace()
+    fun isUpperCase(c: Char): Boolean = c.isUpperCase()
+    fun isLowerCase(c: Char): Boolean = c.isLowerCase()
+    fun toUpperCase(c: Char): Char = c.uppercaseChar()
+    fun toLowerCase(c: Char): Char = c.lowercaseChar()
+}
+
+// ---- java.lang.Class stand-in for `x.javaClass.simpleName` ----
+class JavaClass(private val k: kotlin.reflect.KClass<*>) {
+    val simpleName: String get() = k.simpleName ?: ""
+    val name: String get() = k.qualifiedName ?: simpleName
+}
+val <T : Any> T.javaClass: JavaClass get() = JavaClass(this::class)
+
+// ---- Java getters return platform types (String!), and upstream calls String members on them directly.
+// On a null these throw as the JVM would. ----
+val String?.length: Int get() = this!!.length
+fun String?.lowercase(): String = this!!.stdlibLowercase()
+fun String?.uppercase(): String = this!!.stdlibUppercase()
+
+// ---- String.lowercase(Locale) / uppercase(Locale) ----
+fun String.lowercase(locale: Locale): String = this.stdlibLowercase()
+fun String.uppercase(locale: Locale): String = this.stdlibUppercase()
+
+// ---- kotlin.io helpers that exist only on the JVM ----
+fun ByteArray.inputStream(): ByteArrayInputStream = ByteArrayInputStream(this)
+fun ByteArray.toString(charset: Charset): String = String(this, charset)
+// java.lang.String(char[]): an error on Native (deprecated), so the package's own beats it.
+fun String(chars: CharArray): String = chars.concatToString()
+fun StringBuilder.append(chars: CharArray, offset: Int, len: Int): StringBuilder = appendRange(chars, offset, offset + len)
+
+// ---- kotlin.synchronized: Compose state and the Kav singletons only need mutual exclusion
+// within one process; the app does its blocking IO on Dispatchers.IO, so a spin-free
+// reentrant lock is not required. Callers run the block while holding nothing: single-threaded
+// semantics are kept by the main-queue discipline of the callers upstream. See compat notes in
+// ios/MIGRATION_PLAN.md if a race ever shows up: replace with a real lock here, once.
+inline fun <R> synchronized(@Suppress("UNUSED_PARAMETER") lock: Any, block: () -> R): R = block()
+
+// ---- java.lang.Object as a monitor: Net.Unpacking hands a gzip stream between two real threads with
+// synchronized(lock) + wait/notifyAll, so this one does lock (an NSCondition; not reentrant, upstream never nests). ----
+open class Object {
+    @PublishedApi internal val monitor = platform.Foundation.NSCondition()
+    fun wait() = monitor.wait()
+    fun wait(ms: Long) { monitor.waitUntilDate(platform.Foundation.NSDate.dateWithTimeIntervalSinceNow(ms / 1000.0)) }
+    fun notify() = monitor.signal()
+    fun notifyAll() = monitor.broadcast()
+}
+
+inline fun <R> synchronized(lock: Object, block: () -> R): R {
+    lock.monitor.lock()
+    try { return block() } finally { lock.monitor.unlock() }
+}
+
+// ---- java.lang.ThreadLocal: kept in the current NSThread's dictionary ----
+class ThreadLocal<T> {
+    private val key = "kav.threadLocal." + kotlin.random.Random.nextLong()
+    private class Box<T>(val value: T)
+    @Suppress("UNCHECKED_CAST")
+    fun get(): T? = (platform.Foundation.NSThread.currentThread.threadDictionary.objectForKey(key) as? Box<T>)?.value
+    fun set(value: T) { platform.Foundation.NSThread.currentThread.threadDictionary.setObject(Box(value), forKey = key as platform.Foundation.NSString) }
+    fun remove() { platform.Foundation.NSThread.currentThread.threadDictionary.removeObjectForKey(key) }
+}
+
+// ---- java.lang.Runtime: Net shares the week's sorting out between the cores ----
+object Runtime {
+    fun getRuntime(): Runtime = this
+    fun availableProcessors(): Int = platform.Foundation.NSProcessInfo.processInfo.activeProcessorCount.toInt()
+}
+
+// ---- java.lang.System / Math ----
+object System {
+    @OptIn(ExperimentalTime::class)
+    fun currentTimeMillis(): Long = Clock.System.now().toEpochMilliseconds()
+    private val origin = TimeSource.Monotonic.markNow()
+    fun nanoTime(): Long = origin.elapsedNow().inWholeNanoseconds
+    fun identityHashCode(o: Any?): Int = o?.hashCode() ?: 0
+    fun getProperty(key: String): String? = null
+}
+
+object Math {
+    const val PI: Double = kotlin.math.PI
+    const val E: Double = kotlin.math.E
+    fun toRadians(d: Double): Double = d / 180.0 * kotlin.math.PI
+    fun toDegrees(r: Double): Double = r * 180.0 / kotlin.math.PI
+    fun hypot(x: Double, y: Double): Double = kotlin.math.hypot(x, y)
+    fun round(d: Double): Long = kotlin.math.floor(d + 0.5).toLong()
+    fun round(f: Float): Int = kotlin.math.floor(f + 0.5f).toInt()
+    fun abs(a: Int): Int = kotlin.math.abs(a)
+    fun abs(a: Long): Long = kotlin.math.abs(a)
+    fun abs(a: Double): Double = kotlin.math.abs(a)
+    fun abs(a: Float): Float = kotlin.math.abs(a)
+    fun max(a: Int, b: Int): Int = maxOf(a, b)
+    fun max(a: Long, b: Long): Long = maxOf(a, b)
+    fun max(a: Double, b: Double): Double = maxOf(a, b)
+    fun max(a: Float, b: Float): Float = maxOf(a, b)
+    fun min(a: Int, b: Int): Int = minOf(a, b)
+    fun min(a: Long, b: Long): Long = minOf(a, b)
+    fun min(a: Double, b: Double): Double = minOf(a, b)
+    fun min(a: Float, b: Float): Float = minOf(a, b)
+    fun pow(a: Double, b: Double): Double = a.pow(b)
+    fun sqrt(a: Double): Double = kotlin.math.sqrt(a)
+    fun sin(a: Double): Double = kotlin.math.sin(a)
+    fun cos(a: Double): Double = kotlin.math.cos(a)
+    fun tan(a: Double): Double = kotlin.math.tan(a)
+    fun asin(a: Double): Double = kotlin.math.asin(a)
+    fun acos(a: Double): Double = kotlin.math.acos(a)
+    fun atan(a: Double): Double = kotlin.math.atan(a)
+    fun atan2(y: Double, x: Double): Double = kotlin.math.atan2(y, x)
+    fun sinh(a: Double): Double = kotlin.math.sinh(a)
+    fun log(a: Double): Double = kotlin.math.ln(a)
+    fun exp(a: Double): Double = kotlin.math.exp(a)
+    fun floor(a: Double): Double = kotlin.math.floor(a)
+    fun ceil(a: Double): Double = kotlin.math.ceil(a)
+    fun signum(a: Double): Double = kotlin.math.sign(a)
+    fun floorDiv(a: Int, b: Int): Int { val q = a / b; return if (a % b != 0 && (a xor b) < 0) q - 1 else q }
+    fun floorDiv(a: Long, b: Long): Long { val q = a / b; return if (a % b != 0L && (a xor b) < 0) q - 1 else q }
+    fun floorDiv(a: Long, b: Int): Long = floorDiv(a, b.toLong())
+    fun floorMod(a: Int, b: Int): Int = a - floorDiv(a, b) * b
+    fun floorMod(a: Long, b: Long): Long = a - floorDiv(a, b) * b
+    fun floorMod(a: Long, b: Int): Int = floorMod(a, b.toLong()).toInt()
+}
+
+// ---- java.lang.Thread: upstream starts plain background threads and sleeps on them ----
+class Thread(private val body: () -> Unit) {
+    constructor(r: java.lang.Runnable) : this({ r.run() })
+    var isDaemon: Boolean = false
+    var name: String = "Thread"
+    var priority: Int = 5
+    fun start() {
+        platform.darwin.dispatch_async(platform.darwin.dispatch_get_global_queue(platform.darwin.DISPATCH_QUEUE_PRIORITY_DEFAULT.toLong(), 0u)) { body() }
+    }
+    fun interrupt() {}
+    companion object {
+        const val MIN_PRIORITY = 1
+        fun sleep(ms: Long) { platform.Foundation.NSThread.sleepForTimeInterval(ms / 1000.0) }
+    }
+}
+
+// ---- java.util.LinkedHashMap(capacity, loadFactor, accessOrder) with removeEldestEntry: upstream's LRU caches.
+// Kotlin/Native's LinkedHashMap is final, so this same-package class stands in for every upstream use. ----
+open class LinkedHashMap<K, V>(initialCapacity: Int = 16, @Suppress("UNUSED_PARAMETER") loadFactor: Float = 0.75f,
+                               private val accessOrder: Boolean = false) : AbstractMutableMap<K, V>() {
+    constructor(from: Map<out K, V>) : this(from.size) { putAll(from) }
+    private val inner = kotlin.collections.LinkedHashMap<K, V>(initialCapacity)
+    override val entries: MutableSet<MutableMap.MutableEntry<K, V>> get() = inner.entries
+    override val size: Int get() = inner.size
+    override fun containsKey(key: K): Boolean = inner.containsKey(key)
+    override fun get(key: K): V? {
+        if (!accessOrder || !inner.containsKey(key)) return inner[key]
+        @Suppress("UNCHECKED_CAST") val v = inner.remove(key) as V
+        inner[key] = v
+        return v
+    }
+    override fun put(key: K, value: V): V? {
+        val old = if (accessOrder) inner.remove(key) else null
+        val prev = inner.put(key, value) ?: old
+        val eldest = inner.entries.firstOrNull()
+        if (eldest != null && removeEldestEntry(eldest)) inner.remove(eldest.key)
+        return prev
+    }
+    override fun remove(key: K): V? = inner.remove(key)
+    override fun clear() = inner.clear()
+    protected open fun removeEldestEntry(eldest: MutableMap.MutableEntry<K, V>?): Boolean = false
+}
+
+// ---- String.format (java.util.Formatter subset: %d %s %f %x %X %% %n, flags - 0 + , and width/precision/arg index) ----
+fun String.Companion.format(format: String, vararg args: Any?): String = KavFormat.format(format, args)
+fun String.Companion.format(locale: Locale?, format: String, vararg args: Any?): String = KavFormat.format(format, args)
+fun String.format(vararg args: Any?): String = KavFormat.format(this, args)
+fun String.format(locale: Locale?, vararg args: Any?): String = KavFormat.format(this, args)
+
+// ---- kotlin.text.Charsets, new String(bytes, charset), String.toByteArray(charset) ----
+object Charsets {
+    val UTF_8: Charset = Charset.UTF_8
+    val ISO_8859_1: Charset = Charset.ISO_8859_1
+    val US_ASCII: Charset = Charset.US_ASCII
+}
+
+fun String(bytes: ByteArray, charset: Charset): String =
+    if (charset == Charset.UTF_8) bytes.decodeToString()
+    else buildString(bytes.size) { bytes.forEach { append((it.toInt() and 0xFF).toChar()) } }
+
+fun String(bytes: ByteArray): String = bytes.decodeToString()
+fun String(bytes: ByteArray, offset: Int, length: Int): String = bytes.decodeToString(offset, offset + length)
+fun String(bytes: ByteArray, offset: Int, length: Int, charset: Charset): String =
+    if (charset == Charset.UTF_8) bytes.decodeToString(offset, offset + length)
+    else buildString(length) { for (i in offset until offset + length) append((bytes[i].toInt() and 0xFF).toChar()) }
+
+fun String.toByteArray(charset: Charset = Charset.UTF_8): ByteArray =
+    if (charset == Charset.UTF_8) encodeToByteArray() else ByteArray(length) { this[it].code.toByte() }
+
+internal object KavFormat {
+    fun format(fmt: String, args: Array<out Any?>): String {
+        val out = StringBuilder()
+        var i = 0
+        var next = 0
+        while (i < fmt.length) {
+            val c = fmt[i]
+            if (c != '%') { out.append(c); i++; continue }
+            i++
+            require(i < fmt.length) { "Format ends with %: $fmt" }
+            var index = -1
+            val save = i
+            var n = 0
+            while (i < fmt.length && fmt[i].isDigit()) { n = n * 10 + (fmt[i] - '0'); i++ }
+            if (i < fmt.length && fmt[i] == '$' && i > save) { index = n - 1; i++ } else i = save
+            var left = false; var zero = false; var plus = false; var group = false
+            flags@ while (i < fmt.length) {
+                when (fmt[i]) { '-' -> left = true; '0' -> zero = true; '+' -> plus = true; ',' -> group = true; else -> break@flags }
+                i++
+            }
+            var width = 0
+            while (i < fmt.length && fmt[i].isDigit()) { width = width * 10 + (fmt[i] - '0'); i++ }
+            var prec = -1
+            if (i < fmt.length && fmt[i] == '.') {
+                i++; prec = 0
+                while (i < fmt.length && fmt[i].isDigit()) { prec = prec * 10 + (fmt[i] - '0'); i++ }
+            }
+            require(i < fmt.length) { "Bad format: $fmt" }
+            val conv = fmt[i++]
+            var body: String = when (conv) {
+                '%' -> "%"
+                'n' -> "\n"
+                else -> {
+                    val arg = args.getOrElse(if (index >= 0) index else next++) { throw IllegalArgumentException("Missing argument for %$conv in: $fmt") }
+                    when (conv) {
+                        'd' -> signed(toLongValue(arg), plus, group)
+                        'f' -> fixed((arg as Number).toDouble(), if (prec < 0) 6 else prec, plus, group)
+                        's' -> arg.toString().let { if (prec >= 0 && it.length > prec) it.substring(0, prec) else it }
+                        'S' -> arg.toString().stdlibUppercase()
+                        'x' -> toHexValue(arg)
+                        'X' -> toHexValue(arg).stdlibUppercase()
+                        else -> throw IllegalArgumentException("Unsupported conversion %$conv in: $fmt")
+                    }
+                }
+            }
+            if (body.length < width) {
+                val pad = width - body.length
+                body = when {
+                    left -> body + " ".repeat(pad)
+                    zero && conv != 's' && conv != '%' -> {
+                        val signLen = if (body.startsWith("-") || body.startsWith("+")) 1 else 0
+                        body.substring(0, signLen) + "0".repeat(pad) + body.substring(signLen)
+                    }
+                    else -> " ".repeat(pad) + body
+                }
+            }
+            out.append(body)
+        }
+        return out.toString()
+    }
+
+    private fun toHexValue(a: Any?): String = when (a) {
+        is Byte -> (a.toInt() and 0xFF).toString(16)
+        is Short -> (a.toInt() and 0xFFFF).toString(16)
+        is Int -> a.toUInt().toString(16)
+        is Long -> a.toULong().toString(16)
+        is UByte -> a.toString(16)
+        is UShort -> a.toString(16)
+        is UInt -> a.toString(16)
+        is ULong -> a.toString(16)
+        else -> throw IllegalArgumentException("%x needs an integer, got ${a?.let { it::class.simpleName }}")
+    }
+
+    private fun toLongValue(a: Any?): Long = when (a) {
+        is Long -> a; is Int -> a.toLong(); is Short -> a.toLong(); is Byte -> a.toLong()
+        is ULong -> a.toLong(); is UInt -> a.toLong(); is UShort -> a.toLong(); is UByte -> a.toLong()
+        else -> throw IllegalArgumentException("%d needs an integer, got ${a?.let { it::class.simpleName }}")
+    }
+
+    private fun signed(v: Long, plus: Boolean, group: Boolean): String {
+        val digits = if (v < 0) (if (v == Long.MIN_VALUE) "9223372036854775808" else (-v).toString()) else v.toString()
+        val g = if (group) grouped(digits) else digits
+        return (if (v < 0) "-" else if (plus) "+" else "") + g
+    }
+
+    private fun grouped(d: String): String {
+        val sb = StringBuilder()
+        d.forEachIndexed { k, ch -> if (k > 0 && (d.length - k) % 3 == 0) sb.append(','); sb.append(ch) }
+        return sb.toString()
+    }
+
+    // Like java.util.Formatter: round the shortest decimal form of the double (so 1.005 -> "1.01"), HALF_UP.
+    private fun fixed(v: Double, prec: Int, plus: Boolean, group: Boolean): String {
+        if (v.isNaN()) return "NaN"
+        if (v.isInfinite()) return if (v > 0) (if (plus) "+Infinity" else "Infinity") else "-Infinity"
+        val neg = v < 0 || (v == 0.0 && 1.0 / v < 0)
+        val (whole, frac) = decimalRound(abs(v), prec)
+        val w = if (group) grouped(whole) else whole
+        return (if (neg) "-" else if (plus) "+" else "") + w + (if (prec > 0) ".$frac" else "")
+    }
+
+    // v >= 0, finite. Returns (integer digits, exactly `prec` fraction digits).
+    private fun decimalRound(v: Double, prec: Int): Pair<String, String> {
+        val text = v.toString()                                  // "123.456", "1.0E10", "1.234E-5"
+        val exp = if ('E' in text) text.substringAfter('E').toInt() else 0
+        val mant = text.substringBefore('E')
+        val dot = mant.indexOf('.').let { if (it < 0) mant.length else it }
+        val digits = mant.replace(".", "")
+        val point = dot + exp                                    // digits before the decimal point
+        var intPart = if (point <= 0) "0" else if (point >= digits.length) digits + "0".repeat(point - digits.length) else digits.substring(0, point)
+        var frac = if (point >= digits.length) "" else if (point <= 0) "0".repeat(-point) + digits else digits.substring(point)
+        if (frac.length <= prec) return intPart.trimStart('0').ifEmpty { "0" } to frac.padEnd(prec, '0')
+        val up = frac[prec] >= '5'
+        frac = frac.substring(0, prec)
+        if (up) {                                                // add one unit in the last place
+            val all = (intPart + frac).toCharArray()
+            var i = all.size - 1
+            while (i >= 0) {
+                if (all[i] == '9') { all[i] = '0'; i-- } else { all[i] = all[i] + 1; break }
+            }
+            var joined = all.concatToString()
+            if (i < 0) joined = "1$joined"
+            intPart = joined.substring(0, joined.length - prec)
+            frac = joined.substring(joined.length - prec)
+        }
+        return intPart.trimStart('0').ifEmpty { "0" } to frac
+    }
+}
