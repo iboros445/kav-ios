@@ -21,7 +21,26 @@ final class MapLibreNativeMap: NSObject, KavNativeMap, MLNMapViewDelegate {
 
     var view: UIView { mapView }
 
+    // Diagnostics for kav.log: a phone without a Mac shows nothing else of why a map stays blank.
+    private static var mapLibreLogged = 0
+    private static let hookMapLibreLog: Void = {
+        // MapLibre's own warnings and errors (a sprite, glyph or tile it couldn't load), at most 150 lines a launch.
+        MLNLoggingConfiguration.shared.loggingLevel = .warning
+        MLNLoggingConfiguration.shared.handler = { level, _, _, message in
+            guard mapLibreLogged < 150 else { return }
+            mapLibreLogged += 1
+            log("MapLibre \(level == .error ? "error" : "warning"): \(message)")
+        }
+    }()
+    private static var made = 0
+    private let number: Int
+    private var framesSeen = 0
+    private var fullSeen = false
+
     override init() {
+        _ = Self.hookMapLibreLog
+        Self.made += 1
+        number = Self.made
         mapView = MLNMapView(frame: CGRect(x: 0, y: 0, width: 1, height: 1))
         super.init()
         mapView.delegate = self
@@ -49,10 +68,22 @@ final class MapLibreNativeMap: NSObject, KavNativeMap, MLNMapViewDelegate {
             return
         }
         pendingLoaded = onLoaded
+        // Where this style takes its tiles, icons and fonts from.
+        if let data = json.data(using: .utf8), let o = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] {
+            let sources = (o["sources"] as? [String: Any] ?? [:]).map { id, s -> String in
+                let s = s as? [String: Any] ?? [:]
+                return "\(id)=\(s["url"] ?? (s["tiles"] as? [Any])?.first ?? s["type"] ?? "?")"
+            }
+            Self.log("map \(number): style \(o["name"] ?? "?") (\((o["layers"] as? [Any])?.count ?? 0) layers), "
+                + "sources \(sources), sprite \(o["sprite"] ?? "none"), glyphs \(o["glyphs"] ?? "none"), "
+                + "view \(Int(mapView.bounds.width))x\(Int(mapView.bounds.height))")
+        }
         mapView.styleURL = url
     }
 
     func mapView(_ mapView: MLNMapView, didFinishLoading style: MLNStyle) {
+        Self.log("map \(number): style loaded, view \(Int(mapView.bounds.width))x\(Int(mapView.bounds.height)) "
+            + "in a window: \(mapView.window != nil)")
         // Kav eases nothing the map would: its fades are drawn step by step (TransitionOptions(0, 0) on Android).
         style.transition = MLNTransition(duration: 0, delay: 0)
         let done = pendingLoaded
@@ -298,6 +329,15 @@ final class MapLibreNativeMap: NSObject, KavNativeMap, MLNMapViewDelegate {
     }
 
     func mapViewDidFinishRenderingFrame(_ mapView: MLNMapView, fullyRendered: Bool) {
+        framesSeen += 1
+        if framesSeen == 1 || (fullyRendered && !fullSeen) || framesSeen == 300 {
+            if fullyRendered { fullSeen = true }
+            let f = mapView.convert(mapView.bounds, to: nil)
+            Self.log("map \(number): frame \(framesSeen) fully=\(fullyRendered), on screen at \(Int(f.minX)),\(Int(f.minY)) "
+                + "\(Int(f.width))x\(Int(f.height)), alpha \(mapView.alpha), hidden \(mapView.isHidden), "
+                + "in a window: \(mapView.window != nil), zoom \(String(format: "%.1f", mapView.zoomLevel)) "
+                + "at \(String(format: "%.4f,%.4f", mapView.centerCoordinate.latitude, mapView.centerCoordinate.longitude))")
+        }
         frameListener?.rendered(fully: fullyRendered)
     }
 
