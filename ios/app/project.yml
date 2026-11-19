@@ -26,6 +26,8 @@ targets:
         type: folder
         optional: true
     dependencies:
+      - target: KavTripWidget
+        embed: true
       - package: MapLibre
     settings:
       base:
@@ -45,13 +47,14 @@ targets:
           -framework Metal -framework MetalKit -framework QuartzCore -framework CoreGraphics
           -framework CoreText -framework CoreFoundation -framework Foundation -framework UIKit
           -framework AVFoundation -framework CoreLocation -framework CoreMotion
-          -framework UserNotifications -framework Security
+          -framework UserNotifications -framework Security -framework ActivityKit
     info:
       path: Kav/Info.plist
       properties:
         CFBundleDisplayName: Kav
         CFBundleShortVersionString: "$(MARKETING_VERSION)"
         CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        NSSupportsLiveActivities: true
         # The app's default look is OLED black. The launch screen and the first frames are dark on every phone, and
         # the app switches the window to its own look (light included) as soon as it has started.
         UILaunchScreen:
@@ -73,3 +76,26 @@ targets:
         CFBundleURLTypes:
           - CFBundleURLName: io.github.iboros445.kav.moovit
             CFBundleURLSchemes: [moovit]
+  KavTripWidget:
+    type: app-extension
+    platform: iOS
+    deploymentTarget:
+      iOS: "16.1"
+    sources:
+      - path: KavTripWidget
+      - path: Kav/KavTripAttributes.swift
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: io.github.iboros445.kav.TripWidget
+        PRODUCT_NAME: KavTripWidget
+        GENERATE_INFOPLIST_FILE: NO
+        SWIFT_VERSION: "5.0"
+        ENABLE_BITCODE: NO
+    info:
+      path: KavTripWidget/Info.plist
+      properties:
+        CFBundleDisplayName: Kav
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension

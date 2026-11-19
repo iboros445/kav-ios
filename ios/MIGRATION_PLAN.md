@@ -288,10 +288,9 @@ real override list and the lessons learned.
 encoder (e.g. `io.github.alexzhirkevich:qrose`) via a small override or shim of the zxing
 classes in use.
 
-**Phase 7 (optional, last): Live Activity**: add a WidgetKit extension target in `project.yml` (ActivityKit,
-iOS 16.1+). The Kotlin `TripService.ios.kt` posts start/update/end through a Swift `LiveActivityBridge`
-(local updates only, no push). Document in INSTALL.md: costs 1 extra App ID once, and Kav must be
-installed through SideStore directly (not LiveContainer).
+**Phase 7 (Live Activity / Dynamic Island)**: DONE. Added `KavTripWidget` extension target in `project.yml` (ActivityKit,
+iOS 16.1+). `TripService.ios.kt` posts start/update/end through `TripActivityBridge` / Swift `LiveActivityBridge`
+(local updates only, no push). Dynamic Island displays compact, minimal, and expanded views; Lock Screen displays trip card.
 
 ---
 

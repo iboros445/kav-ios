@@ -9,6 +9,10 @@ struct KavApp: SwiftUI.App {
     init() {
         // The map shim draws through MapLibre Native for iOS (MapBridge.swift); register it before any map exists.
         MapHostKt.registerMapFactory(factory: MapLibreFactory())
+
+        if #available(iOS 16.1, *) {
+            TripActivityHostKt.registerTripActivityHandler(handler: LiveActivityBridge.shared)
+        }
     }
 
     var body: some SwiftUI.Scene {

@@ -227,7 +227,7 @@ Keep this list current. It is the user-facing truth about the iOS build.
 | Opening `https://moovitapp.com/...` links | Not possible (needs Moovit's AASA file). `moovit://` links work |
 | Self-update from GitHub | Replaced by the SideStore source |
 | Paying for rides (Moovit Pay) | Stubbed until migration Phase 6 |
-| Ongoing-trip notification | Local notifications + background location. Live Activity in Phase 7 |
+| Ongoing-trip notification | Dynamic Island / Live Activity tracking via WidgetKit + ActivityKit (`KavTripWidget`) |
 | The rider's proxy (Settings, 4.3) | Kav's own requests go through it (HTTP/HTTPS and SOCKS, with a login). The pages Kav shows (Street View, Rav-Pass, the report form) don't: WKWebView only takes a proxy from iOS 17, and none with a login |
 | GovMap layers (4.3) | MapLibre iOS sends its own requests, without the Referer GovMap's tile server wants, so it may refuse them (`GovMapTiles.ios.kt`) |
 | A trip's map picture in the share card (4.3) | Not yet: `MapSnapshotter` fails at once until MapBridge.swift wraps MLNMapSnapshotter. The card goes without it |
