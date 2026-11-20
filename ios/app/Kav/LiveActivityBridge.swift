@@ -19,7 +19,7 @@ final class LiveActivityBridge: NSObject, KavTripActivityHandler {
     }
 
     @objc private func handleAppWillTerminate() {
-        NSLog("Kav: app will terminate, ending all Live Activities immediately")
+        NSLog("Kav: app will terminate, ending Live Activity")
         endSync()
     }
 
@@ -52,35 +52,26 @@ final class LiveActivityBridge: NSObject, KavTripActivityHandler {
 
         NSLog("Kav: LiveActivity update tripId=\(tripId), chip=\(chip), time=\(arrivalTime)")
 
-        // Stale after 3 minutes if no new location/step update arrives
-        let staleDate = Date(timeIntervalSinceNow: 180)
+        // Adopt an already running activity from the system if available
+        let active = currentActivity ?? Activity<KavTripAttributes>.activities.first(where: { $0.attributes.tripId == tripId }) ?? Activity<KavTripAttributes>.activities.first
 
-        if let activity = currentActivity, activity.attributes.tripId == tripId {
+        if let existing = active {
+            currentActivity = existing
             Task {
                 if #available(iOS 16.2, *) {
-                    let content = ActivityContent(state: state, staleDate: staleDate)
-                    await activity.update(content)
+                    let content = ActivityContent(state: state, staleDate: nil)
+                    await existing.update(content)
                 } else {
-                    await activity.update(using: state)
+                    await existing.update(using: state)
                 }
+                NSLog("Kav: updated existing Live Activity id=\(existing.id)")
             }
         } else {
-            // Dismiss older activities before launching the new trip activity
-            for existing in Activity<KavTripAttributes>.activities {
-                Task {
-                    if #available(iOS 16.2, *) {
-                        await existing.end(nil, dismissalPolicy: .immediate)
-                    } else {
-                        await existing.end(dismissalPolicy: .immediate)
-                    }
-                }
-            }
-
             do {
                 let attributes = KavTripAttributes(tripId: tripId)
                 let activity: Activity<KavTripAttributes>
                 if #available(iOS 16.2, *) {
-                    let content = ActivityContent(state: state, staleDate: staleDate)
+                    let content = ActivityContent(state: state, staleDate: nil)
                     activity = try Activity.request(attributes: attributes, content: content, pushType: nil)
                 } else {
                     activity = try Activity.request(attributes: attributes, contentState: state, pushType: nil)
@@ -123,6 +114,6 @@ final class LiveActivityBridge: NSObject, KavTripActivityHandler {
             }
             sema.signal()
         }
-        _ = sema.wait(timeout: .now() + 1.0)
+        _ = sema.wait(timeout: .now() + 0.5)
     }
 }
