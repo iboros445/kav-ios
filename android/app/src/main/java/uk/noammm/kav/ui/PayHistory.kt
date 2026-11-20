@@ -17,24 +17,45 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
-import uk.noammm.kav.data.MoovitPay
+import uk.noammm.kav.data.RavPass
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
 import java.util.Locale
 import java.util.TimeZone
+import androidx.compose.foundation.Canvas
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.material.icons.Icons
+import androidx.compose.material3.Icon
+import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.togetherWith
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.snap
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.style.TextDirection
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.draw.clip
+import androidx.compose.foundation.shape.RoundedCornerShape
 
-private class Month(val key: Int, val charges: List<MoovitPay.Charge>)
-
-internal fun currentChargeTicket(c: MoovitPay.Charge, wallet: MoovitPay.Wallet?): MoovitPay.Ticket? {
-    val near = wallet?.tickets.orEmpty().filter { kotlin.math.abs(it.boughtUtc - c.atUtc) < 30_000 }
-    val priced = near.filter { c.amount != null && it.price?.agorot == c.amount.agorot }
-    return priced.ifEmpty { near }.minByOrNull { kotlin.math.abs(it.boughtUtc - c.atUtc) }
-}
+private class Month(val key: Int, val rides: List<RavPass.Ride>)
 
 // year * 12 + month, from 0, in Israel time.
 private fun monthKey(ms: Long): Int = Calendar.getInstance(ISRAEL).run { timeInMillis = ms; get(Calendar.YEAR) * 12 + get(Calendar.MONTH) }
@@ -50,43 +71,39 @@ private fun monthName(key: Int): String = SimpleDateFormat("MMMM yyyy", if (T.rt
     .apply { timeZone = ISRAEL }
     .format(Calendar.getInstance(ISRAEL).apply { clear(); set(key / 12, key % 12, 1, 12, 0) }.time)
 
-private fun shekels(agorot: Long): String = MoovitPay.Price(agorot, "ILS").text
+private fun shekels(agorot: Long): String = RavPass.Price(agorot).text
 
-// The payment history: totals at the top, a total for any dates, then every charge month by month. A month
-// is asked for only when the list reaches it, so a long history never arrives all at once.
+private fun RavPass.Ride.paid() = if (cancelled) 0L else amount?.agorot ?: 0L
+
+// The payment history: totals at the top, a total for any dates, then every ride month by month. HopOn sends six
+// months at a time, and the next six only when the list reaches them.
 @Composable
 fun PayHistoryScreen(onClose: () -> Unit, onTicket: (String) -> Unit) {
     val scope = rememberCoroutineScope()
     val now = remember { System.currentTimeMillis() }
-    val statusNow = rememberNow()
-    val months = remember { mutableStateListOf<Month>() }
-    val cache = remember { HashMap<Int, List<MoovitPay.Charge>>() }
-    var billing by remember { mutableStateOf<MoovitPay.Billing?>(null) }
-    var cursor by remember { mutableIntStateOf(monthKey(now)) }
-    var empty by remember { mutableIntStateOf(0) }
+    // Home's card has usually fetched the first six months already: the history opens with them, no loading.
+    val cached = remember { SpendCache.rides }
+    val rides = remember { mutableStateListOf<RavPass.Ride>().apply { cached?.let { addAll(it) } } }
+    // The months asked for so far, counting back from this one, and whether HopOn has older ones.
+    var offset by remember { mutableIntStateOf(if (cached != null) 6 else 0) }
+    var more by remember { mutableStateOf(cached == null || SpendCache.more) }
     var loading by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     var from by remember { mutableLongStateOf(startOfMonth(now)) }
     var to by remember { mutableLongStateOf(now) }
-    var range by remember { mutableStateOf<Pair<Long, Int>?>(null) }
     var picking by remember { mutableStateOf(false) }
 
-    suspend fun monthOf(key: Int): List<MoovitPay.Charge> =
-        cache[key] ?: Payer.call { MoovitPay.history(it, key % 12 + 1, key / 12) }.also { cache[key] = it }
-
-    // A year of empty months in a row is taken as the start of the history.
-    val done = empty >= 12
-
     suspend fun loadNext() {
-        val key = cursor
-        val list = monthOf(key)
-        months += Month(key, list)
-        empty = if (list.isEmpty()) empty + 1 else 0
-        cursor = key - 1
+        val (loaded, older) = Payer.call { RavPass.billings(it, offset) }
+        if (offset == 0) SpendCache.keep(loaded, older)
+        val known = rides.map { it.id }.toSet()
+        rides += loaded.filter { it.id !in known }
+        offset += 6
+        more = older
     }
 
-    fun more() {
-        if (loading || done) return
+    fun next() {
+        if (loading || !more) return
         loading = true; error = null
         scope.launch {
             try { loadNext() } catch (e: CancellationException) { throw e } catch (e: Exception) { error = failure(e) }
@@ -95,35 +112,28 @@ fun PayHistoryScreen(onClose: () -> Unit, onTicket: (String) -> Unit) {
     }
 
     LaunchedEffect(Unit) {
-        loading = true
-        try {
-            billing = Payer.call { MoovitPay.billing(it) }
-            loadNext()
-            loadNext()
-        } catch (e: CancellationException) { throw e } catch (e: Exception) { error = failure(e) }
-        loading = false
+        if (cached == null) next()
+        // Shown at once from the cache; an old one is brought up to date quietly, ride by ride.
+        else if (!SpendCache.fresh()) runCatching { Payer.call { RavPass.billings(it, 0) } }.onSuccess { (fresh, older) ->
+            SpendCache.keep(fresh, older)
+            val byId = fresh.associateBy { it.id }
+            for (i in rides.indices) byId[rides[i].id]?.let { rides[i] = it }
+            val known = rides.map { it.id }.toSet()
+            rides += fresh.filter { it.id !in known }
+        }
     }
 
-    // History can be opened directly after an app restart, before Home has loaded the tickets.
-    LaunchedEffect(Unit) { runCatching { Payer.refresh() } }
-
-    LaunchedEffect(from, to) {
-        range = null
-        try {
-            var total = 0L
-            var count = 0
-            // Newest month first, never one still to come; a year of empty months in a row is the start of the
-            // history, as in the list below.
-            var empties = 0
-            for (key in minOf(monthKey(to), monthKey(now)) downTo monthKey(from)) {
-                val charges = monthOf(key)
-                empties = if (charges.isEmpty()) empties + 1 else 0
-                if (empties >= 12) break
-                charges.filter { it.atUtc in from..to }.forEach { total += it.amount?.agorot ?: 0L; count++ }
-            }
-            range = total to count
-        } catch (e: CancellationException) { throw e } catch (e: Exception) { error = failure(e) }
+    // The dates picked reach further back than the months loaded: the older ones come too.
+    LaunchedEffect(from, offset, loading) {
+        val oldest = Calendar.getInstance(ISRAEL).apply { timeInMillis = startOfMonth(now); add(Calendar.MONTH, -offset + 1) }.timeInMillis
+        if (from < oldest && more && !loading && error == null) next()
     }
+
+    val months = rides.groupBy { monthKey(it.boardedUtc) }.toSortedMap(compareByDescending { it })
+        .map { (k, v) -> Month(k, v.sortedByDescending { it.boardedUtc }) }
+    val thisMonth = months.firstOrNull { it.key == monthKey(now) } ?: Month(monthKey(now), emptyList())
+    val lastMonth = months.firstOrNull { it.key == monthKey(now) - 1 }
+    val inRange = rides.filter { it.boardedUtc in from..to }
 
     val list = rememberLazyListState()
     val nearEnd by remember {
@@ -132,35 +142,46 @@ fun PayHistoryScreen(onClose: () -> Unit, onTicket: (String) -> Unit) {
             (info.visibleItemsInfo.lastOrNull()?.index ?: 0) >= info.totalItemsCount - 3
         }
     }
-    LaunchedEffect(nearEnd, loading, done, months.size) { if (nearEnd && !loading && !done && error == null) more() }
+    LaunchedEffect(nearEnd, loading, more, rides.size) { if (nearEnd && !loading && more && error == null) next() }
 
     androidx.activity.compose.BackHandler(onBack = onClose)
     Column(Modifier.fillMaxSize().background(K.bg)) {
-        ScreenHeader(T("Payment", "היסטוריית"), T("history", "תשלומים"), back = onClose)
+        ScreenHeader(T("Payment history", "היסטוריית תשלומים"), back = onClose)
         LazyColumn(
             state = list,
             modifier = Modifier.fillMaxSize(),
             contentPadding = PaddingValues(start = K.gap4, end = K.gap4, bottom = K.gap6 + LocalBottomBarInset.current),
-            verticalArrangement = Arrangement.spacedBy(K.gap3),
         ) {
-            item(key = "stats") { Stats(billing, months.firstOrNull { it.key == monthKey(now) }, months.firstOrNull { it.key == monthKey(now) - 1 }) }
-            item(key = "range") { Box(Modifier.animateContentSize()) { RangeCard(from, to, range) { picking = true } } }
+            item(key = "stats") { Stats(thisMonth.takeIf { offset > 0 }, lastMonth ?: Month(monthKey(now) - 1, emptyList()).takeIf { offset > 0 }) }
+            item(key = "range") {
+                Box(Modifier.padding(top = K.gap3).animateContentSize()) {
+                    RangeCard(from, to, inRange.takeIf { offset > 0 }?.let { r -> r.sumOf { it.paid() } to r.count { !it.cancelled } }) { picking = true }
+                }
+            }
             // Months without rides are left out, but for this one.
-            months.filter { it.charges.isNotEmpty() || it.key == monthKey(now) }.forEach { m ->
+            (listOf(thisMonth) + months.filter { it.key != thisMonth.key }).forEach { m ->
                 item(key = "m${m.key}") { Column(Modifier.animateItem()) { MonthHeader(m) } }
-                itemsIndexed(m.charges, key = { i, _ -> "c${m.key}_$i" }) { _, c ->
-                    Box(Modifier.animateItem()) { ChargeRow(c, statusNow, onTicket) }
+                itemsIndexed(m.rides, key = { _, r -> "r${r.id}" }) { i, r ->
+                    Box(Modifier.animateItem()) { RideRow(r, i == 0, i == m.rides.lastIndex, onTicket) }
                 }
             }
             item(key = "end") {
+                // Loading gives way to the end of the history or to the error, fading, and the footer glides as rides come.
+                val end = when { error != null -> 1; loading -> 2; !more -> 3; else -> 0 }
+                androidx.compose.animation.AnimatedContent(end, Modifier.animateItem(), transitionSpec = {
+                    (fadeIn(tween(220, delayMillis = 60)) togetherWith fadeOut(tween(150)))
+                        .using(androidx.compose.animation.SizeTransform(clip = false) { _, _ -> spring(dampingRatio = 1f, stiffness = 500f) })
+                }, label = "historyEnd") { e ->
                 Box(Modifier.fillMaxWidth().padding(K.gap4), contentAlignment = Alignment.Center) {
-                    when {
-                        error != null -> Text(T("Couldn't load more. Tap to try again.", "לא הצלחנו לטעון עוד. הקישו לנסות שוב."),
-                            fontSize = 14.sp, color = K.critical,
-                            modifier = Modifier.clickable(role = Role.Button) { error = null; more() })
-                        loading -> Note(T("Loading…", "טוען…"))
-                        done -> Note(T("That's the whole history.", "זו כל ההיסטוריה."))
+                    when (e) {
+                        1 -> Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(K.gap2)) {
+                            Note(T("Couldn't load more.", "לא הצלחנו לטעון עוד."), color = K.critical)
+                            KavButton(T("Try again", "נסו שוב"), { error = null; next() }, style = ButtonStyle.Secondary)
+                        }
+                        2 -> Note(T("Loading…", "טוען…"))
+                        3 -> NoteCard(T("That's the whole history.", "זו כל ההיסטוריה."))
                     }
+                }
                 }
             }
         }
@@ -169,32 +190,32 @@ fun PayHistoryScreen(onClose: () -> Unit, onTicket: (String) -> Unit) {
 }
 
 @Composable
-private fun Stats(billing: MoovitPay.Billing?, thisMonth: Month?, lastMonth: Month?) {
-    fun paid(m: Month?) = m?.charges?.sumOf { it.amount?.agorot ?: 0L }
-    val saved = thisMonth?.charges?.sumOf { c ->
-        val full = c.full?.agorot ?: 0L
-        val amount = c.amount?.agorot ?: 0L
+private fun Stats(thisMonth: Month?, lastMonth: Month?) {
+    fun paid(m: Month?) = m?.rides?.sumOf { it.paid() }
+    val saved = thisMonth?.rides?.filter { !it.cancelled }?.sumOf { r ->
+        val full = r.full?.agorot ?: 0L
+        val amount = r.amount?.agorot ?: 0L
         if (full > amount) full - amount else 0L
     }
     Column(Modifier.fillMaxWidth().panel(K.rCard).padding(K.gap5), verticalArrangement = Arrangement.spacedBy(K.gap2)) {
-        Text(T("This month", "החודש"), fontSize = 14.sp, color = K.muted)
-        LtrText(paid(thisMonth)?.let { shekels(it) } ?: "…", 28.sp, K.text, FontWeight.SemiBold)
+        Text(T("This month", "החודש"), style = K.type.subhead)
+        // Each figure fades in over its "..." when the history answers.
+        ChangingText(paid(thisMonth)?.let { shekels(it) } ?: "…") { LtrText(it, 28.sp, K.text, FontWeight.SemiBold) }
         Row(horizontalArrangement = Arrangement.spacedBy(K.gap4)) {
-            StatLine(T("Rides", "נסיעות"), thisMonth?.charges?.size?.toString() ?: "…")
+            StatLine(T("Rides", "נסיעות"), thisMonth?.rides?.count { !it.cancelled }?.toString() ?: "…")
             StatLine(T("Saved", "נחסך"), saved?.let { shekels(it) } ?: "…")
             StatLine(T("Last month", "חודש שעבר"), paid(lastMonth)?.let { shekels(it) } ?: "…")
         }
-        billing?.current?.price?.let {
-            Note(T("Open bill so far: ", "חשבון פתוח עד כה: ") + T.ltr(it.text))
-        }
+        Note(T("Rav-Pass charges the card once a month, with the Ministry of Transport's discounts and caps.",
+            "רב-פס מחייבת את הכרטיס פעם בחודש, עם ההנחות ותקרות החיוב של משרד התחבורה."))
     }
 }
 
 @Composable
 private fun StatLine(label: String, value: String) {
     Column {
-        LtrText(value, 16.sp, K.text, FontWeight.Medium)
-        Text(label, fontSize = 12.sp, color = K.dim)
+        ChangingText(value) { LtrText(it, 16.sp, K.text, FontWeight.Medium) }
+        Text(label, style = K.type.caption)
     }
 }
 
@@ -206,53 +227,59 @@ private fun RangeCard(from: Long, to: Long, range: Pair<Long, Int>?, onPick: () 
         Modifier.fillMaxWidth().panel(K.rCard).clickable(role = Role.Button, onClick = onPick).padding(K.gap5),
         verticalArrangement = Arrangement.spacedBy(K.gap1),
     ) {
-        Text(T("Any dates", "בין תאריכים"), fontSize = 14.sp, color = K.muted)
-        LtrText(dayFormat.format(Date(from)) + " - " + dayFormat.format(Date(to)), 16.sp, K.accent)
-        Text(
-            range?.let { (total, count) -> T.ltr(shekels(total)) + T(" in $count rides", " ב-$count נסיעות") } ?: "…",
-            fontSize = 18.sp, color = K.text, fontWeight = FontWeight.Medium,
-        )
+        Text(T("Any dates", "בין תאריכים"), style = K.type.subhead)
+        ChangingText(dayFormat.format(Date(from)) + " - " + dayFormat.format(Date(to))) { LtrText(it, 16.sp, K.accentInk) }
+        ChangingText(
+            range?.let { (total, count) -> T.ltr(shekels(total)) + if (count == 1) T(" in 1 ride", " בנסיעה אחת") else T(" in $count rides", " ב-$count נסיעות") } ?: "…",
+        ) { Text(it, style = K.type.headline) }
     }
 }
 
 @Composable
 private fun MonthHeader(m: Month) {
-    Row(Modifier.fillMaxWidth().padding(top = K.gap3), verticalAlignment = Alignment.CenterVertically) {
-        Text(monthName(m.key), fontSize = 15.sp, color = K.muted, fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f))
-        LtrText(shekels(m.charges.sumOf { it.amount?.agorot ?: 0L }), 14.sp, K.dim)
+    Row(
+        Modifier.fillMaxWidth().padding(start = K.gap4, end = K.gap4, top = K.gap6, bottom = K.gap2),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(monthName(m.key), style = K.type.caption, modifier = Modifier.weight(1f))
+        LiveText(T.ltr(shekels(m.rides.sumOf { it.paid() })), style = K.type.caption.tabular)
     }
-    if (m.charges.isEmpty()) Note(T("No rides yet this month.", "אין עדיין נסיעות החודש."))
+    // Folds away when the month's first ride comes in.
+    AnimatedVisibility(m.rides.isEmpty(), enter = fadeIn(tween(220, delayMillis = 60)) + androidx.compose.animation.expandVertically(spring(dampingRatio = 1f, stiffness = 500f), expandFrom = Alignment.Top),
+        exit = fadeOut(tween(150)) + androidx.compose.animation.shrinkVertically(spring(dampingRatio = 1f, stiffness = 500f), shrinkTowards = Alignment.Top)) {
+        NoteCard(T("No rides yet this month.", "אין עדיין נסיעות החודש."), Modifier.padding(horizontal = K.gap4))
+    }
 }
 
+// One ride, and its ticket when it is one of today's that Kav still shows.
 @Composable
-private fun ChargeRow(c: MoovitPay.Charge, now: Long, onTicket: (String) -> Unit) {
-    // Use the same status as Home, including when the free-transfer deadline passes while history is open.
-    val wallet = Payer.wallet
-    val ticket = currentChargeTicket(c, wallet)
-    val cancelled = ticket?.let { Payer.cancelled(it) } ?: Payer.cancelledAt(c.atUtc)
-    val time = SimpleDateFormat("d.M  HH:mm", Locale.US).apply { timeZone = ISRAEL }
+private fun RideRow(r: RavPass.Ride, first: Boolean, last: Boolean, onTicket: (String) -> Unit) {
+    val now = rememberNow()
+    val ticket = Payer.tickets.firstOrNull { it.id == r.id }
+    val time = SimpleDateFormat("d.M  $CLOCK", Locale.US).apply { timeZone = ISRAEL }
     Row(
-        Modifier.fillMaxWidth().panel(K.rControl)
-            .clickable(enabled = ticket != null, role = Role.Button) { ticket?.let { onTicket(Payer.rideKey(it)) } }
+        Modifier.fillMaxWidth().groupItem(first, last)
+            .clickable(enabled = ticket != null, role = Role.Button) { ticket?.let { onTicket(it.id.toString()) } }
             .padding(horizontal = K.gap4, vertical = K.gap3),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(K.gap3),
     ) {
         Column(Modifier.weight(1f)) {
-            Text(c.name.ifBlank { T("Ride", "נסיעה") }, fontSize = 15.sp, color = K.text)
-            Text(T.ltr(time.format(Date(c.atUtc))) + "  " + when {
-                cancelled -> T("Canceled", "בוטל")
-                ticket != null -> ticketStatus(ticket, wallet?.window, now).text
-                wallet == null -> T("Checking…", "בודק…")
-                else -> T("Inactive ticket", "כרטיס לא פעיל")
-            },
-                fontSize = 13.sp, color = K.dim)
+            val name = listOf(r.line.ifBlank { null }?.let { T("Line $it", "קו $it") }, r.towards.ifBlank { null })
+                .filterNotNull().joinToString(" · ").ifBlank { T("Ride", "נסיעה") }
+            Text(name + if (r.guests > 0) "  ×${r.guests + 1}" else "", style = K.type.body,
+                maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(T.ltr(time.format(Date(r.boardedUtc))) + "  " + when {
+                r.cancelled -> T("Canceled", "בוטל")
+                ticket != null -> ticketStatus(ticket, now)
+                else -> r.from
+            }, style = K.type.subhead, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
         Column(horizontalAlignment = Alignment.End) {
-            LtrText(c.amount?.text ?: "", 15.sp, K.text)
-            val full = c.full
-            if (full != null && full.agorot > (c.amount?.agorot ?: 0L)) {
-                LtrText(full.text, 12.sp, K.dim, decoration = androidx.compose.ui.text.style.TextDecoration.LineThrough)
+            LtrText(r.amount?.text ?: "", 16.sp, K.text)
+            val full = r.full
+            if (full != null && full.agorot > (r.amount?.agorot ?: 0L)) {
+                LtrText(full.text, 12.sp, K.textTertiary, decoration = androidx.compose.ui.text.style.TextDecoration.LineThrough)
             }
         }
     }
@@ -297,15 +324,165 @@ private fun RangeSheet(from: Long, to: Long, onDismiss: () -> Unit, onPick: (Lon
         )
         Spacer(Modifier.height(K.gap3))
         val start = state.selectedStartDateMillis
-        Box(
-            Modifier.fillMaxWidth().heightIn(min = 48.dp).panel(K.rPill)
-                .clickable(enabled = start != null, role = Role.Button) {
-                    if (start != null) close {
-                        onPick(israelDay(start, false), israelDay(state.selectedEndDateMillis ?: start, true))
-                        onDismiss()
+        KavButton(T("Show", "הצגה"), {
+            if (start != null) close {
+                onPick(israelDay(start, false), israelDay(state.selectedEndDateMillis ?: start, true))
+                onDismiss()
+            }
+        }, enabled = start != null, wide = true)
+    }
+}
+
+// The rides of the last six months, kept while Kav runs so Home doesn't ask HopOn again on every visit.
+private object SpendCache {
+    var rides: List<RavPass.Ride>? = null
+    var more = true
+    var at = 0L
+    fun fresh() = rides != null && System.currentTimeMillis() - at < 10 * 60_000L
+    fun keep(list: List<RavPass.Ride>, older: Boolean) { rides = list; more = older; at = System.currentTimeMillis() }
+}
+
+// In Israel's time, as the month is counted: on a phone set west of it, the first of the month there is still the month
+// before here, and the chart named every month one early.
+internal fun shortMonth(key: Int): String =
+    SimpleDateFormat("MMM", if (T.rtl) Locale("iw") else Locale.US).apply { timeZone = ISRAEL }.format(
+        Calendar.getInstance(ISRAEL).apply { clear(); set(key / 12, key % 12, 1) }.time,
+    )
+
+// Home's look at paying: this month so far and its rides, the six months as bars with this one in the accent.
+// A tap opens the history. It opens with what it last knew, dimmed (or quiet placeholders the first time, at the size
+// the numbers will take), and when Rav-Pass answers the amount rolls to the new one and the bars spring to theirs.
+@Composable
+internal fun SpendSummary(onOpen: () -> Unit) {
+    val ctx = androidx.compose.ui.platform.LocalContext.current
+    val now = remember { System.currentTimeMillis() }
+    val current = monthKey(now)
+    val keys = (current - 5..current).toList()
+    var rides by remember { mutableStateOf(SpendCache.rides) }
+    val saved = remember { savedSpent(ctx) }
+    LaunchedEffect(Unit) {
+        if (SpendCache.fresh()) return@LaunchedEffect
+        runCatching { Payer.call { RavPass.billings(it, 0) } }.onSuccess { (list, older) ->
+            SpendCache.keep(list, older); rides = list
+            saveSpent(ctx, spentOf(list, keys))
+        }
+    }
+    val fresh = rides?.let { spentOf(it, keys) }
+    val known = fresh ?: saved?.let { s ->
+        val by = (s.month - 5..s.month).zip(s.totals).toMap()
+        Spent(current, keys.map { by[it] ?: 0L }, if (s.month == current) s.rides else null)
+    }
+    val still = remember {
+        android.provider.Settings.Global.getFloat(ctx.contentResolver, android.provider.Settings.Global.ANIMATOR_DURATION_SCALE, 1f) == 0f
+    }
+    val dim by animateFloatAsState(if (fresh == null) .5f else 1f, if (still) snap() else tween(300), label = "spendDim")
+    val said = known?.let { k -> keys.zip(k.totals).joinToString(", ") { (m, v) -> shortMonth(m) + " " + shekels(v) } }.orEmpty()
+    Row(
+        Modifier.fillMaxWidth().clickable(role = Role.Button, onClickLabel = T("Open payment history", "פתיחת היסטוריית התשלומים"), onClick = onOpen)
+            .padding(horizontal = K.gap4, vertical = K.gap3),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(K.gap4),
+    ) {
+        Column(Modifier.weight(1f).graphicsLayer { alpha = dim }) {
+            Text(T("This month", "החודש"), style = K.type.caption)
+            Arriving(
+                known?.let { shekels(it.totals.last()) }, K.type.largeTitle.tabular.copy(textDirection = TextDirection.Ltr),
+                placeholder = 96.dp, still = still, order = compareBy { t -> t.filter(Char::isDigit).toLongOrNull() ?: 0L },
+            )
+            Arriving(
+                known?.rides?.let { T.count(it, "1 ride", "נסיעה אחת", "rides", "נסיעות") }, K.type.subhead,
+                placeholder = 64.dp, still = still,
+            )
+        }
+        SpendBars(
+            keys, known?.totals, still,
+            Modifier.graphicsLayer { alpha = dim }.semantics { contentDescription = T("Spent per month: ", "הוצאה לפי חודש: ") + said },
+        )
+        Icon(Icons.AutoMirrored.Rounded.KeyboardArrowRight, contentDescription = null, tint = K.textTertiary, modifier = Modifier.size(20.dp))
+    }
+}
+
+// Words still on their way: until they come, a quiet bar where they'll be, as tall as their line; then they rise in
+// and, when they change, roll to the new ones.
+@Composable
+private fun Arriving(
+    text: String?, style: androidx.compose.ui.text.TextStyle, placeholder: Dp, still: Boolean,
+    order: Comparator<String> = naturalOrder(),
+) {
+    val line = with(LocalDensity.current) { style.lineHeight.toDp() }
+    Box(Modifier.heightIn(min = line), contentAlignment = Alignment.CenterStart) {
+        AnimatedVisibility(text == null, enter = fadeIn(snap()), exit = if (still) ExitTransition.None else fadeOut(tween(150))) {
+            Box(Modifier.size(placeholder, line * .7f).clip(RoundedCornerShape(K.rBadge)).background(K.fill))
+        }
+        AnimatedVisibility(
+            text != null,
+            enter = if (still) EnterTransition.None else fadeIn(tween(220, delayMillis = 60)) + slideInVertically(spring(dampingRatio = 1f, stiffness = 500f)) { it / 3 },
+            exit = ExitTransition.None,
+        ) { RollingText(text.orEmpty(), style = style, order = order) }
+    }
+}
+
+// The six months' totals and this month's rides, as the card shows them and keeps them for its next opening.
+private class Spent(val month: Int, val totals: List<Long>, val rides: Int?)
+
+private fun spentOf(rides: List<RavPass.Ride>, keys: List<Int>): Spent {
+    val by = rides.groupBy { monthKey(it.boardedUtc) }
+    return Spent(keys.last(), keys.map { k -> by[k]?.sumOf { it.paid() } ?: 0L }, by[keys.last()]?.count { !it.cancelled } ?: 0)
+}
+
+private fun savedSpent(ctx: android.content.Context): Spent? = ctx.getSharedPreferences("spend", android.content.Context.MODE_PRIVATE).run {
+    val month = getInt("month", -1)
+    val totals = getString("totals", null)?.split(",")?.mapNotNull { it.toLongOrNull() }
+    if (month < 0 || totals?.size != 6) null else Spent(month, totals, getInt("rides", 0))
+}
+
+private fun saveSpent(ctx: android.content.Context, s: Spent) =
+    ctx.getSharedPreferences("spend", android.content.Context.MODE_PRIVATE).edit()
+        .putInt("month", s.month).putString("totals", s.totals.joinToString(",")).putInt("rides", s.rides ?: 0).apply()
+
+// Six thin bars on one baseline, rounded at the top, 2 dp apart; the month's initials under them in text colours.
+// They grow from the baseline as the totals come, and spring to new heights when they change.
+@Composable
+private fun SpendBars(keys: List<Int>, spent: List<Long>?, still: Boolean, modifier: Modifier = Modifier) {
+    val top = (spent?.maxOrNull()?.takeIf { it > 0 } ?: 1L).toFloat()
+    val heights = keys.indices.map { i ->
+        animateFloatAsState(
+            (spent?.getOrNull(i) ?: 0L) / top,
+            if (still) snap() else spring(dampingRatio = .8f, stiffness = 300f), label = "spendBar",
+        ).value
+    }
+    val past = K.textTertiary
+    val now = K.accentInk
+    val floor = K.fillStrong
+    Column(modifier, horizontalAlignment = Alignment.CenterHorizontally) {
+        Canvas(Modifier.size(width = 108.dp, height = 44.dp)) {
+            val gap = 6.dp.toPx()
+            val w = (size.width - gap * (keys.size - 1)) / keys.size
+            val r = minOf(w / 2, 4.dp.toPx())
+            keys.indices.forEach { i ->
+                val x = mirrorX((i * (w + gap) + w / 2) / size.width) * size.width - w / 2
+                val h = heights[i] * size.height
+                if (h < 1f) {
+                    drawRoundRect(floor, Offset(x, size.height - 2.dp.toPx()), Size(w, 2.dp.toPx()), CornerRadius(1.dp.toPx()))
+                } else {
+                    val path = androidx.compose.ui.graphics.Path().apply {
+                        addRoundRect(androidx.compose.ui.geometry.RoundRect(
+                            x, size.height - h, x + w, size.height,
+                            topLeftCornerRadius = CornerRadius(r), topRightCornerRadius = CornerRadius(r),
+                        ))
                     }
-                },
-            contentAlignment = Alignment.Center,
-        ) { Text(T("Show", "הצגה"), fontSize = 15.sp, color = if (start != null) K.accent else K.dim) }
+                    drawPath(path, if (i == keys.lastIndex) now else past)
+                }
+            }
+        }
+        Spacer(Modifier.height(K.gap1))
+        Row(Modifier.width(108.dp)) {
+            keys.forEachIndexed { i, k ->
+                Text(
+                    shortMonth(k).take(1), style = K.type.caption, color = if (i == keys.lastIndex) K.text else K.textTertiary,
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center, modifier = Modifier.weight(1f),
+                )
+            }
+        }
     }
 }

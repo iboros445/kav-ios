@@ -16,8 +16,6 @@ import androidx.compose.animation.core.tween
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Brush
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.compositeOver
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Dp
@@ -33,6 +31,7 @@ import androidx.compose.runtime.staticCompositionLocalOf
 val LocalLiquidBackdrop = staticCompositionLocalOf<LiquidBackdrop?> { null }
 
 // AGSL needs Android 13.
+@get:androidx.annotation.ChecksSdkIntAtLeast(api = 33)
 val liquidGlassReady get() = Build.VERSION.SDK_INT >= 33
 
 @Composable
@@ -42,26 +41,20 @@ fun rememberLiquidBackdrop(): LiquidBackdrop? =
 fun Modifier.glassBackdrop(liquid: LiquidBackdrop?): Modifier =
     if (K.liquid && liquid != null) liquidSource(liquid) else this
 
-private fun liquidRim(floating: Boolean) =
-    if (K.light) K.text.copy(alpha = if (floating) .16f else .1f)
-    else Color.White.copy(alpha = if (floating) .3f else .14f)
-
-private val paneFill get() = K.surface1.copy(alpha = .62f)
-
+// The floating layer: the tab bar, buttons over a map or a list, a field that stays on top. The cards' own shade and
+// hairline, so it sits with them; glass where it's chosen, that same shade over the bare page.
+// glass: how much of it is glass right now, read as it's drawn (liquidPane); none is the cards' solid shade.
 @Composable
-fun Modifier.glassSurface(radius: Dp = 22.dp): Modifier {
-    if (!K.liquid) return panel(radius, solid = true)
-    val shape = RoundedCornerShape(radius)
+fun Modifier.glassSurface(radius: Dp = 22.dp, glass: (() -> Float)? = null): Modifier {
     val liquid = LocalLiquidBackdrop.current
-    val pane = if (liquid != null) liquidPane(liquid, radius) else clip(shape).background(paneFill)
-    return pane.border(1.dp, liquidRim(floating = true), shape)
+    if (!liquidGlassReady || !K.liquid || liquid == null) return panel(radius)
+    return liquidPane(liquid, radius, glass).border(0.5.dp, K.separator, RoundedCornerShape(radius))
 }
 
+// A card on the page: its own shade and a hairline. solid: one that floats over others, a sheet or a menu.
 fun Modifier.panel(radius: Dp = K.rCard, solid: Boolean = false): Modifier {
     val shape = RoundedCornerShape(radius)
-    val body = clip(shape).background(if (solid) paneFill.compositeOver(K.bg) else paneFill)
-    return if (K.liquid) body.border(1.dp, liquidRim(floating = solid), shape)
-        else body.border(0.5.dp, K.text.copy(alpha = .14f), shape)
+    return clip(shape).background(if (solid) K.surfaceRaised else K.surface).border(0.5.dp, K.separator, shape)
 }
 
 @Composable

@@ -1,0 +1,328 @@
+// HttpURLConnection over NSURLSession. The request is sent lazily on the first call that needs the response
+// (responseCode, headers, inputStream), like the JVM. The body is streamed through a queue, so large
+// downloads (the 176 MB map) are not held in memory and `read` reports progress as data arrives.
+package java.net
+
+import java.io.ByteArrayOutputStream
+import java.io.FileNotFoundException
+import java.io.IOException
+import java.io.InputStream
+import java.io.OutputStream
+import kav.compat.native.toByteArray
+import kav.compat.native.toNSData
+import platform.Foundation.NSCondition
+import platform.Foundation.NSError
+import platform.Foundation.NSHTTPCookieAcceptPolicy
+import platform.Foundation.NSHTTPCookieStorage
+import platform.Foundation.NSHTTPURLResponse
+import platform.Foundation.NSURLAuthenticationChallenge
+import platform.Foundation.NSURLCredential
+import platform.Foundation.NSURLCredentialPersistence
+import platform.Foundation.NSURLSessionAuthChallengeDisposition
+import platform.Foundation.NSURLSessionAuthChallengePerformDefaultHandling
+import platform.Foundation.NSURLSessionAuthChallengeUseCredential
+import platform.Foundation.credentialWithUser
+import platform.Foundation.NSMutableURLRequest
+import platform.Foundation.NSOperationQueue
+import platform.Foundation.NSURL
+import platform.Foundation.NSURLRequest
+import platform.Foundation.NSURLRequestReloadIgnoringLocalCacheData
+import platform.Foundation.NSURLResponse
+import platform.Foundation.NSURLSession
+import platform.Foundation.NSURLSessionConfiguration
+import platform.Foundation.NSURLSessionDataDelegateProtocol
+import platform.Foundation.NSURLSessionDataTask
+import platform.Foundation.NSURLSessionResponseAllow
+import platform.Foundation.NSURLSessionResponseDisposition
+import platform.Foundation.NSURLSessionTask
+import platform.Foundation.HTTPBody
+import platform.Foundation.HTTPMethod
+import platform.Foundation.setValue
+import platform.Foundation.NSData
+import platform.darwin.NSObject
+
+abstract class URLConnection(val url: URL) {
+    var connectTimeout: Int = 0
+    var readTimeout: Int = 0
+    var doOutput: Boolean = false
+    var doInput: Boolean = true
+    var useCaches: Boolean = true
+    var allowUserInteraction: Boolean = false
+    abstract fun connect()
+    abstract fun setRequestProperty(key: String, value: String)
+    abstract fun addRequestProperty(key: String, value: String)
+    abstract fun getHeaderField(name: String?): String?
+    abstract val inputStream: InputStream
+    abstract val outputStream: OutputStream
+    val contentEncoding: String? get() = getHeaderField("Content-Encoding")
+    val contentType: String? get() = getHeaderField("Content-Type")
+    val contentLength: Int get() = getHeaderField("Content-Length")?.toIntOrNull() ?: -1
+    val contentLengthLong: Long get() = getHeaderField("Content-Length")?.toLongOrNull() ?: -1L
+}
+
+open class HttpURLConnection(url: URL) : URLConnection(url) {
+    var requestMethod: String = "GET"
+    var instanceFollowRedirects: Boolean = true
+
+    // Set by URL.openConnection(proxy). The login is Android's java.net.Authenticator's job; here the opener
+    // (RiderProxy.open) hands it over directly.
+    var proxy: Proxy? = null
+    var proxyLogin: Pair<String, String>? = null
+
+    // Not java.net: the system's cookie store (kept across launches) instead of none, for GoogleSession, whose requests
+    // have to carry Google's own cookies.
+    var keepCookies: Boolean = false
+
+    private val requestHeaders = LinkedHashMap<String, String>()
+    private val body = ByteArrayOutputStream()
+    private var exchange: Exchange? = null
+
+    override fun setRequestProperty(key: String, value: String) {
+        requestHeaders.keys.firstOrNull { it.equals(key, ignoreCase = true) }?.let { requestHeaders.remove(it) }
+        requestHeaders[key] = value
+    }
+
+    override fun addRequestProperty(key: String, value: String) {
+        val have = requestHeaders.keys.firstOrNull { it.equals(key, ignoreCase = true) }
+        if (have == null) requestHeaders[key] = value else requestHeaders[have] = requestHeaders[have] + "," + value
+    }
+
+    fun getRequestProperty(key: String): String? = requestHeaders.entries.firstOrNull { it.key.equals(key, ignoreCase = true) }?.value
+
+    override val outputStream: OutputStream
+        get() {
+            check(exchange == null) { "Cannot write output after reading input." }
+            doOutput = true
+            return body
+        }
+
+    private fun started(): Exchange {
+        exchange?.let { return it }
+        val method = if (doOutput && requestMethod == "GET") "POST" else requestMethod
+        val ex = Exchange(
+            url.toExternalForm(), method, requestHeaders.toMap(),
+            if (doOutput || body.size() > 0) body.toByteArray() else null,
+            readTimeout, instanceFollowRedirects, proxy, proxyLogin, keepCookies,
+        )
+        exchange = ex
+        ex.start()
+        return ex
+    }
+
+    override fun connect() { started() }
+
+    // Body size hints: NSURLSession sends the whole body at once, so these only exist for upstream to call.
+    fun setFixedLengthStreamingMode(contentLength: Int) {}
+    fun setFixedLengthStreamingMode(contentLength: Long) {}
+    fun setChunkedStreamingMode(chunkLength: Int) {}
+
+    val responseCode: Int get() = started().awaitResponse().status
+    val responseMessage: String? get() = null
+
+    override fun getHeaderField(name: String?): String? = name?.let { started().awaitResponse().headers[it.lowercase()] }
+
+    override val inputStream: InputStream
+        get() {
+            val r = started().awaitResponse()
+            if (r.status >= 400) throw if (r.status == 404 || r.status == 410) FileNotFoundException(url.toExternalForm()) else IOException("Server returned HTTP response code: ${r.status} for URL: ${url.toExternalForm()}")
+            return started().stream
+        }
+
+    /** The body of a 4xx/5xx response; empty when the request succeeded (Android gives null, which upstream never reads). */
+    val errorStream: InputStream get() = if (started().awaitResponse().status >= 400) started().stream else java.io.ByteArrayInputStream(ByteArray(0))
+
+    fun disconnect() { exchange?.cancel() }
+
+    private class Response(val status: Int, val headers: Map<String, String>)
+
+    private class Exchange(
+        val url: String, val method: String, val requestHeaders: Map<String, String>, val body: ByteArray?,
+        val readTimeoutMs: Int, val followRedirects: Boolean,
+        val proxy: Proxy?, val proxyLogin: Pair<String, String>?, val keepCookies: Boolean,
+    ) {
+        private val lock = NSCondition()
+        private var response: Response? = null
+        private var failure: String? = null
+        private var failureCode: Long = 0
+        private var finished = false
+        private val chunks = ArrayDeque<ByteArray>()
+        private var task: NSURLSessionDataTask? = null
+        private var session: NSURLSession? = null
+        // the delegate must be kept alive for as long as the session
+        private var delegate: Delegate? = null
+
+        fun start() {
+            val nsUrl = NSURL.URLWithString(url) ?: throw IOException("Bad URL: $url")
+            val req = NSMutableURLRequest.requestWithURL(nsUrl)
+            req.HTTPMethod = method
+            req.setCachePolicy(NSURLRequestReloadIgnoringLocalCacheData)
+            req.setTimeoutInterval(if (readTimeoutMs > 0) readTimeoutMs / 1000.0 else 60.0)
+            for ((k, v) in requestHeaders) req.setValue(v, forHTTPHeaderField = k)
+            if (body != null) req.HTTPBody = body.toNSData()
+            val config = NSURLSessionConfiguration.ephemeralSessionConfiguration
+            if (keepCookies) {
+                config.HTTPCookieStorage = NSHTTPCookieStorage.sharedHTTPCookieStorage
+                config.HTTPCookieAcceptPolicy = NSHTTPCookieAcceptPolicy.NSHTTPCookieAcceptPolicyAlways
+                config.HTTPShouldSetCookies = true
+            } else config.HTTPShouldSetCookies = false
+            proxyDictionary()?.let { config.connectionProxyDictionary = it }
+            val queue = NSOperationQueue().apply { maxConcurrentOperationCount = 1 }
+            val d = Delegate(this)
+            delegate = d
+            val s = NSURLSession.sessionWithConfiguration(config, d, queue)
+            session = s
+            task = s.dataTaskWithRequest(req).also { it.resume() }
+            s.finishTasksAndInvalidate()
+        }
+
+        // CFNetwork's proxy keys (kCFNetworkProxies*, kCFStreamPropertySOCKS*): an HTTP proxy carries http and https
+        // (CONNECT), a SOCKS one everything.
+        private fun proxyDictionary(): Map<Any?, Any?>? {
+            val p = proxy ?: return null
+            val at = p.address() as? InetSocketAddress ?: return null
+            return when (p.type()) {
+                Proxy.Type.HTTP -> mapOf(
+                    "HTTPEnable" to 1, "HTTPProxy" to at.hostString, "HTTPPort" to at.port,
+                    "HTTPSEnable" to 1, "HTTPSProxy" to at.hostString, "HTTPSPort" to at.port,
+                )
+                Proxy.Type.SOCKS -> buildMap {
+                    put("SOCKSEnable", 1); put("SOCKSProxy", at.hostString); put("SOCKSPort", at.port)
+                    proxyLogin?.let { (user, password) ->
+                        put("SOCKSUser", user); put("SOCKSPassword", password)
+                        put("kCFStreamPropertySOCKSUser", user); put("kCFStreamPropertySOCKSPassword", password)
+                    }
+                }
+                Proxy.Type.DIRECT -> null
+            }
+        }
+
+        // An HTTP proxy's 407, answered with the rider's login once; a second ask means it was turned away.
+        fun proxyCredential(challenge: NSURLAuthenticationChallenge): NSURLCredential? {
+            val (user, password) = proxyLogin ?: return null
+            if (!challenge.protectionSpace.isProxy() || challenge.previousFailureCount > 0) return null
+            return NSURLCredential.credentialWithUser(user, password, NSURLCredentialPersistence.NSURLCredentialPersistenceForSession)
+        }
+
+        fun cancel() {
+            task?.cancel()
+            lock.lock(); finished = true; if (failure == null && response == null) failure = "Canceled"; lock.broadcast(); lock.unlock()
+        }
+
+        fun awaitResponse(): Response {
+            lock.lock()
+            try {
+                while (response == null && failure == null) lock.wait()
+                response?.let { return it }
+                throw failed()
+            } finally { lock.unlock() }
+        }
+
+        val stream: InputStream = object : InputStream() {
+            private var current: ByteArray? = null
+            private var at = 0
+
+            override fun read(): Int {
+                val one = ByteArray(1)
+                return if (read(one, 0, 1) < 0) -1 else one[0].toInt() and 0xFF
+            }
+
+            override fun read(b: ByteArray, off: Int, len: Int): Int {
+                if (len == 0) return 0
+                var cur = current
+                if (cur == null || at >= cur.size) {
+                    lock.lock()
+                    try {
+                        while (chunks.isEmpty() && !finished) lock.wait()
+                        if (chunks.isEmpty()) {
+                            if (failure != null) throw failed()
+                            return -1
+                        }
+                        cur = chunks.removeFirst()
+                    } finally { lock.unlock() }
+                    current = cur; at = 0
+                }
+                val n = minOf(len, cur!!.size - at)
+                cur.copyInto(b, off, at, at + n)
+                at += n
+                return n
+            }
+
+            override fun available(): Int = current?.let { it.size - at } ?: 0
+            override fun close() { cancel() }
+        }
+
+        // The java.net exception Android raises for the same failure, so upstream's catch blocks tell them apart.
+        private fun failed(): IOException = when (failureCode) {
+            -1001L -> SocketTimeoutException(failure)
+            -1003L, -1006L, -1009L, -1004L, -1005L, -1018L, -1020L -> UnknownHostException(failure)
+            in -1206L..-1200L, -2000L -> javax.net.ssl.SSLException(failure)
+            else -> IOException(failure)
+        }
+
+        fun onResponse(r: NSHTTPURLResponse) {
+            val map = HashMap<String, String>()
+            r.allHeaderFields.forEach { (k, v) -> if (k != null && v != null) map[k.toString().lowercase()] = v.toString() }
+            val status = r.statusCode.toInt()
+            if (status >= 400) android.util.Log.w("KavHttp", "$method ${where()} -> HTTP $status${revisions(map)}")
+            lock.lock(); response = Response(status, map); lock.broadcast(); lock.unlock()
+        }
+
+        /** Moovit's data revision as sent (header, query) and as answered: a 412 means the sent one is stale. */
+        private fun revisions(response: Map<String, String>): String {
+            val answered = response["metro-revision-number"] ?: return ""
+            val header = requestHeaders.entries.firstOrNull { it.key.equals("Metro-Revision-Number", ignoreCase = true) }?.value
+            val query = Regex("(?:metro_revision|metroRevisionNumber)=(\\d+)").find(url)?.groupValues?.get(1)
+            return " (revision sent header=$header query=$query, answered $answered)"
+        }
+
+        /** Host and path only: query strings can carry the user's location. */
+        private fun where(): String = url.substringBefore('?')
+
+        fun onData(bytes: ByteArray) { lock.lock(); chunks.addLast(bytes); lock.broadcast(); lock.unlock() }
+
+        fun onComplete(error: NSError?) {
+            lock.lock()
+            if (error != null && failure == null && !finished) {
+                failure = error.localizedDescription
+                failureCode = error.code
+                android.util.Log.w("KavHttp", "$method ${where()} failed: ${error.domain} ${error.code} ${error.localizedDescription}")
+            }
+            finished = true
+            lock.broadcast(); lock.unlock()
+        }
+    }
+
+    private class Delegate(private val ex: Exchange) : NSObject(), NSURLSessionDataDelegateProtocol {
+        override fun URLSession(
+            session: NSURLSession, dataTask: NSURLSessionDataTask, didReceiveResponse: NSURLResponse,
+            completionHandler: (NSURLSessionResponseDisposition) -> Unit,
+        ) {
+            (didReceiveResponse as? NSHTTPURLResponse)?.let { ex.onResponse(it) }
+            completionHandler(NSURLSessionResponseAllow)
+        }
+
+        override fun URLSession(session: NSURLSession, dataTask: NSURLSessionDataTask, didReceiveData: NSData) {
+            ex.onData(didReceiveData.toByteArray())
+        }
+
+        override fun URLSession(session: NSURLSession, task: NSURLSessionTask, didCompleteWithError: NSError?) {
+            ex.onComplete(didCompleteWithError)
+        }
+
+        override fun URLSession(
+            session: NSURLSession, task: NSURLSessionTask, willPerformHTTPRedirection: NSHTTPURLResponse,
+            newRequest: NSURLRequest, completionHandler: (NSURLRequest?) -> Unit,
+        ) {
+            completionHandler(if (ex.followRedirects) newRequest else null)
+        }
+
+        override fun URLSession(
+            session: NSURLSession, task: NSURLSessionTask, didReceiveChallenge: NSURLAuthenticationChallenge,
+            completionHandler: (NSURLSessionAuthChallengeDisposition, NSURLCredential?) -> Unit,
+        ) {
+            val login = ex.proxyCredential(didReceiveChallenge)
+            if (login != null) completionHandler(NSURLSessionAuthChallengeUseCredential, login)
+            else completionHandler(NSURLSessionAuthChallengePerformDefaultHandling, null)
+        }
+    }
+}

@@ -30,7 +30,7 @@ object Updates {
         runCatching { ctx.packageManager.getPackageInfo(ctx.packageName, 0).versionName }.getOrNull() ?: "0"
 
     fun latest(): Release {
-        val c = (URL("https://api.github.com/repos/$OWNER/$REPO/releases/latest").openConnection() as HttpURLConnection).apply {
+        val c = (RiderProxy.open(URL("https://api.github.com/repos/$OWNER/$REPO/releases/latest")) as HttpURLConnection).apply {
             connectTimeout = 10_000; readTimeout = 15_000
             setRequestProperty("Accept", "application/vnd.github+json")
             setRequestProperty("X-GitHub-Api-Version", "2022-11-28")
@@ -55,6 +55,32 @@ object Updates {
         )
     }
 
+    // The newest release GitHub named, kept on the phone for the background check's download (Checks) and for an opening
+    // with no connection. The background check asks GitHub at most once a day.
+    private const val DAY_MS = 24 * 3600_000L
+
+    private fun storeFile(ctx: Context) = File(ctx.filesDir, "release.json")
+
+    fun stored(ctx: Context): Release? = runCatching { fromJson(JSONObject(storeFile(ctx).readText())) }.getOrNull()
+
+    fun store(ctx: Context, release: Release) = storeFile(ctx).writeText(toJson(release).toString())
+
+    // GitHub's newest release when the last answer is a day old, or there's none yet; null when it isn't time. Blocks,
+    // so off the main thread.
+    fun checkIfDue(ctx: Context): Release? =
+        if (!due(storeFile(ctx).lastModified(), System.currentTimeMillis())) null else latest().also { store(ctx, it) }
+
+    // A clock set back counts as due too, rather than waiting for it to catch up.
+    internal fun due(checkedAt: Long, now: Long) = now - checkedAt >= DAY_MS || checkedAt > now
+
+    internal fun toJson(r: Release): JSONObject = JSONObject().put("version", r.version).put("name", r.name).put("notes", r.notes)
+        .put("apkUrl", r.apkUrl).put("apkBytes", r.apkBytes).put("pageUrl", r.pageUrl)
+
+    internal fun fromJson(o: JSONObject) = Release(
+        o.getString("version"), o.optString("name"), o.optString("notes"), o.optString("apkUrl").ifBlank { null },
+        o.optLong("apkBytes", -1L), o.optString("pageUrl").ifBlank { PAGE },
+    )
+
     fun isNewer(remote: String, installed: String): Boolean {
         val a = segments(remote); val b = segments(installed)
         for (i in 0 until maxOf(a.size, b.size)) {
@@ -77,7 +103,7 @@ object Updates {
         }
         dir(ctx).listFiles()?.forEach { if (it != file) it.delete() }
         val part = File(file.path + ".part")
-        var c = URL(url).openConnection() as HttpURLConnection
+        var c = RiderProxy.open(URL(url)) as HttpURLConnection
         c.instanceFollowRedirects = true
         c.connectTimeout = 15_000; c.readTimeout = 30_000
         c.setRequestProperty("User-Agent", "Kav")
@@ -85,7 +111,7 @@ object Updates {
         while (c.responseCode in 300..399 && hops < 5) {
             val next = c.getHeaderField("Location") ?: break
             c.disconnect()
-            c = URL(URL(url), next).openConnection() as HttpURLConnection
+            c = RiderProxy.open(URL(URL(url), next)) as HttpURLConnection
             c.connectTimeout = 15_000; c.readTimeout = 30_000
             c.setRequestProperty("User-Agent", "Kav")
             hops++

@@ -4,7 +4,6 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -15,14 +14,16 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import uk.noammm.kav.KavModel
 import uk.noammm.kav.TripNotice
 import uk.noammm.kav.plateIcon
@@ -44,7 +45,7 @@ fun PipOverlay(model: KavModel) {
             tripNotice(it, model.journeyStep, model.fix, now, accent)
         } }
         if (n == null) {
-            Text(T("Trip ended", "הנסיעה הסתיימה"), fontSize = 15.sp, color = K.dim, modifier = Modifier.padding(K.gap4))
+            Text(T("Trip ended", "הנסיעה הסתיימה"), style = K.type.body, color = K.dim, modifier = Modifier.padding(K.gap4))
             return@Box
         }
         Column(
@@ -54,19 +55,30 @@ fun PipOverlay(model: KavModel) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 val plate = remember(n.glyph, n.tint) { plateIcon(n.glyph, n.tint).asImageBitmap() }
                 Image(plate, contentDescription = null, modifier = Modifier.size(30.dp))
+                // When the bus leaves your stop, or gets you to yours, in the search results' colours for that time.
+                val due = n.due?.let { depColour(it) }
                 Column(Modifier.weight(1f)) {
-                    Text(
-                        n.title, fontSize = 13.sp, lineHeight = 16.sp, color = K.text, fontWeight = FontWeight.SemiBold,
+                    LiveText(
+                        buildAnnotatedString {
+                            append(n.title)
+                            val at = when {
+                                due == null || n.dueText.isEmpty() -> -1
+                                n.title.startsWith(n.dueText) -> 0
+                                else -> n.title.lastIndexOf(n.dueText)
+                            }
+                            if (at >= 0 && due != null) addStyle(SpanStyle(color = due), at, at + n.dueText.length)
+                        },
+                        style = K.type.subhead.copy(color = K.text, fontWeight = FontWeight.SemiBold),
                         maxLines = 1, overflow = TextOverflow.Ellipsis,
                     )
                     Text(
                         listOf(n.text, n.arrive).filter { it.isNotBlank() }.joinToString(" · "),
-                        fontSize = 11.sp, lineHeight = 14.sp, color = K.dim, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                        style = K.type.caption, maxLines = 1, overflow = TextOverflow.Ellipsis,
                     )
                 }
-                if (n.chip.isNotBlank()) Text(
-                    n.chip, fontSize = 11.sp, color = K.text, fontWeight = FontWeight.Medium, maxLines = 1,
-                    modifier = Modifier.clip(RoundedCornerShape(999.dp)).background(K.plate).padding(horizontal = 7.dp, vertical = 2.dp),
+                if (n.chip.isNotBlank()) LiveText(
+                    n.chip, style = K.type.caption, color = due ?: K.text, maxLines = 1,
+                    modifier = Modifier.clip(K.capsule).background(K.plate).padding(horizontal = 7.dp, vertical = 2.dp),
                 )
             }
             TripBar(n)
@@ -77,6 +89,7 @@ fun PipOverlay(model: KavModel) {
 @Composable
 private fun TripBar(n: TripNotice) {
     val tracker = remember(n.glyph, n.tint) { trackerIcon(n.glyph, n.tint).asImageBitmap() }
+    val bg = K.bg
     Canvas(Modifier.fillMaxWidth().height(20.dp)) {
         val rtl = layoutDirection == LayoutDirection.Rtl
         fun at(x: Float) = if (rtl) size.width - x else x
@@ -93,6 +106,18 @@ private fun TripBar(n: TripNotice) {
                 size = Size(kotlin.math.abs(b - a).coerceAtLeast(bar), bar), cornerRadius = CornerRadius(bar / 2),
             )
             x += w
+        }
+        // The rides' stops, as the map draws them: a ring in the line's colour, grey once passed. One too close to the
+        // last ring drawn is left out, so stops close together (a loop's) don't run into a smudge; the last always shows.
+        var lastRing = Float.NEGATIVE_INFINITY
+        n.stops.forEachIndexed { i, (place, colour) ->
+            val x = place / total * size.width
+            val last = i == n.stops.lastIndex
+            if (x - lastRing < bar * 2.4f && !last) return@forEachIndexed
+            lastRing = x
+            val c = Offset(at(x), y)
+            drawCircle(bg, bar * 0.95f, c)
+            drawCircle(Color(colour), bar * 0.6f, c, style = Stroke(1.5.dp.toPx()))
         }
         val t = size.height
         val cx = at((n.progress / total * size.width).coerceAtMost(size.width - t / 2).coerceAtLeast(t / 2))
