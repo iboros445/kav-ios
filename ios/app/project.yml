@@ -2,7 +2,7 @@
 name: Kav
 options:
   deploymentTarget:
-    iOS: "16.0"
+    iOS: "16.1"
   createIntermediateGroups: true
 settings:
   base:
@@ -31,6 +31,7 @@ targets:
       - package: MapLibre
     settings:
       base:
+        IPHONEOS_DEPLOYMENT_TARGET: "16.1"
         PRODUCT_BUNDLE_IDENTIFIER: io.github.iboros445.kav
         PRODUCT_NAME: Kav
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
@@ -79,13 +80,12 @@ targets:
   KavTripWidget:
     type: app-extension
     platform: iOS
-    deploymentTarget:
-      iOS: "16.1"
     sources:
       - path: KavTripWidget
       - path: Kav/KavTripAttributes.swift
     settings:
       base:
+        IPHONEOS_DEPLOYMENT_TARGET: "16.1"
         PRODUCT_BUNDLE_IDENTIFIER: io.github.iboros445.kav.TripWidget
         PRODUCT_NAME: KavTripWidget
         GENERATE_INFOPLIST_FILE: NO

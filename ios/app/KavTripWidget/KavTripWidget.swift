@@ -2,6 +2,7 @@ import WidgetKit
 import SwiftUI
 import ActivityKit
 
+@available(iOS 16.1, *)
 @main
 struct KavTripWidgetBundle: WidgetBundle {
     var body: some Widget {
@@ -9,6 +10,7 @@ struct KavTripWidgetBundle: WidgetBundle {
     }
 }
 
+@available(iOS 16.1, *)
 struct KavTripActivityWidget: Widget {
     var body: some WidgetConfiguration {
         ActivityConfiguration(for: KavTripAttributes.self) { context in
@@ -69,19 +71,9 @@ struct KavTripActivityWidget: Widget {
                                 .lineLimit(1)
                         }
 
-                        // Sleek progress bar
-                        GeometryReader { geo in
-                            ZStack(alignment: .leading) {
-                                Capsule()
-                                    .fill(Color.white.opacity(0.15))
-                                    .frame(height: 4)
-                                Capsule()
-                                    .fill(Color(hex: context.state.tintColorHex))
-                                    .frame(width: max(8, geo.size.width * CGFloat(context.state.progress)), height: 4)
-                            }
-                        }
-                        .frame(height: 4)
-                        .padding(.top, 2)
+                        ProgressView(value: max(0.0, min(1.0, context.state.progress)))
+                            .tint(Color(hex: context.state.tintColorHex))
+                            .padding(.top, 2)
                     }
                     .padding(.horizontal, 4)
                     .padding(.top, 4)
@@ -113,6 +105,7 @@ struct KavTripActivityWidget: Widget {
 }
 
 // Lock Screen / Notification Center Card
+@available(iOS 16.1, *)
 struct KavTripBannerView: View {
     let state: KavTripAttributes.ContentState
 
@@ -162,17 +155,8 @@ struct KavTripBannerView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
 
             // Progress Bar
-            GeometryReader { geo in
-                ZStack(alignment: .leading) {
-                    Capsule()
-                        .fill(Color.white.opacity(0.12))
-                        .frame(height: 5)
-                    Capsule()
-                        .fill(Color(hex: state.tintColorHex))
-                        .frame(width: max(10, geo.size.width * CGFloat(state.progress)), height: 5)
-                }
-            }
-            .frame(height: 5)
+            ProgressView(value: max(0.0, min(1.0, state.progress)))
+                .tint(Color(hex: state.tintColorHex))
         }
         .padding(14)
         .background(Color.black.opacity(0.92))
