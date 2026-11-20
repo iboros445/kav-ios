@@ -12,6 +12,7 @@ struct KavApp: SwiftUI.App {
 
         if #available(iOS 16.1, *) {
             TripActivityHostKt.registerTripActivityHandler(handler: LiveActivityBridge.shared)
+            LiveActivityBridge.shared.end()
         }
     }
 

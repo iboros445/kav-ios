@@ -15,13 +15,21 @@ import uk.noammm.kav.ui.Mode
 class TripService private constructor() {
     companion object {
         fun show(ctx: Context) {
-            val (journey, step) = TripBridge.journey?.invoke() ?: JourneyFile.load(ctx) ?: run {
+            val (journey, step) = TripBridge.journey?.invoke() ?: run {
                 Log.i("Kav", "TripService: show called with no active journey")
                 TripActivityBridge.handler?.end()
                 return
             }
             val fix = TripBridge.fixNow?.invoke()
             val now = System.currentTimeMillis() / 1000
+
+            // If the trip already arrived in the past, do not keep the activity
+            if (journey.trip.arr > 0 && now > journey.trip.arr + 300) {
+                Log.i("Kav", "TripService: trip arrival time passed, ending activity")
+                TripActivityBridge.handler?.end()
+                return
+            }
+
             val notice = tripNotice(journey, step, fix, now, Prefs.accent(ctx))
             if (notice == null) {
                 Log.i("Kav", "TripService: tripNotice is null, ending activity")
@@ -61,7 +69,9 @@ class TripService private constructor() {
         }
 
         fun repost() {
-            show(android.content.KavApplicationContext)
+            if (TripBridge.journey?.invoke() != null) {
+                show(android.content.KavApplicationContext)
+            }
         }
 
         // A ride paid from the notification or the app's square goes on its trip leg's card: in the app's trip when it
@@ -78,6 +88,7 @@ class TripService private constructor() {
         }
 
         fun stop(ctx: Context) {
+            Log.i("Kav", "TripService: stop called")
             TripActivityBridge.handler?.end()
         }
 
