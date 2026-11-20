@@ -4,13 +4,6 @@ import ActivityKit
 
 @available(iOS 16.1, *)
 @main
-struct KavTripWidgetBundle: WidgetBundle {
-    var body: some Widget {
-        KavTripActivityWidget()
-    }
-}
-
-@available(iOS 16.1, *)
 struct KavTripActivityWidget: Widget {
     var body: some WidgetConfiguration {
         ActivityConfiguration(for: KavTripAttributes.self) { context in
@@ -21,22 +14,19 @@ struct KavTripActivityWidget: Widget {
             DynamicIsland {
                 // Expanded Leading: Transit mode icon + route chip
                 DynamicIslandExpandedRegion(.leading) {
-                    HStack(spacing: 6) {
+                    HStack(spacing: 5) {
                         Image(systemName: iconForMode(context.state.modeName))
-                            .font(.system(size: 16, weight: .semibold))
+                            .font(.system(size: 15, weight: .bold))
                             .foregroundColor(Color.accentOrWhite(hex: context.state.tintColorHex))
 
-                        if !context.state.chip.isEmpty {
-                            Text(context.state.chip)
-                                .font(.system(size: 14, weight: .bold, design: .rounded))
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 2)
-                                .background(Color.accentOrWhite(hex: context.state.tintColorHex).opacity(0.25))
-                                .foregroundColor(.white)
-                                .clipShape(Capsule())
-                        }
+                        Text(context.state.chip.isEmpty ? "Trip" : context.state.chip)
+                            .font(.system(size: 13, weight: .bold, design: .rounded))
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Color.accentOrWhite(hex: context.state.tintColorHex).opacity(0.3))
+                            .foregroundColor(.white)
+                            .clipShape(Capsule())
                     }
-                    .padding(.leading, 4)
                 }
 
                 // Expanded Trailing: Estimated arrival time & due info
@@ -56,13 +46,17 @@ struct KavTripActivityWidget: Widget {
                                 .foregroundColor(.secondary)
                         }
                     }
-                    .padding(.trailing, 4)
+                }
+
+                // Expanded Center: Spacer / boundary anchor
+                DynamicIslandExpandedRegion(.center) {
+                    EmptyView()
                 }
 
                 // Expanded Bottom: Step title, status, and clean progress indicator
                 DynamicIslandExpandedRegion(.bottom) {
                     VStack(alignment: .leading, spacing: 6) {
-                        Text(context.state.title)
+                        Text(context.state.title.isEmpty ? "Trip in progress" : context.state.title)
                             .font(.system(size: 14, weight: .semibold))
                             .foregroundColor(.white)
                             .lineLimit(1)
@@ -70,44 +64,37 @@ struct KavTripActivityWidget: Widget {
                         if !context.state.subtitle.isEmpty {
                             Text(context.state.subtitle)
                                 .font(.system(size: 12, weight: .regular))
-                                .foregroundColor(.secondary)
+                                .foregroundColor(Color(white: 0.85))
                                 .lineLimit(1)
                         }
 
-                        ProgressView(value: max(0.0, min(1.0, context.state.progress)))
+                        ProgressView(value: safeProgress(context.state.progress))
                             .tint(Color.accentOrWhite(hex: context.state.tintColorHex))
                             .padding(.top, 2)
                     }
-                    .padding(.horizontal, 4)
                     .padding(.top, 4)
                 }
             } compactLeading: {
-                // Compact Leading (Left capsule edge): Transit icon + line chip
+                // Compact Leading: Transit icon + route chip
                 HStack(spacing: 3) {
                     Image(systemName: iconForMode(context.state.modeName))
                         .font(.system(size: 11, weight: .bold))
                         .foregroundColor(Color.accentOrWhite(hex: context.state.tintColorHex))
-                    if !context.state.chip.isEmpty {
-                        Text(context.state.chip)
-                            .font(.system(size: 11, weight: .bold, design: .rounded))
-                            .foregroundColor(.white)
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.7)
-                    }
-                }
-                .padding(.leading, 2)
-            } compactTrailing: {
-                // Compact Trailing (Right capsule edge): ETA / Arrival time
-                HStack(spacing: 2) {
-                    Text(context.state.arrivalTime.isEmpty ? "--:--" : context.state.arrivalTime)
+                    Text(context.state.chip.isEmpty ? "Trip" : context.state.chip)
                         .font(.system(size: 11, weight: .bold, design: .rounded))
                         .foregroundColor(.white)
                         .lineLimit(1)
                         .minimumScaleFactor(0.7)
                 }
-                .padding(.trailing, 2)
+            } compactTrailing: {
+                // Compact Trailing: ETA / Arrival time
+                Text(context.state.arrivalTime.isEmpty ? "--:--" : context.state.arrivalTime)
+                    .font(.system(size: 11, weight: .bold, design: .rounded))
+                    .foregroundColor(.white)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
             } minimal: {
-                // Minimal (Shared Island bubble): Transit icon in route tint
+                // Minimal: Transit icon in route tint
                 Image(systemName: iconForMode(context.state.modeName))
                     .font(.system(size: 11, weight: .bold))
                     .foregroundColor(Color.accentOrWhite(hex: context.state.tintColorHex))
@@ -131,15 +118,13 @@ struct KavTripBannerView: View {
                     Image(systemName: iconForMode(state.modeName))
                         .font(.system(size: 15, weight: .semibold))
                         .foregroundColor(Color.accentOrWhite(hex: state.tintColorHex))
-                    if !state.chip.isEmpty {
-                        Text(state.chip)
-                            .font(.system(size: 14, weight: .bold, design: .rounded))
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 3)
-                            .background(Color.accentOrWhite(hex: state.tintColorHex).opacity(0.25))
-                            .foregroundColor(.white)
-                            .clipShape(Capsule())
-                    }
+                    Text(state.chip.isEmpty ? "Trip" : state.chip)
+                        .font(.system(size: 14, weight: .bold, design: .rounded))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
+                        .background(Color.accentOrWhite(hex: state.tintColorHex).opacity(0.25))
+                        .foregroundColor(.white)
+                        .clipShape(Capsule())
                 }
 
                 Spacer()
@@ -157,31 +142,36 @@ struct KavTripBannerView: View {
 
             // Step Details
             VStack(alignment: .leading, spacing: 2) {
-                Text(state.title)
+                Text(state.title.isEmpty ? "Trip in progress" : state.title)
                     .font(.system(size: 14, weight: .semibold))
                     .foregroundColor(.white)
                     .lineLimit(1)
                 if !state.subtitle.isEmpty {
                     Text(state.subtitle)
                         .font(.system(size: 12))
-                        .foregroundColor(.secondary)
+                        .foregroundColor(Color(white: 0.85))
                         .lineLimit(1)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
             // Progress Bar
-            ProgressView(value: max(0.0, min(1.0, state.progress)))
+            ProgressView(value: safeProgress(state.progress))
                 .tint(Color.accentOrWhite(hex: state.tintColorHex))
         }
         .padding(14)
     }
 }
 
+private func safeProgress(_ value: Double) -> Double {
+    if value.isNaN || value.isInfinite { return 0.0 }
+    return max(0.0, min(1.0, value))
+}
+
 private func iconForMode(_ mode: String) -> String {
     switch mode.lowercased() {
     case "bus": return "bus.fill"
-    case "train": return "tram.fill.tunnel"
+    case "train": return "tram.tunnel.fill"
     case "subway": return "tram.fill"
     case "tram": return "tram"
     case "ferry": return "ferry.fill"
@@ -193,8 +183,7 @@ private func iconForMode(_ mode: String) -> String {
 extension Color {
     init(hex: String) {
         let clean = hex.trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
-        var int: UInt64 = 0
-        Scanner(string: clean).scanHexInt64(&int)
+        let int = UInt64(clean, radix: 16) ?? 0
         let r, g, b: UInt64
         switch clean.count {
         case 6:
@@ -213,9 +202,9 @@ extension Color {
 
     static func accentOrWhite(hex: String) -> Color {
         let clean = hex.trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
-        var int: UInt64 = 0
-        Scanner(string: clean).scanHexInt64(&int)
-        guard clean.count == 6 else { return Color(red: 0.38, green: 0.65, blue: 1.0) }
+        guard clean.count == 6, let int = UInt64(clean, radix: 16) else {
+            return Color(red: 0.38, green: 0.65, blue: 1.0)
+        }
         let r = Double((int >> 16) & 0xFF) / 255.0
         let g = Double((int >> 8) & 0xFF) / 255.0
         let b = Double(int & 0xFF) / 255.0

@@ -28,7 +28,8 @@ final class LiveActivityBridge: NSObject, KavTripActivityHandler {
 
     override init() {
         super.init()
-        kavLog("LiveActivityBridge initialized, areActivitiesEnabled=\(ActivityAuthorizationInfo().areActivitiesEnabled)")
+        let auth = ActivityAuthorizationInfo().areActivitiesEnabled
+        kavLog("LiveActivityBridge initialized, areActivitiesEnabled=\(auth), currentCount=\(Activity<KavTripAttributes>.activities.count)")
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(handleAppWillTerminate),
@@ -59,6 +60,7 @@ final class LiveActivityBridge: NSObject, KavTripActivityHandler {
             return
         }
 
+        let safeProgress = (progress.isNaN || progress.isInfinite) ? 0.0 : max(0.0, min(1.0, progress))
         let state = KavTripAttributes.ContentState(
             title: title,
             subtitle: subtitle,
@@ -66,14 +68,15 @@ final class LiveActivityBridge: NSObject, KavTripActivityHandler {
             tintColorHex: tintHex,
             modeName: modeName,
             arrivalTime: arrivalTime,
-            progress: max(0.0, min(1.0, progress)),
+            progress: safeProgress,
             dueText: dueText
         )
 
-        kavLog("update tripId=\(tripId), chip=\(chip), time=\(arrivalTime), title=\(title)")
+        let totalActivities = Activity<KavTripAttributes>.activities
+        kavLog("update: tripId=\(tripId), chip=\(chip), time=\(arrivalTime), title=\(title), activeCount=\(totalActivities.count)")
 
         // Adopt an already running activity from the system if available
-        let active = currentActivity ?? Activity<KavTripAttributes>.activities.first(where: { $0.attributes.tripId == tripId }) ?? Activity<KavTripAttributes>.activities.first
+        let active = currentActivity ?? totalActivities.first(where: { $0.attributes.tripId == tripId }) ?? totalActivities.first
 
         if let existing = active {
             currentActivity = existing
@@ -97,7 +100,7 @@ final class LiveActivityBridge: NSObject, KavTripActivityHandler {
                     activity = try Activity.request(attributes: attributes, contentState: state, pushType: nil)
                 }
                 currentActivity = activity
-                kavLog("Live Activity started successfully id=\(activity.id)")
+                kavLog("Live Activity started successfully id=\(activity.id), systemCount=\(Activity<KavTripAttributes>.activities.count)")
             } catch {
                 kavLog("ERROR: Live Activity request failed: \(error.localizedDescription)")
             }
