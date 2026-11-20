@@ -16,6 +16,7 @@ struct KavTripActivityWidget: Widget {
         ActivityConfiguration(for: KavTripAttributes.self) { context in
             // Lock Screen / Notification Center banner
             KavTripBannerView(state: context.state)
+                .activityBackgroundTint(Color.black.opacity(0.85))
         } dynamicIsland: { context in
             DynamicIsland {
                 // Expanded Leading: Transit mode icon + route chip
@@ -25,13 +26,15 @@ struct KavTripActivityWidget: Widget {
                             .font(.system(size: 16, weight: .semibold))
                             .foregroundColor(Color(hex: context.state.tintColorHex))
 
-                        Text(context.state.chip)
-                            .font(.system(size: 15, weight: .bold, design: .rounded))
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(Color(hex: context.state.tintColorHex).opacity(0.2))
-                            .foregroundColor(Color(hex: context.state.tintColorHex))
-                            .clipShape(Capsule())
+                        if !context.state.chip.isEmpty {
+                            Text(context.state.chip)
+                                .font(.system(size: 14, weight: .bold, design: .rounded))
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(Color(hex: context.state.tintColorHex).opacity(0.2))
+                                .foregroundColor(Color(hex: context.state.tintColorHex))
+                                .clipShape(Capsule())
+                        }
                     }
                     .padding(.leading, 4)
                 }
@@ -80,25 +83,34 @@ struct KavTripActivityWidget: Widget {
                 }
             } compactLeading: {
                 // Compact Leading (Left capsule edge): Transit icon + line chip
-                HStack(spacing: 4) {
+                HStack(spacing: 3) {
                     Image(systemName: iconForMode(context.state.modeName))
                         .font(.system(size: 12, weight: .bold))
                         .foregroundColor(Color(hex: context.state.tintColorHex))
-                    Text(context.state.chip)
-                        .font(.system(size: 12, weight: .bold, design: .rounded))
-                        .foregroundColor(.primary)
+                    if !context.state.chip.isEmpty {
+                        Text(context.state.chip)
+                            .font(.system(size: 11, weight: .bold, design: .rounded))
+                            .foregroundColor(.primary)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.7)
+                    }
                 }
+                .padding(.leading, 2)
             } compactTrailing: {
                 // Compact Trailing (Right capsule edge): ETA / Arrival time
                 Text(context.state.arrivalTime)
-                    .font(.system(size: 12, weight: .semibold, design: .rounded))
+                    .font(.system(size: 12, weight: .bold, design: .rounded))
                     .foregroundColor(Color(hex: context.state.tintColorHex))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+                    .padding(.trailing, 2)
             } minimal: {
                 // Minimal (Shared Island bubble): Transit icon in route tint
                 Image(systemName: iconForMode(context.state.modeName))
                     .font(.system(size: 11, weight: .bold))
                     .foregroundColor(Color(hex: context.state.tintColorHex))
             }
+            .widgetURL(URL(string: "moovit://trip"))
             .keylineTint(Color(hex: context.state.tintColorHex))
         }
     }
@@ -117,13 +129,15 @@ struct KavTripBannerView: View {
                     Image(systemName: iconForMode(state.modeName))
                         .font(.system(size: 15, weight: .semibold))
                         .foregroundColor(Color(hex: state.tintColorHex))
-                    Text(state.chip)
-                        .font(.system(size: 14, weight: .bold, design: .rounded))
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 3)
-                        .background(Color(hex: state.tintColorHex).opacity(0.2))
-                        .foregroundColor(Color(hex: state.tintColorHex))
-                        .clipShape(Capsule())
+                    if !state.chip.isEmpty {
+                        Text(state.chip)
+                            .font(.system(size: 14, weight: .bold, design: .rounded))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3)
+                            .background(Color(hex: state.tintColorHex).opacity(0.2))
+                            .foregroundColor(Color(hex: state.tintColorHex))
+                            .clipShape(Capsule())
+                    }
                 }
 
                 Spacer()
@@ -159,7 +173,6 @@ struct KavTripBannerView: View {
                 .tint(Color(hex: state.tintColorHex))
         }
         .padding(14)
-        .background(Color.black.opacity(0.92))
     }
 }
 

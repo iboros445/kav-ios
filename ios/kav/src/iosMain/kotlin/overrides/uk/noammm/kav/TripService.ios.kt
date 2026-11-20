@@ -6,6 +6,7 @@
 package uk.noammm.kav
 
 import android.content.Context
+import android.util.Log
 import uk.noammm.kav.data.JourneyFile
 import uk.noammm.kav.platform.TripActivityBridge
 import uk.noammm.kav.ui.Fix
@@ -15,6 +16,7 @@ class TripService private constructor() {
     companion object {
         fun show(ctx: Context) {
             val (journey, step) = TripBridge.journey?.invoke() ?: JourneyFile.load(ctx) ?: run {
+                Log.i("Kav", "TripService: show called with no active journey")
                 TripActivityBridge.handler?.end()
                 return
             }
@@ -22,6 +24,7 @@ class TripService private constructor() {
             val now = System.currentTimeMillis() / 1000
             val notice = tripNotice(journey, step, fix, now, Prefs.accent(ctx))
             if (notice == null) {
+                Log.i("Kav", "TripService: tripNotice is null, ending activity")
                 TripActivityBridge.handler?.end()
                 return
             }
@@ -39,6 +42,10 @@ class TripService private constructor() {
             val tintHex = "#" + (notice.tint and 0xFFFFFF).toString(16).padStart(6, '0')
             val mode = notice.glyph.mode?.name?.lowercase() ?: "walk"
             val progress = if (notice.max > 0) notice.progress.toDouble() / notice.max.toDouble() else 0.0
+            // Keep arrival as clean time string (e.g. "15:10") so it fits compact Dynamic Island without clipping
+            val cleanArrival = notice.arrive.replace(Regex("^(Arrive |הגעה ב[- ]?)", RegexOption.IGNORE_CASE), "").trim()
+
+            Log.i("Kav", "TripService: show trip=$tripId title='${notice.title}' chip='$chip' time='$cleanArrival' mode=$mode")
 
             TripActivityBridge.handler?.update(
                 tripId = tripId,
@@ -47,7 +54,7 @@ class TripService private constructor() {
                 chip = chip,
                 tintHex = tintHex,
                 modeName = mode,
-                arrivalTime = notice.arrive,
+                arrivalTime = cleanArrival,
                 progress = progress,
                 dueText = notice.dueText,
             )

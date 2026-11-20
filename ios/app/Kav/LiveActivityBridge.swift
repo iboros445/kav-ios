@@ -18,7 +18,10 @@ final class LiveActivityBridge: NSObject, KavTripActivityHandler {
         progress: Double,
         dueText: String
     ) {
-        guard ActivityAuthorizationInfo().areActivitiesEnabled else { return }
+        guard ActivityAuthorizationInfo().areActivitiesEnabled else {
+            NSLog("Kav: Live Activities are disabled in system settings")
+            return
+        }
 
         let state = KavTripAttributes.ContentState(
             title: title,
@@ -30,6 +33,8 @@ final class LiveActivityBridge: NSObject, KavTripActivityHandler {
             progress: max(0.0, min(1.0, progress)),
             dueText: dueText
         )
+
+        NSLog("Kav: LiveActivity update tripId=\(tripId), chip=\(chip), time=\(arrivalTime)")
 
         if let activity = currentActivity, activity.attributes.tripId == tripId {
             Task {
@@ -48,19 +53,23 @@ final class LiveActivityBridge: NSObject, KavTripActivityHandler {
 
             do {
                 let attributes = KavTripAttributes(tripId: tripId)
+                let activity: Activity<KavTripAttributes>
                 if #available(iOS 16.2, *) {
                     let content = ActivityContent(state: state, staleDate: nil)
-                    currentActivity = try Activity.request(attributes: attributes, content: content, pushType: nil)
+                    activity = try Activity.request(attributes: attributes, content: content, pushType: nil)
                 } else {
-                    currentActivity = try Activity.request(attributes: attributes, contentState: state, pushType: nil)
+                    activity = try Activity.request(attributes: attributes, contentState: state, pushType: nil)
                 }
+                currentActivity = activity
+                NSLog("Kav: Live Activity started successfully id=\(activity.id)")
             } catch {
-                NSLog("Kav: Live Activity request failed: \(error)")
+                NSLog("Kav: Live Activity request failed: \(error.localizedDescription)")
             }
         }
     }
 
     func end() {
+        NSLog("Kav: ending Live Activities")
         let activities = Activity<KavTripAttributes>.activities
         for activity in activities {
             Task {
