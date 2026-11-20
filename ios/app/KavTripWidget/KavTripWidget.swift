@@ -24,15 +24,15 @@ struct KavTripActivityWidget: Widget {
                     HStack(spacing: 6) {
                         Image(systemName: iconForMode(context.state.modeName))
                             .font(.system(size: 16, weight: .semibold))
-                            .foregroundColor(Color(hex: context.state.tintColorHex))
+                            .foregroundColor(Color.accentOrWhite(hex: context.state.tintColorHex))
 
                         if !context.state.chip.isEmpty {
                             Text(context.state.chip)
                                 .font(.system(size: 14, weight: .bold, design: .rounded))
                                 .padding(.horizontal, 6)
                                 .padding(.vertical, 2)
-                                .background(Color(hex: context.state.tintColorHex).opacity(0.2))
-                                .foregroundColor(Color(hex: context.state.tintColorHex))
+                                .background(Color.accentOrWhite(hex: context.state.tintColorHex).opacity(0.25))
+                                .foregroundColor(.white)
                                 .clipShape(Capsule())
                         }
                     }
@@ -46,9 +46,9 @@ struct KavTripActivityWidget: Widget {
                             Image(systemName: "flag.checkered")
                                 .font(.system(size: 12))
                                 .foregroundColor(.secondary)
-                            Text(context.state.arrivalTime)
+                            Text(context.state.arrivalTime.isEmpty ? "--:--" : context.state.arrivalTime)
                                 .font(.system(size: 15, weight: .bold, design: .rounded))
-                                .foregroundColor(.primary)
+                                .foregroundColor(.white)
                         }
                         if !context.state.dueText.isEmpty {
                             Text(context.state.dueText)
@@ -64,7 +64,7 @@ struct KavTripActivityWidget: Widget {
                     VStack(alignment: .leading, spacing: 6) {
                         Text(context.state.title)
                             .font(.system(size: 14, weight: .semibold))
-                            .foregroundColor(.primary)
+                            .foregroundColor(.white)
                             .lineLimit(1)
 
                         if !context.state.subtitle.isEmpty {
@@ -75,7 +75,7 @@ struct KavTripActivityWidget: Widget {
                         }
 
                         ProgressView(value: max(0.0, min(1.0, context.state.progress)))
-                            .tint(Color(hex: context.state.tintColorHex))
+                            .tint(Color.accentOrWhite(hex: context.state.tintColorHex))
                             .padding(.top, 2)
                     }
                     .padding(.horizontal, 4)
@@ -85,12 +85,12 @@ struct KavTripActivityWidget: Widget {
                 // Compact Leading (Left capsule edge): Transit icon + line chip
                 HStack(spacing: 3) {
                     Image(systemName: iconForMode(context.state.modeName))
-                        .font(.system(size: 12, weight: .bold))
-                        .foregroundColor(Color(hex: context.state.tintColorHex))
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundColor(Color.accentOrWhite(hex: context.state.tintColorHex))
                     if !context.state.chip.isEmpty {
                         Text(context.state.chip)
                             .font(.system(size: 11, weight: .bold, design: .rounded))
-                            .foregroundColor(.primary)
+                            .foregroundColor(.white)
                             .lineLimit(1)
                             .minimumScaleFactor(0.7)
                     }
@@ -98,20 +98,22 @@ struct KavTripActivityWidget: Widget {
                 .padding(.leading, 2)
             } compactTrailing: {
                 // Compact Trailing (Right capsule edge): ETA / Arrival time
-                Text(context.state.arrivalTime)
-                    .font(.system(size: 12, weight: .bold, design: .rounded))
-                    .foregroundColor(Color(hex: context.state.tintColorHex))
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.7)
-                    .padding(.trailing, 2)
+                HStack(spacing: 2) {
+                    Text(context.state.arrivalTime.isEmpty ? "--:--" : context.state.arrivalTime)
+                        .font(.system(size: 11, weight: .bold, design: .rounded))
+                        .foregroundColor(.white)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.7)
+                }
+                .padding(.trailing, 2)
             } minimal: {
                 // Minimal (Shared Island bubble): Transit icon in route tint
                 Image(systemName: iconForMode(context.state.modeName))
                     .font(.system(size: 11, weight: .bold))
-                    .foregroundColor(Color(hex: context.state.tintColorHex))
+                    .foregroundColor(Color.accentOrWhite(hex: context.state.tintColorHex))
             }
             .widgetURL(URL(string: "moovit://trip"))
-            .keylineTint(Color(hex: context.state.tintColorHex))
+            .keylineTint(Color.accentOrWhite(hex: context.state.tintColorHex))
         }
     }
 }
@@ -128,14 +130,14 @@ struct KavTripBannerView: View {
                 HStack(spacing: 6) {
                     Image(systemName: iconForMode(state.modeName))
                         .font(.system(size: 15, weight: .semibold))
-                        .foregroundColor(Color(hex: state.tintColorHex))
+                        .foregroundColor(Color.accentOrWhite(hex: state.tintColorHex))
                     if !state.chip.isEmpty {
                         Text(state.chip)
                             .font(.system(size: 14, weight: .bold, design: .rounded))
                             .padding(.horizontal, 8)
                             .padding(.vertical, 3)
-                            .background(Color(hex: state.tintColorHex).opacity(0.2))
-                            .foregroundColor(Color(hex: state.tintColorHex))
+                            .background(Color.accentOrWhite(hex: state.tintColorHex).opacity(0.25))
+                            .foregroundColor(.white)
                             .clipShape(Capsule())
                     }
                 }
@@ -147,9 +149,9 @@ struct KavTripBannerView: View {
                     Image(systemName: "flag.checkered")
                         .font(.system(size: 12))
                         .foregroundColor(.secondary)
-                    Text(state.arrivalTime)
+                    Text(state.arrivalTime.isEmpty ? "--:--" : state.arrivalTime)
                         .font(.system(size: 15, weight: .bold, design: .rounded))
-                        .foregroundColor(.primary)
+                        .foregroundColor(.white)
                 }
             }
 
@@ -157,7 +159,7 @@ struct KavTripBannerView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(state.title)
                     .font(.system(size: 14, weight: .semibold))
-                    .foregroundColor(.primary)
+                    .foregroundColor(.white)
                     .lineLimit(1)
                 if !state.subtitle.isEmpty {
                     Text(state.subtitle)
@@ -170,7 +172,7 @@ struct KavTripBannerView: View {
 
             // Progress Bar
             ProgressView(value: max(0.0, min(1.0, state.progress)))
-                .tint(Color(hex: state.tintColorHex))
+                .tint(Color.accentOrWhite(hex: state.tintColorHex))
         }
         .padding(14)
     }
@@ -198,7 +200,7 @@ extension Color {
         case 6:
             (r, g, b) = ((int >> 16) & 0xFF, (int >> 8) & 0xFF, int & 0xFF)
         default:
-            (r, g, b) = (0, 122, 255)
+            (r, g, b) = (90, 160, 255)
         }
         self.init(
             .sRGB,
@@ -207,5 +209,20 @@ extension Color {
             blue: Double(b) / 255.0,
             opacity: 1.0
         )
+    }
+
+    static func accentOrWhite(hex: String) -> Color {
+        let clean = hex.trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
+        var int: UInt64 = 0
+        Scanner(string: clean).scanHexInt64(&int)
+        guard clean.count == 6 else { return Color(red: 0.38, green: 0.65, blue: 1.0) }
+        let r = Double((int >> 16) & 0xFF) / 255.0
+        let g = Double((int >> 8) & 0xFF) / 255.0
+        let b = Double(int & 0xFF) / 255.0
+        let luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b
+        if luminance < 0.25 {
+            return Color(red: 0.38, green: 0.65, blue: 1.0)
+        }
+        return Color(.sRGB, red: r, green: g, blue: b, opacity: 1.0)
     }
 }
